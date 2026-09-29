@@ -101,6 +101,12 @@ class Qwen27Engine:
         else:
             full = load(model_dir, tiled=True)
             self.w = full
+        from tensorfold.cuda.rocm import HIP
+
+        if HIP:                                     # one decode kernel a run: drafted and draft-off requests share it
+            from .qgemv import configure
+
+            configure(draft_dir is not None)
         self.draft = None
         if draft_dir is not None and (rank == 0 or (tp == 2 and tp_draft)):
             from .dflash2 import DFlash2
