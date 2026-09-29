@@ -11,7 +11,9 @@ from .weights import QLinear, Weights
 
 
 def tile(q: QLinear) -> QLinear:
-    if q.layout == "tiled" or not q.fast:
+    from tensorfold.cuda.rocm import HIP
+
+    if q.layout == "tiled" or not q.fast or HIP:     # ROCm: the stored layout and the Triton lane matmul
         return q
     p = shared.pack(q.weight, q.scales, q.biases, 64)
     return QLinear(p.weight, p.scales, p.biases, layout="tiled", rows=q.n)

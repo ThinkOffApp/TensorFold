@@ -212,6 +212,10 @@ class Weights:
 
     @cached_property
     def fast_prefill(self) -> bool:
+        from tensorfold.cuda.rocm import HIP
+
+        if HIP:                                      # FP8 prompt rows need the sm_90 kernels; ROCm keeps them in bf16
+            return False
         if self.quant == "exl3":                     # an EXL3 pack's prompt glue stays in bf16
             return False
         if self.quant == "nvfp4":                    # NVFP4, FP8 and the gates' copies all take FP8 prompt rows

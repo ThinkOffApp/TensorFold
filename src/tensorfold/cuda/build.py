@@ -17,6 +17,10 @@ def arch_flags() -> list[str]:
 
     import torch
 
+    from .rocm import HIP, offload_arch
+
+    if HIP:                                         # hipcc: one AMD target; the portable paths avoid clusters and FP8 MMA
+        return [f"--offload-arch={offload_arch()}"]
     major, minor = torch.cuda.get_device_capability()
     if (major, minor) < MIN_CAPABILITY:
         raise RuntimeError(f"TensorFold's CUDA kernels need compute capability {MIN_CAPABILITY[0]}.{MIN_CAPABILITY[1]} "
