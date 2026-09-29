@@ -232,3 +232,4 @@ def decode_matmul(x: torch.Tensor, weight: torch.Tensor, scales: torch.Tensor, b
 
 
 __all__ = ["configure", "decode_matmul", "gemm16", "gemv", "group_sums", "kernel", "rows_per_program", "split_k"]
+
