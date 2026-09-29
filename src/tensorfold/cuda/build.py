@@ -32,9 +32,14 @@ def arch_flags() -> list[str]:
 def load(name: str, sources: str | list[str], **kwargs: Any) -> Any:
     """torch's JIT ``load`` for this GPU only (NVIDIA's containers list every architecture back to sm_80), with a line when it compiles or waits on a lock."""
 
+    from .rocm import HIP, hip_flags, use_pip_sdk
+
+    if HIP:
+        use_pip_sdk()
     from torch.utils import cpp_extension
 
-    kwargs["extra_cuda_cflags"] = [*kwargs.get("extra_cuda_cflags", []), *arch_flags()]
+    flags = kwargs.get("extra_cuda_cflags", [])
+    kwargs["extra_cuda_cflags"] = [*(hip_flags(flags) if HIP else flags), *arch_flags()]
     held = _announce(cpp_extension, name, sources, kwargs.get("build_directory"))
     timer = None
     if held is not None:
