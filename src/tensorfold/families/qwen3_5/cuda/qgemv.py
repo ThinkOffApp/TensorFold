@@ -104,13 +104,24 @@ GI = 8
 WARPS = 1
 
 
+def group_step(k: int) -> int:
+    """Groups a step: the swept 8 where K allows (the 27B's K is 5120, 6144 or 17408), else the largest that divides."""
+
+    kg = k // 64
+    for gi in (GI, 4, 2, 1):
+        if kg % gi == 0:
+            return gi
+    return 1
+
+
 def split_k(n: int, k: int) -> int:
     """K slices from the shape alone (never the row count): enough programs to fill the GPU for narrow outputs."""
 
     kg = k // 64
+    gi = group_step(k)
     tiles = -(-n // BN)
     sk = 1
-    while sk < 8 and tiles * sk < 512 and kg % (sk * 2 * GI) == 0:
+    while sk < 8 and tiles * sk < 512 and kg % (sk * 2 * gi) == 0:
         sk *= 2
     return sk
 
@@ -129,18 +140,19 @@ def gemv(x: torch.Tensor, weight: torch.Tensor, scales: torch.Tensor, biases: to
         raise ValueError("gemv: x must be a 2-D bf16 tensor")
     m, k = x.shape
     n = weight.shape[0]
-    if weight.shape[1] * 8 != k or k % (64 * GI):
+    if weight.shape[1] * 8 != k or k % 64:
         raise ValueError(f"gemv: weight {tuple(weight.shape)} does not match K={k}")
+    gi = group_step(k)
     x = x.contiguous()
     sk = int(sk) if sk else split_k(n, k)
-    if (k // 64) % (sk * GI):
-        raise ValueError(f"gemv: {sk} K slices do not divide {k // 64} groups in steps of {GI}")
+    if (k // 64) % (sk * gi):
+        raise ValueError(f"gemv: {sk} K slices do not divide {k // 64} groups in steps of {gi}")
     xs = group_sums(x) if xs is None else xs
     out = torch.empty((m, n), dtype=torch.bfloat16, device=x.device)
     part = out if sk == 1 else torch.empty((sk, m, n), dtype=torch.float32, device=x.device)
     r = rows_per_program(m) if r is None else int(r)
     _gemv[(triton.cdiv(m, r), triton.cdiv(n, BN), sk)](x, xs, weight, scales, biases, out, part, m, N=n, K=k, SK=sk,
-                                                       BN=BN, GI=GI, R=r, num_warps=WARPS)
+                                                       BN=BN, GI=gi, R=r, num_warps=WARPS)
     if sk > 1:
         total = m * n
         _reduce[(triton.cdiv(total, 1024),)](part, out, total, SK=sk, BLOCK=1024, num_warps=4)
@@ -226,10 +238,11 @@ GEMM16 = dict(bn=16, gi=2, warps=1)    # swept on gfx1151 (M=1 569 us, M=16 625 
 def decode_matmul(x: torch.Tensor, weight: torch.Tensor, scales: torch.Tensor, biases: torch.Tensor,
                   sk: int | None = None, xs: torch.Tensor | None = None) -> torch.Tensor:
     if kernel() == "gemm16":
-        n, k = weight.shape[0], x.shape[1]
-        return gemm16(x, weight, scales, biases, sk=sk or 1, xs=xs, **GEMM16)
+        k = x.shape[1]
+        cfg = dict(GEMM16, gi=GEMM16["gi"] if (k // 64) % GEMM16["gi"] == 0 else 1)
+        return gemm16(x, weight, scales, biases, sk=sk or 1, xs=xs, **cfg)
     return gemv(x, weight, scales, biases, sk=sk, xs=xs)
 
 
-__all__ = ["configure", "decode_matmul", "gemm16", "gemv", "group_sums", "kernel", "rows_per_program", "split_k"]
+__all__ = ["configure", "decode_matmul", "gemm16", "gemv", "group_sums", "kernel", "group_step", "rows_per_program", "split_k"]
 

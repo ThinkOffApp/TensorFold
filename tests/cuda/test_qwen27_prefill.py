@@ -137,6 +137,12 @@ def test_a_cache_limit_changes_no_bits(length, limit):
     assert max(kv[0].shape[0] for kv in replied[1].kv if kv is not None) <= limit
 
 
+SM90 = pytest.mark.skipif(bool(getattr(torch.version, "hip", None)),
+                          reason="the tiled and FP8 prompt kernels need sm_90 (thread-block clusters, FP8 MMA); "
+                                 "ROCm prompts use the lane matmul, covered by the whole-model chunking tests")
+
+
+@SM90
 def test_prefill_matmul_rows_do_not_depend_on_chunking():
     gen = torch.Generator(device="cuda").manual_seed(3)
     n, k = 1000, 1024
@@ -178,6 +184,7 @@ def test_prefill_attention_rows_do_not_depend_on_chunking(heads, kv_heads, dim):
     assert ((whole.float() - ref).norm() / ref.norm()).item() < 1e-2
 
 
+@SM90
 @pytest.mark.parametrize("gs", [64, 32])
 def test_fp8_prefill_matmul_rows_do_not_depend_on_chunking(gs):
     gen = torch.Generator(device="cuda").manual_seed(8)
