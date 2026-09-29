@@ -30,6 +30,8 @@ def untile(q: QLinear) -> QLinear:
 def rows(q: QLinear, a: int, b: int) -> QLinear:
     """Rows [a, b) of a tiled weight: a view when they are whole 128-row blocks from a tile edge, else a small copy."""
 
+    if q.layout == "mlx":                            # ROCm keeps the stored layout: rows are plain views
+        return QLinear(q.weight[a:b], q.scales[a:b], q.biases[a:b], gs=q.gs, bits=q.bits)
     if a % 64 == 0 and (b - a) % 128 == 0:
         return QLinear(q.weight[a // 64:b // 64], q.scales[:, a:b], q.biases[:, a:b], layout="tiled", rows=b - a)
     t0, t1 = a // 64, -(-b // 64)
@@ -43,6 +45,12 @@ def rows(q: QLinear, a: int, b: int) -> QLinear:
 def matmul_rows(x: torch.Tensor, parts: list[QLinear]) -> torch.Tensor:
     """``x`` against row blocks of one weight, with the bits of the stacked weight's matmul."""
 
+    if all(p.layout == "mlx" and p.fast for p in parts):     # ROCm: the lane matmul with the stacked shape's K split
+        from .qmm import group_sums, split_k
+
+        sk = split_k(sum(p.n for p in parts), parts[0].k)
+        xs = group_sums(x)
+        return torch.cat([lane_matmul(x, p.weight, p.scales, p.biases, xs=xs, sk=sk) for p in parts], dim=1)
     sk = shared.split_k(sum(p.n for p in parts), parts[0].k, parts[0].gs)
     xs = shared.group_sums(x, parts[0].gs)
     return torch.cat([shared.matmul(x, p, xs, sk=sk) for p in parts], dim=1)
