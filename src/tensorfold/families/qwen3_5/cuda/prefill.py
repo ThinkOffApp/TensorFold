@@ -29,6 +29,12 @@ def _mm(x, w: QLinear, f32: bool = False) -> torch.Tensor:
         return w.prefill(x)                               # an EXL3 pack's projection
     if isinstance(x, tuple):
         return shared.prefill_matmul8(x, tile(w), f32=f32)
+    from tensorfold.cuda.rocm import HIP
+
+    if HIP and not f32 and w.fast and w.layout == "mlx":   # ROCm prompts: the batched Triton lane matmul
+        from .qmm import lane_matmul
+
+        return lane_matmul(x, w.weight, w.scales, w.biases)
     packed = tile(w)                                      # an affine format past the FP8 four-bit path
     return matmul_partial(x, packed) if f32 else matmul(x, packed)
 

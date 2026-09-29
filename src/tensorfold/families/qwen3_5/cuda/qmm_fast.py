@@ -45,12 +45,12 @@ def rows(q: QLinear, a: int, b: int) -> QLinear:
 def matmul_rows(x: torch.Tensor, parts: list[QLinear]) -> torch.Tensor:
     """``x`` against row blocks of one weight, with the bits of the stacked weight's matmul."""
 
-    if all(p.layout == "mlx" and p.fast for p in parts):     # ROCm: the lane matmul with the stacked shape's K split
-        from .qmm import group_sums, split_k
+    if all(p.layout == "mlx" and p.fast for p in parts):     # ROCm: the decode kernel with the stacked shape's K split
+        from .qgemv import gemv, group_sums, split_k
 
         sk = split_k(sum(p.n for p in parts), parts[0].k)
         xs = group_sums(x)
-        return torch.cat([lane_matmul(x, p.weight, p.scales, p.biases, xs=xs, sk=sk) for p in parts], dim=1)
+        return torch.cat([gemv(x, p.weight, p.scales, p.biases, sk=sk, xs=xs) for p in parts], dim=1)
     sk = shared.split_k(sum(p.n for p in parts), parts[0].k, parts[0].gs)
     xs = shared.group_sums(x, parts[0].gs)
     return torch.cat([shared.matmul(x, p, xs, sk=sk) for p in parts], dim=1)
@@ -65,6 +65,12 @@ def matmul(x: torch.Tensor, q: QLinear, xs: torch.Tensor | None = None) -> torch
         return affine_matmul(x, q)
     if q.layout == "tiled":
         return shared.matmul(x, q, xs)
+    from tensorfold.cuda.rocm import HIP
+
+    if HIP:                                          # decode and verify rows: the row-invariant 4-bit decode kernel
+        from .qgemv import gemv
+
+        return gemv(x, q.weight, q.scales, q.biases)
     return lane_matmul(x, q.weight, q.scales, q.biases, xs=xs)
 
 
