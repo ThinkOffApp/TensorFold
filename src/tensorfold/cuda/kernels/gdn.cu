@@ -5,13 +5,25 @@
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 
+// ROCm builds (hipified): 64-bit lane masks, HIP's bf16 conversion (round to nearest even) and a kernel
+// pointer cast for the attribute call; on CUDA each macro is exactly the original spelling.
+#if defined(__HIP_PLATFORM_AMD__) || defined(USE_ROCM)
+#define TF_FULL_MASK 0xffffffffffffffffull
+#define TF_FLOAT2BF16(x) __float2bfloat16(x)
+#define TF_KERNEL_PTR(k) reinterpret_cast<const void*>(k)
+#else
+#define TF_FULL_MASK 0xffffffffu
+#define TF_FLOAT2BF16(x) __float2bfloat16_rn(x)
+#define TF_KERNEL_PTR(k) (k)
+#endif
+
 namespace {
 
 constexpr int DK = 128;
 
 __device__ __forceinline__ float warp_sum(float x) {
 #pragma unroll
-    for (int m = 16; m; m >>= 1) x += __shfl_xor_sync(0xffffffffu, x, m);
+    for (int m = 16; m; m >>= 1) x += __shfl_xor_sync(TF_FULL_MASK, x, m);
     return x;
 }
 
@@ -67,7 +79,7 @@ __device__ __forceinline__ void store_y(__nv_bfloat16* y, const float (&out)[R],
         float o = out[0];
 #pragma unroll
         for (int r = 1; r < R; ++r) o = lane == r ? out[r] : o;
-        y[(static_cast<size_t>(node) * hv + head) * dv + value0 + lane] = __float2bfloat16_rn(o);
+        y[(static_cast<size_t>(node) * hv + head) * dv + value0 + lane] = TF_FLOAT2BF16(o);
     }
 }
 
@@ -171,8 +183,8 @@ __global__ void __launch_bounds__(32 * WARPS) tree_kernel(
         for (int m = 16; m; m >>= 1) {
 #pragma unroll
             for (int r = 0; r < R; ++r) {
-                mem[r] += __shfl_xor_sync(0xffffffffu, mem[r], m);
-                if (pend_node >= 0) pend[r] += __shfl_xor_sync(0xffffffffu, pend[r], m);
+                mem[r] += __shfl_xor_sync(TF_FULL_MASK, mem[r], m);
+                if (pend_node >= 0) pend[r] += __shfl_xor_sync(TF_FULL_MASK, pend[r], m);
             }
         }
         if (pend_node >= 0) store_y(y, pend, pend_node, head, value0, hv, dv, lane);
@@ -259,7 +271,7 @@ void launch_tree(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v, 
     const dim3 grid((dv + R * WARPS - 1) / (R * WARPS), hv, streams);
     const size_t shared = sizeof(float4) * WARPS * SLOTS * R * 32 + (CHAIN ? 0 : sizeof(int) * 3 * max_rows);
     auto kernel = tree_kernel<QK, SLOTS, R, WARPS, CHAIN>;
-    if (shared > 48 * 1024) cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shared);
+    if (shared > 48 * 1024) cudaFuncSetAttribute(TF_KERNEL_PTR(kernel), cudaFuncAttributeMaxDynamicSharedMemorySize, shared);
     kernel<<<grid, 32 * WARPS, shared, at::cuda::getCurrentCUDAStream()>>>(
         reinterpret_cast<const QK*>(q.data_ptr()), reinterpret_cast<const QK*>(k.data_ptr()),
         reinterpret_cast<const __nv_bfloat16*>(v.data_ptr()), g.data_ptr<float>(), beta.data_ptr<float>(),
