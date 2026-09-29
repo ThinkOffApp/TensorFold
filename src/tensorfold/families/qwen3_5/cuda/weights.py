@@ -220,6 +220,10 @@ class Weights:
     def fast_prefill(self) -> bool:
         """Whether every projection has an FP8 prompt kernel (run when prompts take FP8)."""
 
+        from tensorfold.cuda.rocm import HIP
+
+        if HIP:                                      # FP8 prompt rows need the sm_90 kernels; ROCm keeps them in bf16
+            return False
         if self.quant == "exl3" or getattr(self, "precision", "full") == "checkpoint":
             return False                             # EXL3 prompt glue stays bf16; checkpoint math has its own
         for layer in self.layers:
