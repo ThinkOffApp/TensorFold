@@ -10,8 +10,6 @@ llama.cpp's converter changed three things, and each is undone here without touc
 
 from __future__ import annotations
 
-import os
-import sys
 from pathlib import Path
 
 import torch
@@ -31,15 +29,9 @@ def gguf_file(model_dir: Path) -> Path | None:
 
 
 def _reader(path: Path):
-    try:
-        from gguf import GGUFReader
-    except ImportError:
-        extra = os.environ.get("TF_GGUF_PY")                  # llama.cpp's gguf-py directory
-        if not extra:
-            raise ImportError("reading GGUF needs the gguf package (pip install gguf) or TF_GGUF_PY=<llama.cpp>/gguf-py")
-        sys.path.insert(0, extra)
-        from gguf import GGUFReader
-    return GGUFReader(str(path))
+    from tensorfold.cuda.gguf import reader
+
+    return reader(path)
 
 
 def _grouped(tiled_heads: int, k_heads: int) -> torch.Tensor:
@@ -139,3 +131,15 @@ def load_gguf(model_dir: str | Path, device: str = "cuda") -> Weights:
     if left:
         raise ValueError(f"unused GGUF tensors: {left[:5]} ...")
     return w
+
+
+def weight_bytes(layers: int):
+    """The startup estimate's transform: packed bytes as stored, the head once more (in part) for the drafter's rows."""
+
+    def transform(name: str, info: dict) -> tuple[int, int]:
+        if name.startswith(f"model.layers.{layers}."):          # the MTP block is not read
+            return 0, 0
+        size = int(info["data_offsets"][1])
+        return (size * 7 // 5 if name == "output.weight" else size), 0
+
+    return transform
