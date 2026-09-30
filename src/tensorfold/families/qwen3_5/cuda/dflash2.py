@@ -21,7 +21,7 @@ from .glue import embedding, swiglu
 from .draft_attention import append, block_attention
 from .qmm import group_sums
 from .qmm_fast import matmul, matmul_group, matmul_rows, rows, tile, untile
-from .weights import Exl3, Plain, QLinear, Weights
+from .weights import Exl3, Gguf, Plain, QLinear, Weights
 
 
 @triton.jit
@@ -229,6 +229,10 @@ class DFlash2:
             if world != 1:
                 raise ValueError("a two-rank drafter needs the MLX checkpoint's 4-bit head")
             self.sub_parts = _sub_parts(target.head, spans)
+        elif isinstance(target.head, Gguf):
+            if world != 1:
+                raise ValueError("a two-rank drafter needs the MLX checkpoint's 4-bit head")
+            self.sub_head = target.head.rows(self.head_ids)       # whole packed rows: each row keeps its bits
         elif isinstance(target.head, Exl3):
             if world != 1:
                 raise ValueError("a two-rank drafter needs the MLX checkpoint's 4-bit head")

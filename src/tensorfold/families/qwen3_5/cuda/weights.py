@@ -110,6 +110,48 @@ class Exl3:
 
 
 @dataclass
+class Gguf:
+    """A GGUF K-quant/IQ projection on ``tensorfold.cuda.gguf``'s exact kernels (Gufo's): any row count, same row bits."""
+
+    weight: torch.Tensor      # (N, row bytes) uint8, the packed blocks as the file stores them
+    qtype: int                # ggml type id
+    cols: int                 # K
+    in_perm: torch.Tensor | None = None   # input columns in the file's order (out_proj's tiled V heads)
+    layout: str = "gguf"
+
+    @property
+    def n(self) -> int:
+        return int(self.weight.shape[0])
+
+    @property
+    def k(self) -> int:
+        return self.cols
+
+    def nbytes(self) -> int:
+        return self.weight.numel()
+
+    def rows(self, index: torch.Tensor) -> "Gguf":
+        """The rows at ``index`` (whole packed rows, so the same bits per row)."""
+
+        return Gguf(self.weight.index_select(0, index).contiguous(), self.qtype, self.cols, self.in_perm)
+
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        from tensorfold.cuda import gguf
+
+        if self.in_perm is not None:
+            x = x.index_select(1, self.in_perm)
+        return gguf.linear(x, self.weight, self.qtype, self.n).to(torch.bfloat16)
+
+    prefill = __call__
+
+    def embed(self, ids: torch.Tensor) -> torch.Tensor:
+        from tensorfold.cuda import gguf
+
+        rows = self.weight.index_select(0, ids.reshape(-1).to(torch.int64)).contiguous()
+        return gguf.dequant(rows, self.qtype, rows.shape[0] * self.cols).view(rows.shape[0], self.cols)
+
+
+@dataclass
 class Config:
     hidden: int
     intermediate: int
@@ -213,7 +255,7 @@ class Weights:
     norm: torch.Tensor
     head: Any                                        # QLinear, Exl3, or an NVFP4 checkpoint's linear
     inv_freq: torch.Tensor | None = None             # (rope_dims/2,) fp32
-    quant: str = "mlx"                               # "exl3": an EXL3 pack (prompt glue then stays in bf16); "nvfp4"
+    quant: str = "mlx"                               # "exl3": an EXL3 pack (prompt glue then stays in bf16); "nvfp4"; "gguf"
     prompt_rows: int = 4096                          # a prompt chunk's rows, sized to the GPU: any count, the same bits
 
     @cached_property
@@ -224,8 +266,8 @@ class Weights:
 
         if HIP:                                      # FP8 prompt rows need the sm_90 kernels; ROCm keeps them in bf16
             return False
-        if self.quant == "exl3" or getattr(self, "precision", "full") == "checkpoint":
-            return False                             # EXL3 prompt glue stays bf16; checkpoint math has its own
+        if self.quant in ("exl3", "gguf") or getattr(self, "precision", "full") == "checkpoint":
+            return False                             # EXL3/GGUF prompt glue stays bf16; checkpoint math has its own
         for layer in self.layers:
             modules = [m for m in (layer.gate, layer.up, layer.down) if m is not None]    # a MoE layer's are None
             modules += [layer.gdn.qkv, layer.gdn.z, layer.gdn.b, layer.gdn.a, layer.gdn.out] if layer.gdn else []
@@ -275,9 +317,12 @@ def load(model_dir: str | Path, device: str = "cuda", *, tiled: bool = False, ml
     """MLX affine 4-bit (``tiled``: projections packed as read; ``mlp(prefix, get, qlinear, cfg)``: a layer's MLP fields), an EXL3 pack, or NVFP4."""
 
     from .exl3_load import load_exl3, quant_config
+    from .gguf_load import gguf_file, load_gguf
     from .nvfp4_load import load_nvfp4, quantized
 
     model_dir = Path(model_dir)
+    if gguf_file(model_dir) is not None:
+        return load_gguf(model_dir, device)
     if quant_config(model_dir) is not None:
         return load_exl3(model_dir, device)
     if quantized(model_dir):
