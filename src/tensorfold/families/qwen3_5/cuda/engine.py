@@ -35,8 +35,13 @@ class Qwen27Engine:
 
         from .exl3_load import admission, quant_config
 
+        from .gguf_load import gguf_file, weight_bytes
+
         exl3 = quant_config(Path(model_dir)) is not None
-        nvfp4 = not exl3 and is_quantized(Path(model_dir))
+        gguf = not exl3 and gguf_file(Path(model_dir)) is not None
+        nvfp4 = not exl3 and not gguf and is_quantized(Path(model_dir))
+        if gguf and tp != 1:
+            raise ValueError("GGUF files of Qwen3.8-27B run on one GPU: drop --tp 2")
         if (exl3 or nvfp4) and tp != 1:
             raise ValueError(f"{'EXL3 packs' if exl3 else 'NVFP4 checkpoints'} of Qwen3.8-27B run on one GPU: drop "
                              "--tp 2, or serve the MLX checkpoint (Vontra/Qwen3.8-27B-MLX-4bit) on two")
@@ -89,7 +94,11 @@ class Qwen27Engine:
                     else (lambda text: gdn_geometry(text, tp, max_rows, rows=max_rows, prompt=chunk, evicts=tp == 1)))
         # an affine checkpoint's packed words at their stored precision; an EXL3 pack's by its own format
         tensor_bytes = weight_transform(model_dir, one_gpu=tp == 1)
-        if exl3:
+        if gguf:
+            from .weights import Config
+
+            tensor_bytes = weight_bytes(Config.read(model_dir).layers)
+        elif exl3:
             geometry, tensor_bytes = admission(geometry)
         elif nvfp4:
             from .nvfp4_load import admission as nvfp4_admission

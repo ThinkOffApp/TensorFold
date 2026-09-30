@@ -32,9 +32,11 @@ QUANT = {Q8_0, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL, IQ3_S, IQ4_XS}
 def _library() -> Path:
     """Compile the vendored kernels once per source hash (Gufo's RelWithDebInfo -O2 and per-file flags), then link."""
 
-    from tensorfold.cuda.rocm import offload_arch
+    from tensorfold.cuda.rocm import offload_arch, use_pip_sdk
 
-    digest = hashlib.sha256()
+    use_pip_sdk()                                              # torch's own ROCm SDK: one HIP runtime in the process
+    hipcc = str(Path(os.environ["ROCM_PATH"]) / "bin" / "hipcc") if os.environ.get("ROCM_PATH") else "hipcc"
+    digest = hashlib.sha256(hipcc.encode())
     for path in sorted(p for p in VENDOR.rglob("*") if p.is_file()) + [HERE / "capi.hip"]:
         digest.update(path.read_bytes())
     for _, flags in SOURCES:
@@ -46,7 +48,7 @@ def _library() -> Path:
         return lib
     out.mkdir(parents=True, exist_ok=True)
     print(f"building GGUF kernels ({arch}) into {out}", flush=True)
-    base = ["hipcc", "-O2", "-std=c++20", "-fPIC", "-DNDEBUG", f"-I{VENDOR}"]
+    base = [hipcc, "-O2", "-std=c++20", "-fPIC", "-DNDEBUG", f"-I{VENDOR}"]
     objects = []
     for src, flags in SOURCES:
         obj = out / (src.name + ".o")
@@ -54,18 +56,18 @@ def _library() -> Path:
         subprocess.run([*base, *flags, "-DENGINE_ENABLE_HIP", "-c", *lang, str(src), "-o", str(obj)], check=True)
         objects.append(str(obj))
     tmp = out / "libtfgguf.so.tmp"
-    subprocess.run(["hipcc", "-shared", "-fPIC", f"--offload-arch={arch}", "-o", str(tmp), *objects], check=True)
+    subprocess.run([hipcc, "-shared", "-fPIC", f"--offload-arch={arch}", "-o", str(tmp), *objects], check=True)
     tmp.rename(lib)
     return lib
 
 
 @lru_cache(maxsize=1)
 def _ext():
-    from torch.utils import cpp_extension
+    from tensorfold.cuda.build import load
 
-    lib = _library()
-    return cpp_extension.load(name="tensorfold_gguf_v1", sources=[str(HERE / "binding.cpp")],
-                              extra_ldflags=[f"-L{lib.parent}", "-ltfgguf", f"-Wl,-rpath,{lib.parent}"], verbose=False)
+    lib = _library()                                           # before torch's cpp_extension reads ROCM_HOME
+    return load(name="tensorfold_gguf_v1", sources=[str(HERE / "binding.cpp")],
+                extra_ldflags=[f"-L{lib.parent}", "-ltfgguf", f"-Wl,-rpath,{lib.parent}"], verbose=False)
 
 
 def linear(x: torch.Tensor, w: torch.Tensor, qtype: int, n: int) -> torch.Tensor:
@@ -106,3 +108,33 @@ def rows_bf16(rows: torch.Tensor, qtype: int, k: int) -> torch.Tensor:
         return dequant(rows.contiguous(), qtype, rows.shape[0] * k).view(rows.shape[0], k)
     eye = torch.eye(k, device=rows.device, dtype=torch.float32)          # exact: each output is one weight times 1.0
     return linear(eye, rows.contiguous(), qtype, rows.shape[0]).T.contiguous().to(torch.bfloat16)
+
+
+def reader(path):
+    """gguf-py's reader: the installed ``gguf`` package, else llama.cpp's gguf-py directory named by TF_GGUF_PY."""
+
+    try:
+        from gguf import GGUFReader
+    except ImportError:
+        import sys
+
+        extra = os.environ.get("TF_GGUF_PY")
+        if not extra:
+            raise ImportError("reading GGUF needs the gguf package (pip install gguf) or TF_GGUF_PY=<llama.cpp>/gguf-py")
+        sys.path.insert(0, extra)
+        from gguf import GGUFReader
+    return GGUFReader(str(path))
+
+
+def headers(path) -> dict:
+    """Safetensors-style headers for the startup estimate: each tensor as its packed bytes, blocks named as layers."""
+
+    out = {}
+    for t in reader(path).tensors:
+        name = t.name
+        if name.startswith("blk."):
+            _, index, rest = name.split(".", 2)
+            name = f"model.layers.{index}.{rest}"
+        size = int(t.n_bytes)
+        out[name] = {"dtype": "U8", "shape": [size], "data_offsets": [0, size], "gguf_type": int(t.tensor_type)}
+    return out
