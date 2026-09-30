@@ -290,7 +290,11 @@ def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: 
                          "--tp 2), or pass --no-drafts for the serial reference")
     draft = Path(drafter) if drafter and not no_drafts else None
     streams = max(1, int(options.get("parallel") or 1))
-    return Qwen27Engine(Path(model_dir), draft, max_rows=12, tp=tp, rank=rank, master=master, port=master_port,
+    from .cuda.gguf_load import gguf_file
+
+    # GGUF verify rounds: Gufo's kernels run 8 rows in about 1.3x one row's time, 9-12 rows in about 1.9x
+    max_rows = int(os.environ.get("TF_GGUF_MAX_ROWS", 8)) if gguf_file(Path(model_dir)) is not None else 12
+    return Qwen27Engine(Path(model_dir), draft, max_rows=max_rows, tp=tp, rank=rank, master=master, port=master_port,
                         split_head=tp == 2, tp_draft=tp == 2 and draft is not None, allow_copy=not no_drafts,
                         streams=streams, context=options.get("context"),
                         context_explicit=options.get("context_explicit"), vision=bool(options.get("vision", False)),
