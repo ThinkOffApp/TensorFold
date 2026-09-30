@@ -13,6 +13,7 @@ import triton
 import triton.language as tl
 
 from tensorfold.cuda.direct_read import SafeTensors
+from tensorfold.cuda.sampling import top_by_value_then_id
 from tensorfold.engine.exact_sampling import Sampling
 
 from .affine_memory import packed_draft
@@ -534,7 +535,7 @@ class DFlash2:
             logits = self.sub_head(h.contiguous())                 # a GGUF head's rows on its own exact kernel
         else:
             logits = matmul(h, self.sub_head)
-        values, local_ids = torch.topk(logits.float(), k=16, dim=-1, sorted=False)
+        values, local_ids = top_by_value_then_id(logits, 16)           # ties to the lowest id, on any backend
         global_ids = self.head_ids[local_ids]
         if self.world == 2:
             import torch.distributed as dist
@@ -544,7 +545,7 @@ class DFlash2:
             dist.all_gather_into_tensor(both_values, values.contiguous())
             dist.all_gather_into_tensor(both_ids, global_ids.contiguous())
             merged = torch.cat((both_values[0], both_values[1]), dim=1)
-            values, pick = torch.topk(merged, k=16, dim=-1, sorted=False)
+            values, pick = top_by_value_then_id(merged, 16)            # rank 0's ids are the lower ones
             global_ids = torch.cat((both_ids[0], both_ids[1]), dim=1).gather(1, pick)
         shared = [global_ids, torch.cat((values, projected), dim=1), None]     # read back once, by the first finish
         for j, i in enumerate(live):
