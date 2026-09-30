@@ -530,6 +530,8 @@ class DFlash2:
             logits = self.sub_head(h.contiguous()).index_select(1, self.head_cols)
         elif self.sub_rows is not None:
             logits = matmul_rows(h, self.sub_rows)
+        elif not isinstance(self.sub_head, QLinear):
+            logits = self.sub_head(h.contiguous())                 # a GGUF head's rows on its own exact kernel
         else:
             logits = matmul(h, self.sub_head)
         values, local_ids = torch.topk(logits.float(), k=16, dim=-1, sorted=False)
