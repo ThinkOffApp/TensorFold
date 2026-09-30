@@ -140,6 +140,8 @@ class Gguf:
 
         if self.in_perm is not None:
             x = x.index_select(1, self.in_perm)
+        if x.shape[0] == 1:                    # two rows beat one in Gufo's dispatch; rows keep their bits at any count
+            return gguf.linear(x.expand(2, -1), self.weight, self.qtype, self.n)[:1].to(torch.bfloat16)
         return gguf.linear(x, self.weight, self.qtype, self.n).to(torch.bfloat16)
 
     prefill = __call__
