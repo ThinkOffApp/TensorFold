@@ -147,8 +147,7 @@ class Gguf:
     def embed(self, ids: torch.Tensor) -> torch.Tensor:
         from tensorfold.cuda import gguf
 
-        rows = self.weight.index_select(0, ids.reshape(-1).to(torch.int64)).contiguous()
-        return gguf.dequant(rows, self.qtype, rows.shape[0] * self.cols).view(rows.shape[0], self.cols)
+        return gguf.rows_bf16(self.weight.index_select(0, ids.reshape(-1).to(torch.int64)), self.qtype, self.cols)
 
 
 @dataclass
