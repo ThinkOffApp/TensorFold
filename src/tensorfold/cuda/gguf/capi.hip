@@ -21,6 +21,14 @@ extern "C" int tf_gguf_gemv(int type, const void* w, const float* x, float* y, s
   return static_cast<int>(hipGetLastError());
 }
 
+// Rows on Gufo's bf16-activation quant-direct GEMM (no activation quantization; its DFlash route past 8 rows).
+extern "C" int tf_gguf_linear_bf16(int type, const void* w, const void* x, float* y, std::size_t rows, std::size_t m,
+                                   std::size_t k, void* stream) {
+  gufo::hip::LaunchBatchedQuantGEMMBf16(static_cast<gufo::core::GgmlType>(type), w, x, y, rows, m, k,
+                                        static_cast<hipStream_t>(stream));
+  return static_cast<int>(hipGetLastError());
+}
+
 extern "C" int tf_gguf_dequant_bf16(int type, const void* w, void* out, std::size_t n, void* stream) {
   gufo::hip::LaunchDequantizeToBf16(static_cast<gufo::core::GgmlType>(type), w, static_cast<hip_bfloat16*>(out), n,
                                     static_cast<hipStream_t>(stream));
@@ -37,7 +45,8 @@ extern "C" int tf_gguf_prefill_supported(int type) {
 
 // Tiled payload, per-token sum sidecar, then slack: Gufo's Q8_0 W8A8 kernel (prefill_quant_gemm.hip:500-503, taken
 // when its wave64 route declines, e.g. m < 1024) stages all eight 16-token tiles of its 128-token block with no bound
-// on the activation's tile count, so the last block reads up to 7 tiles past the payload. Gufo's engine sizes its
+// on the activation's tile count, so the last block reads up to 7 tiles past the payload (its 16/32/64-token
+// small-row tiles read fewer). Gufo's engine sizes its
 // scratch for the largest batch; an exact-size buffer faulted here. The tokens read are never stored.
 extern "C" std::size_t tf_gguf_q8_1_bytes(std::size_t rows, std::size_t k) {
   constexpr std::size_t kSlackTiles = 8, kTileBytes = 576;    // a 128-token block, kQ8ActTileBytes

@@ -86,16 +86,23 @@ def gemv(x: torch.Tensor, w: torch.Tensor, qtype: int, n: int) -> torch.Tensor:
     return _ext().gemv(x.float().contiguous(), w, qtype, n, torch.cuda.current_stream(w.device).cuda_stream)
 
 
-def prefill_linear(x: torch.Tensor, w: torch.Tensor, qtype: int, n: int) -> torch.Tensor:
-    """Prompt rows: bf16/fp32 ``x`` quantized to Q8_1, Gufo's WMMA W8A8 GEMM -> (rows, N) fp32 (``PREFILL`` types).
+def prefill_linear(x: torch.Tensor, w: torch.Tensor, qtype: int, n: int, pad: int = 96) -> torch.Tensor:
+    """bf16/fp32 ``x`` quantized to Q8_1, Gufo's WMMA W8A8 GEMM -> (rows, N) fp32 (``PREFILL`` types).
 
-    Not decode's bits; a row's bits never depend on the row count (calls under 96 rows are zero-padded to Gufo's
-    >= 96-row tile, so one weight always runs one kernel).
+    Not decode's bits. With ``pad=96`` calls under 96 rows are zero-padded to Gufo's >= 96-row tile, so one weight
+    always runs one kernel and a row's bits never depend on the row count; ``pad=0`` takes Gufo's small-row tiles.
     """
 
     if x.dtype not in (torch.bfloat16, torch.float32):
         x = x.float()
-    return _ext().prefill_linear(x.contiguous(), w, qtype, n, torch.cuda.current_stream(w.device).cuda_stream)
+    return _ext().prefill_linear(x.contiguous(), w, qtype, n, pad, torch.cuda.current_stream(w.device).cuda_stream)
+
+
+def linear_bf16(x: torch.Tensor, w: torch.Tensor, qtype: int, n: int) -> torch.Tensor:
+    """bf16 rows on Gufo's quant-direct GEMM (``LaunchBatchedQuantGEMMBf16``, no activation quantization) -> fp32."""
+
+    return _ext().linear_bf16(x.to(torch.bfloat16).contiguous(), w, qtype, n,
+                              torch.cuda.current_stream(w.device).cuda_stream)
 
 
 def dequant(w: torch.Tensor, qtype: int, n: int) -> torch.Tensor:

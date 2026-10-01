@@ -149,14 +149,35 @@ class Gguf:
 
         if self.in_perm is not None:
             x = x.index_select(1, self.in_perm)
-        if x.shape[0] == 1 and _fast():        # Gufo's decode GEMV; 2+ rows below are already Gufo's verify route
-            return gguf.gemv(x, self.weight, self.qtype, self.n).to(torch.bfloat16)
+        if _fast():
+            return self._fast(x)
         if x.shape[0] == 1:                    # two rows beat one in Gufo's dispatch; rows keep their bits at any count
             return gguf.linear(x.expand(2, -1), self.weight, self.qtype, self.n)[:1].to(torch.bfloat16)
         return gguf.linear(x, self.weight, self.qtype, self.n).to(torch.bfloat16)
 
+    def _fast(self, x: torch.Tensor) -> torch.Tensor:
+        """TENSORFOLD_GGUF_FAST: 1 row on Gufo's decode GEMV; 2..95 (draft checks) per TENSORFOLD_GGUF_FAST_VERIFY
+        (wmma: the W8A8 GEMM's small-row tiles, bf16: quant-direct bf16, gemv: the GEMV per row, exact); more: WMMA."""
+
+        from tensorfold.cuda import gguf
+
+        rows = x.shape[0]
+        if rows == 1:
+            return gguf.gemv(x, self.weight, self.qtype, self.n).to(torch.bfloat16)
+        mode = os.environ.get("TENSORFOLD_GGUF_FAST_VERIFY", "wmma") if rows < 96 else "wmma"
+        if mode == "wmma" and self.qtype in gguf.PREFILL:
+            y = gguf.prefill_linear(x, self.weight, self.qtype, self.n, pad=0)
+        elif mode == "bf16":
+            y = gguf.linear_bf16(x, self.weight, self.qtype, self.n)
+        elif mode == "gemv":                   # Gufo's MTP route: its decode GEMV, one launch per row
+            y = torch.cat([gguf.gemv(x[i:i + 1], self.weight, self.qtype, self.n) for i in range(rows)])
+        else:
+            y = gguf.linear(x, self.weight, self.qtype, self.n)
+        return y.to(torch.bfloat16)
+
     def prefill(self, x: torch.Tensor) -> torch.Tensor:
-        """Prompt rows: the exact kernel; TENSORFOLD_GGUF_FAST=1 on ROCm: Gufo's WMMA W8A8 GEMM (not decode's bits)."""
+        """Prompt rows: the exact kernel; TENSORFOLD_GGUF_FAST=1 on ROCm: Gufo's WMMA W8A8 GEMM (not decode's bits),
+        under 96 rows on its small-row tiles unless TENSORFOLD_GGUF_FAST_PAD=1 pads to one kernel per weight."""
 
         from tensorfold.cuda import gguf
 
@@ -164,7 +185,8 @@ class Gguf:
             return self(x)
         if self.in_perm is not None:
             x = x.index_select(1, self.in_perm)
-        return gguf.prefill_linear(x, self.weight, self.qtype, self.n).to(torch.bfloat16)
+        pad = 96 if os.environ.get("TENSORFOLD_GGUF_FAST_PAD") == "1" else 0
+        return gguf.prefill_linear(x, self.weight, self.qtype, self.n, pad=pad).to(torch.bfloat16)
 
     def embed(self, ids: torch.Tensor) -> torch.Tensor:
         from tensorfold.cuda import gguf
