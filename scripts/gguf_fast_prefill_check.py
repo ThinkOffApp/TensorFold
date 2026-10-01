@@ -39,6 +39,17 @@ def timed(fn, iters: int) -> float:
     return sorted(times)[len(times) // 2]
 
 
+def synced(fn):
+    """``fn`` then a device sync, so an async HIP fault surfaces at the call that caused it (AMD_SERIALIZE_KERNEL=3 too)."""
+
+    def call(*a, **kw):
+        out = fn(*a, **kw)
+        torch.cuda.synchronize()
+        return out
+
+    return call
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("model", nargs="?", default=MODEL)
@@ -51,6 +62,9 @@ def main() -> int:
     from tensorfold.cuda.rocm import HIP
     from tensorfold.families.qwen3_5.cuda.weights import Gguf
 
+    raw = {name: getattr(gguf, name) for name in ("linear", "gemv", "prefill_linear")}   # unsynced, for timing
+    for name, fn in raw.items():                                  # sync after each launch: a fault names its call
+        setattr(gguf, name, synced(fn))
     if not HIP:
         print("FAIL: the fast prompt GEMM is ROCm only")
         return 1
@@ -64,50 +78,57 @@ def main() -> int:
             picked.setdefault(q, []).append(t)
     torch.manual_seed(0)
     failed = checked = 0
+    # each timing runs only after the same call passed once under a sync above
     for q, ts in sorted(picked.items()):
         for t in ts:
             k, n = int(t.shape[0]), int(t.shape[1])                   # GGUF lists the input dimension first
-            w = torch.from_numpy(t.data.reshape(-1).view("uint8").copy()).cuda()
-            x = (torch.randn(args.rows, k, device="cuda") * 0.5).to(torch.bfloat16)
-            ref = gguf.prefill_linear(x, w, q, n)
-            bad = [f"{r}@{o}" for r, o in SLICES if o + r <= args.rows
-                   and not torch.equal(gguf.prefill_linear(x[o:o + r], w, q, n), ref[o:o + r])]
-            perm = torch.randperm(args.rows, device="cuda")
-            if not torch.equal(gguf.prefill_linear(x[perm], w, q, n), ref[perm]):
-                bad.append("permuted")
-            if not torch.equal(gguf.prefill_linear(x.float(), w, q, n), ref):
-                bad.append("fp32-in")
-            os.environ["TENSORFOLD_GGUF_FAST"] = "1"
-            g = Gguf(w.view(n, -1), q, k)
-            wired = torch.equal(g.prefill(x[:513]), ref[:513].to(torch.bfloat16))
-            one = x[:1].float()
-            wired &= torch.equal(g(x[:1]), gguf.gemv(one, w, q, n).to(torch.bfloat16))
-            del os.environ["TENSORFOLD_GGUF_FAST"]
-            e1 = gguf.linear(one.expand(2, -1), w, q, n)[:1]
-            g1 = gguf.gemv(one, w, q, n)
-            serial = "equal" if torch.equal(g1, e1) else f"DIFFERS max abs {(g1 - e1).abs().max().item():.1e}"
-            x16 = x[:16].float()
-            t1_exact = timed(lambda: gguf.linear(one.expand(2, -1), w, q, n), 20)
-            t1_fast = timed(lambda: gguf.gemv(one, w, q, n), 20)
-            t16_exact = timed(lambda: gguf.linear(x16, w, q, n), 20)
-            t16_fast = timed(lambda: gguf.prefill_linear(x16, w, q, n), 20)
-            exact = gguf.linear(x.float(), w, q, n)
-            diff = (ref - exact).abs()
-            rel = ((ref - exact).norm() / exact.norm()).item()
-            worst = (diff.max() / exact.abs().max()).item()
-            control = not torch.equal(ref, exact)
-            t_fast = timed(lambda: gguf.prefill_linear(x, w, q, n), args.iters)
-            t_exact = timed(lambda: gguf.linear(x.float(), w, q, n), args.iters)
-            ok = not bad and wired and control and rel < 2e-2
-            failed += not ok
+            print(f"{t.tensor_type.name:7} {t.name:28} N={n:6} K={k:6} ...", flush=True)
             checked += 1
-            print(f"{t.tensor_type.name:7} {t.name:28} N={n:6} K={k:6}  chunk-independent={'yes' if not bad else bad}  "
-                  f"wired={'yes' if wired else 'NO'}  vs exact: max abs={diff.max().item():.2e} max/max={worst:.1e} "
-                  f"L2 rel={rel:.1e}{'' if control else ' EQUAL (control cannot fail)'}  "
-                  f"{args.rows} rows: fast {t_fast:.2f} ms, exact {t_exact:.2f} ms ({t_exact / t_fast:.1f}x)  "
-                  f"1 row: gemv {t1_fast * 1e3:.0f} us, exact {t1_exact * 1e3:.0f} us, gemv vs exact bits {serial}  "
-                  f"16 rows: wmma {t16_fast * 1e3:.0f} us, exact {t16_exact * 1e3:.0f} us  "
-                  f"{'PASS' if ok else 'FAIL'}", flush=True)
+            try:
+                w = torch.from_numpy(t.data.reshape(-1).view("uint8").copy()).cuda()
+                x = (torch.randn(args.rows, k, device="cuda") * 0.5).to(torch.bfloat16)
+                ref = gguf.prefill_linear(x, w, q, n)
+                bad = [f"{r}@{o}" for r, o in SLICES if o + r <= args.rows
+                       and not torch.equal(gguf.prefill_linear(x[o:o + r], w, q, n), ref[o:o + r])]
+                perm = torch.randperm(args.rows, device="cuda")
+                if not torch.equal(gguf.prefill_linear(x[perm], w, q, n), ref[perm]):
+                    bad.append("permuted")
+                if not torch.equal(gguf.prefill_linear(x.float(), w, q, n), ref):
+                    bad.append("fp32-in")
+                os.environ["TENSORFOLD_GGUF_FAST"] = "1"
+                g = Gguf(w.view(n, -1), q, k)
+                wired = torch.equal(g.prefill(x[:513]), ref[:513].to(torch.bfloat16))
+                one = x[:1].float()
+                wired &= torch.equal(g(x[:1]), gguf.gemv(one, w, q, n).to(torch.bfloat16))
+                del os.environ["TENSORFOLD_GGUF_FAST"]
+                e1 = gguf.linear(one.expand(2, -1), w, q, n)[:1]
+                g1 = gguf.gemv(one, w, q, n)
+                serial = "equal" if torch.equal(g1, e1) else f"DIFFERS max abs {(g1 - e1).abs().max().item():.1e}"
+                x16 = x[:16].float()
+                gguf.linear(x16, w, q, n), gguf.prefill_linear(x16, w, q, n)    # once each under a sync first
+                t1_exact = timed(lambda: raw["linear"](one.expand(2, -1), w, q, n), 20)
+                t1_fast = timed(lambda: raw["gemv"](one, w, q, n), 20)
+                t16_exact = timed(lambda: raw["linear"](x16, w, q, n), 20)
+                t16_fast = timed(lambda: raw["prefill_linear"](x16, w, q, n), 20)
+                exact = gguf.linear(x.float(), w, q, n)
+                diff = (ref - exact).abs()
+                rel = ((ref - exact).norm() / exact.norm()).item()
+                worst = (diff.max() / exact.abs().max()).item()
+                control = not torch.equal(ref, exact)
+                t_fast = timed(lambda: raw["prefill_linear"](x, w, q, n), args.iters)
+                t_exact = timed(lambda: raw["linear"](x.float(), w, q, n), args.iters)
+                ok = not bad and wired and control and rel < 2e-2
+                failed += not ok
+                print(f"{t.tensor_type.name:7} {t.name:28} N={n:6} K={k:6}  chunk-independent={'yes' if not bad else bad}  "
+                      f"wired={'yes' if wired else 'NO'}  vs exact: max abs={diff.max().item():.2e} max/max={worst:.1e} "
+                      f"L2 rel={rel:.1e}{'' if control else ' EQUAL (control cannot fail)'}  "
+                      f"{args.rows} rows: fast {t_fast:.2f} ms, exact {t_exact:.2f} ms ({t_exact / t_fast:.1f}x)  "
+                      f"1 row: gemv {t1_fast * 1e3:.0f} us, exact {t1_exact * 1e3:.0f} us, gemv vs exact bits {serial}  "
+                      f"16 rows: wmma {t16_fast * 1e3:.0f} us, exact {t16_exact * 1e3:.0f} us  "
+                      f"{'PASS' if ok else 'FAIL'}", flush=True)
+            except Exception as exc:  # noqa: BLE001 - report and go on (a HIP fault is sticky: later tensors fail too)
+                failed += 1
+                print(f"{t.tensor_type.name:7} {t.name:28} FAIL: {type(exc).__name__}: {exc}", flush=True)
     if not checked:
         print("FAIL: no quantized projection was checked")
         failed += 1
