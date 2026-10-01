@@ -1,5 +1,7 @@
 """GGUF K-quant and IQ projections on Gufo's exact HIP GEMM (``vendor/``, MIT): a row's bits never depend on the row count.
 
+``gemv`` and ``prefill_linear`` are Gufo's own decode GEMV and WMMA prompt GEMM, behind TENSORFOLD_GGUF_FAST=1.
+
 The vendored kernels build with hipcc into ``libtfgguf.so``; a small torch binding calls it on the current stream.
 """
 
@@ -19,6 +21,7 @@ KERNEL_DIR = VENDOR / "src/models/qwen/hip/kernels"
 WAVE64 = ["-mwavefrontsize64"]
 # Gufo's per-file options (its src/models/qwen/CMakeLists.txt): the qualified schedules were measured under these.
 SOURCES = [(HERE / "capi.hip", []), (KERNEL_DIR / "prefill_quant_gemm.hip", []), (KERNEL_DIR / "prefill_gemm.hip", []),
+           (KERNEL_DIR / "gemv_quant.hip", []),
            (KERNEL_DIR / "prefill_quant_wave64.hip", WAVE64), (KERNEL_DIR / "small_batch_wave64.hip", WAVE64),
            (KERNEL_DIR / "small_batch_quant16_wave64.hip",
             WAVE64 + ["-Xarch_device", "-mllvm=-amdgpu-sched-strategy=iterative-ilp"]),
@@ -27,6 +30,7 @@ SOURCES = [(HERE / "capi.hip", []), (KERNEL_DIR / "prefill_quant_gemm.hip", []),
 # ggml type ids, as GGUF stores them
 F32, F16, Q8_0, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL, IQ3_S, IQ4_XS, BF16 = 0, 1, 8, 11, 12, 13, 14, 20, 21, 23, 30
 QUANT = {Q8_0, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL, IQ3_S, IQ4_XS}
+PREFILL = {Q8_0, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL, IQ3_S, IQ4_XS}   # Gufo's WMMA prompt GEMM (IsNativeWmmaQuant + Q8_0)
 
 
 def _library() -> Path:
@@ -66,7 +70,7 @@ def _ext():
     from tensorfold.cuda.build import load
 
     lib = _library()                                           # before torch's cpp_extension reads ROCM_HOME
-    return load(name="tensorfold_gguf_v1", sources=[str(HERE / "binding.cpp")],
+    return load(name="tensorfold_gguf_v2", sources=[str(HERE / "binding.cpp")],
                 extra_ldflags=[f"-L{lib.parent}", "-ltfgguf", f"-Wl,-rpath,{lib.parent}"], verbose=False)
 
 
@@ -74,6 +78,24 @@ def linear(x: torch.Tensor, w: torch.Tensor, qtype: int, n: int) -> torch.Tensor
     """x (rows, K) times the GGUF-packed ``w`` (N rows of K/block blocks) transposed -> (rows, N) fp32, any row count."""
 
     return _ext().linear(x.float().contiguous(), w, qtype, n, torch.cuda.current_stream(w.device).cuda_stream)
+
+
+def gemv(x: torch.Tensor, w: torch.Tensor, qtype: int, n: int) -> torch.Tensor:
+    """One row: Gufo's decode GEMV (``LaunchQ8KBlockGEMV``, its kHipQuantDirect route) -> (1, N) fp32."""
+
+    return _ext().gemv(x.float().contiguous(), w, qtype, n, torch.cuda.current_stream(w.device).cuda_stream)
+
+
+def prefill_linear(x: torch.Tensor, w: torch.Tensor, qtype: int, n: int) -> torch.Tensor:
+    """Prompt rows: bf16/fp32 ``x`` quantized to Q8_1, Gufo's WMMA W8A8 GEMM -> (rows, N) fp32 (``PREFILL`` types).
+
+    Not decode's bits; a row's bits never depend on the row count (calls under 96 rows are zero-padded to Gufo's
+    >= 96-row tile, so one weight always runs one kernel).
+    """
+
+    if x.dtype not in (torch.bfloat16, torch.float32):
+        x = x.float()
+    return _ext().prefill_linear(x.contiguous(), w, qtype, n, torch.cuda.current_stream(w.device).cuda_stream)
 
 
 def dequant(w: torch.Tensor, qtype: int, n: int) -> torch.Tensor:
