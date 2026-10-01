@@ -156,15 +156,17 @@ class Gguf:
         return gguf.linear(x, self.weight, self.qtype, self.n).to(torch.bfloat16)
 
     def _fast(self, x: torch.Tensor) -> torch.Tensor:
-        """TENSORFOLD_GGUF_FAST: 1 row on Gufo's decode GEMV; 2..95 (draft checks) per TENSORFOLD_GGUF_FAST_VERIFY
-        (wmma: the W8A8 GEMM's small-row tiles, bf16: quant-direct bf16, gemv: the GEMV per row, exact); more: WMMA."""
+        """TENSORFOLD_GGUF_FAST: 1 row on Gufo's decode GEMV; 2+ rows (draft checks) per TENSORFOLD_GGUF_FAST_VERIFY
+        (exact, the default: Gufo's verify route; with it, drafted replies matched serial ones on Strix; wmma: the W8A8 GEMM's small-row tiles;
+        bf16: quant-direct bf16; gemv: the GEMV per row). Strix, 27B Q4_K_XL: wmma and bf16 change drafted replies and
+        are no faster, so exact stays the default."""
 
         from tensorfold.cuda import gguf
 
         rows = x.shape[0]
         if rows == 1:
             return gguf.gemv(x, self.weight, self.qtype, self.n).to(torch.bfloat16)
-        mode = os.environ.get("TENSORFOLD_GGUF_FAST_VERIFY", "wmma") if rows < 96 else "wmma"
+        mode = os.environ.get("TENSORFOLD_GGUF_FAST_VERIFY", "exact")   # exact: drafted == serial, and fastest measured
         if mode == "wmma" and self.qtype in gguf.PREFILL:
             y = gguf.prefill_linear(x, self.weight, self.qtype, self.n, pad=0)
         elif mode == "bf16":
