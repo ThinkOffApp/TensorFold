@@ -35,8 +35,13 @@ extern "C" int tf_gguf_prefill_supported(int type) {
   return t == gufo::core::GgmlType::kQ8_0 || gufo::hip::detail::IsNativeWmmaQuant(t);
 }
 
+// Tiled payload, per-token sum sidecar, then slack: Gufo's Q8_0 W8A8 kernel (prefill_quant_gemm.hip:500-503, taken
+// when its wave64 route declines, e.g. m < 1024) stages all eight 16-token tiles of its 128-token block with no bound
+// on the activation's tile count, so the last block reads up to 7 tiles past the payload. Gufo's engine sizes its
+// scratch for the largest batch; an exact-size buffer faulted here. The tokens read are never stored.
 extern "C" std::size_t tf_gguf_q8_1_bytes(std::size_t rows, std::size_t k) {
-  return gufo::hip::QuantizedActivationBytes(rows, k);         // tiled payload plus the per-token sum sidecar
+  constexpr std::size_t kSlackTiles = 8, kTileBytes = 576;    // a 128-token block, kQ8ActTileBytes
+  return gufo::hip::QuantizedActivationBytes(rows, k) + kSlackTiles * (k / 32) * kTileBytes;
 }
 
 extern "C" int tf_gguf_prefill_linear(int type, const void* w, const void* x, int x_bf16, void* q8, float* y,
