@@ -57,9 +57,15 @@ def main() -> int:
     ap.add_argument("--rows", type=int, default=4096)
     ap.add_argument("--per-type", type=int, default=3, help="distinct (N, K) shapes checked per quant type")
     ap.add_argument("--iters", type=int, default=5)
+    ap.add_argument("--pad", type=int, default=0, help="prefill_linear padding under test: 0 (the production default) or 96")
     args = ap.parse_args()
 
     from tensorfold.cuda import gguf
+
+    _plain = gguf.prefill_linear                     # every check below runs at the padding under test
+    gguf.prefill_linear = lambda x, w, q, n, pad=args.pad: _plain(x, w, q, n, pad=pad)
+    os.environ["TENSORFOLD_GGUF_FAST_PAD"] = "1" if args.pad else "0"
+    print(f"prefill padding under test: {args.pad}", flush=True)
     from tensorfold.cuda.rocm import HIP
     from tensorfold.families.qwen3_5.cuda.weights import Gguf
 
