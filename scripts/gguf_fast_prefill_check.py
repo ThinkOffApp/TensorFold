@@ -8,7 +8,8 @@ as the 4096-row call; (b) error against the exact kernel (``gguf.linear``, decod
 bitwise (else the fast path did not run); (c) both kernels timed at 4096 rows. ``Gguf.prefill`` under
 TENSORFOLD_GGUF_FAST=1 must return the fast kernel's bits (the switch is wired). Decode: 1 row on ``gguf.gemv``
 vs the exact kernel's 1 row (reported: equal bits keep drafted == serial), and 1-row and 16-row timings of
-exact vs fast (16 rows: the exact kernel is Gufo's own verify route, so "fast" there is the WMMA GEMM for scale).
+exact vs fast. Verify widths 2/4/8/16 per TENSORFOLD_GGUF_FAST_VERIFY option (wmma unpadded, bf16, gemv per row,
+exact): time and max abs error vs exact; and 20/40-row prompt calls padded (TENSORFOLD_GGUF_FAST_PAD=1) vs not.
 """
 
 from __future__ import annotations
@@ -62,7 +63,7 @@ def main() -> int:
     from tensorfold.cuda.rocm import HIP
     from tensorfold.families.qwen3_5.cuda.weights import Gguf
 
-    raw = {name: getattr(gguf, name) for name in ("linear", "gemv", "prefill_linear")}   # unsynced, for timing
+    raw = {name: getattr(gguf, name) for name in ("linear", "gemv", "prefill_linear", "linear_bf16")}   # unsynced, for timing
     for name, fn in raw.items():                                  # sync after each launch: a fault names its call
         setattr(gguf, name, synced(fn))
     if not HIP:
@@ -104,12 +105,32 @@ def main() -> int:
                 e1 = gguf.linear(one.expand(2, -1), w, q, n)[:1]
                 g1 = gguf.gemv(one, w, q, n)
                 serial = "equal" if torch.equal(g1, e1) else f"DIFFERS max abs {(g1 - e1).abs().max().item():.1e}"
-                x16 = x[:16].float()
-                gguf.linear(x16, w, q, n), gguf.prefill_linear(x16, w, q, n)    # once each under a sync first
                 t1_exact = timed(lambda: raw["linear"](one.expand(2, -1), w, q, n), 20)
                 t1_fast = timed(lambda: raw["gemv"](one, w, q, n), 20)
-                t16_exact = timed(lambda: raw["linear"](x16, w, q, n), 20)
-                t16_fast = timed(lambda: raw["prefill_linear"](x16, w, q, n), 20)
+                verify = {
+                    "wmma": lambda r: raw["prefill_linear"](r, w, q, n, pad=0),
+                    "bf16": lambda r: raw["linear_bf16"](r, w, q, n),
+                    "gemv": lambda r: torch.cat([raw["gemv"](r[i:i + 1].float(), w, q, n) for i in range(r.shape[0])]),
+                    "exact": lambda r: raw["linear"](r.float(), w, q, n),
+                }
+                widths = []
+                for rows in (2, 4, 8, 16):
+                    xr = x[100:100 + rows]
+                    base = verify["exact"](xr)
+                    torch.cuda.synchronize()
+                    cells = []
+                    for name, fn in verify.items():
+                        y = fn(xr)
+                        torch.cuda.synchronize()                    # each option once under a sync before timing
+                        err = (y - base).abs().max().item()
+                        cells.append(f"{name} {timed(lambda: fn(xr), 20) * 1e3:.0f}us/{err:.0e}")
+                    widths.append(f"{rows}: " + " ".join(cells))
+                short = []
+                for rows in (20, 40):
+                    xr = x[200:200 + rows]
+                    gguf.prefill_linear(xr, w, q, n, pad=0), gguf.prefill_linear(xr, w, q, n, pad=96)
+                    short.append(f"{rows}: unpadded {timed(lambda: raw['prefill_linear'](xr, w, q, n, pad=0), 20) * 1e3:.0f}us "
+                                 f"padded {timed(lambda: raw['prefill_linear'](xr, w, q, n, pad=96), 20) * 1e3:.0f}us")
                 exact = gguf.linear(x.float(), w, q, n)
                 diff = (ref - exact).abs()
                 rel = ((ref - exact).norm() / exact.norm()).item()
@@ -124,7 +145,7 @@ def main() -> int:
                       f"L2 rel={rel:.1e}{'' if control else ' EQUAL (control cannot fail)'}  "
                       f"{args.rows} rows: fast {t_fast:.2f} ms, exact {t_exact:.2f} ms ({t_exact / t_fast:.1f}x)  "
                       f"1 row: gemv {t1_fast * 1e3:.0f} us, exact {t1_exact * 1e3:.0f} us, gemv vs exact bits {serial}  "
-                      f"16 rows: wmma {t16_fast * 1e3:.0f} us, exact {t16_exact * 1e3:.0f} us  "
+                      f"verify rows (time/max abs vs exact) {' | '.join(widths)}  prompt rows {' | '.join(short)}  "
                       f"{'PASS' if ok else 'FAIL'}", flush=True)
             except Exception as exc:  # noqa: BLE001 - report and go on (a HIP fault is sticky: later tensors fail too)
                 failed += 1
