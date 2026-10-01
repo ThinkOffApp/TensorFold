@@ -1,0 +1,119 @@
+"""TENSORFOLD_GGUF_FAST's kernels on real 27B tensors: Gufo's WMMA prompt GEMM and 1-row decode GEMV vs the exact one.
+
+    TF_GGUF_PY=<llama.cpp>/gguf-py python scripts/gguf_fast_prefill_check.py [MODEL.gguf] [--per-type 3]
+
+A few blk.* projections of each quant type in the file. For each, 4096 random bf16 rows through the fast kernel:
+(a) slices of 1000/1/37/513/95/96 rows at several offsets, a permuted batch, and fp32 input must give the same bits
+as the 4096-row call; (b) error against the exact kernel (``gguf.linear``, decode's bits), which must NOT match
+bitwise (else the fast path did not run); (c) both kernels timed at 4096 rows. ``Gguf.prefill`` under
+TENSORFOLD_GGUF_FAST=1 must return the fast kernel's bits (the switch is wired). Decode: 1 row on ``gguf.gemv``
+vs the exact kernel's 1 row (reported: equal bits keep drafted == serial), and 1-row and 16-row timings of
+exact vs fast (16 rows: the exact kernel is Gufo's own verify route, so "fast" there is the WMMA GEMM for scale).
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+
+import torch
+
+MODEL = "/srv/tensorfold-strix/gguf-27b/Qwen3.8-27B-UD-Q4_K_XL.gguf"
+SLICES = [(1000, 0), (1000, 1000), (1000, 3096), (1, 0), (1, 4095), (1, 2049), (37, 0), (37, 1234), (37, 4059),
+          (513, 0), (513, 777), (513, 3583), (95, 5), (96, 4000)]
+
+
+def timed(fn, iters: int) -> float:
+    """Median milliseconds of ``fn`` over ``iters`` calls after two warmups."""
+
+    for _ in range(2):
+        fn()
+    times = []
+    for _ in range(iters):
+        a, b = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+        a.record()
+        fn()
+        b.record()
+        b.synchronize()
+        times.append(a.elapsed_time(b))
+    return sorted(times)[len(times) // 2]
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("model", nargs="?", default=MODEL)
+    ap.add_argument("--rows", type=int, default=4096)
+    ap.add_argument("--per-type", type=int, default=3, help="distinct (N, K) shapes checked per quant type")
+    ap.add_argument("--iters", type=int, default=5)
+    args = ap.parse_args()
+
+    from tensorfold.cuda import gguf
+    from tensorfold.cuda.rocm import HIP
+    from tensorfold.families.qwen3_5.cuda.weights import Gguf
+
+    if not HIP:
+        print("FAIL: the fast prompt GEMM is ROCm only")
+        return 1
+    picked: dict[int, list] = {}
+    for t in gguf.reader(args.model).tensors:
+        q = int(t.tensor_type)
+        if q not in gguf.PREFILL or len(t.shape) != 2 or not t.name.startswith("blk."):
+            continue
+        shapes = {(int(u.shape[0]), int(u.shape[1])) for u in picked.get(q, [])}
+        if len(shapes) < args.per_type and (int(t.shape[0]), int(t.shape[1])) not in shapes:
+            picked.setdefault(q, []).append(t)
+    torch.manual_seed(0)
+    failed = checked = 0
+    for q, ts in sorted(picked.items()):
+        for t in ts:
+            k, n = int(t.shape[0]), int(t.shape[1])                   # GGUF lists the input dimension first
+            w = torch.from_numpy(t.data.reshape(-1).view("uint8").copy()).cuda()
+            x = (torch.randn(args.rows, k, device="cuda") * 0.5).to(torch.bfloat16)
+            ref = gguf.prefill_linear(x, w, q, n)
+            bad = [f"{r}@{o}" for r, o in SLICES if o + r <= args.rows
+                   and not torch.equal(gguf.prefill_linear(x[o:o + r], w, q, n), ref[o:o + r])]
+            perm = torch.randperm(args.rows, device="cuda")
+            if not torch.equal(gguf.prefill_linear(x[perm], w, q, n), ref[perm]):
+                bad.append("permuted")
+            if not torch.equal(gguf.prefill_linear(x.float(), w, q, n), ref):
+                bad.append("fp32-in")
+            os.environ["TENSORFOLD_GGUF_FAST"] = "1"
+            g = Gguf(w.view(n, -1), q, k)
+            wired = torch.equal(g.prefill(x[:513]), ref[:513].to(torch.bfloat16))
+            one = x[:1].float()
+            wired &= torch.equal(g(x[:1]), gguf.gemv(one, w, q, n).to(torch.bfloat16))
+            del os.environ["TENSORFOLD_GGUF_FAST"]
+            e1 = gguf.linear(one.expand(2, -1), w, q, n)[:1]
+            g1 = gguf.gemv(one, w, q, n)
+            serial = "equal" if torch.equal(g1, e1) else f"DIFFERS max abs {(g1 - e1).abs().max().item():.1e}"
+            x16 = x[:16].float()
+            t1_exact = timed(lambda: gguf.linear(one.expand(2, -1), w, q, n), 20)
+            t1_fast = timed(lambda: gguf.gemv(one, w, q, n), 20)
+            t16_exact = timed(lambda: gguf.linear(x16, w, q, n), 20)
+            t16_fast = timed(lambda: gguf.prefill_linear(x16, w, q, n), 20)
+            exact = gguf.linear(x.float(), w, q, n)
+            diff = (ref - exact).abs()
+            rel = ((ref - exact).norm() / exact.norm()).item()
+            worst = (diff.max() / exact.abs().max()).item()
+            control = not torch.equal(ref, exact)
+            t_fast = timed(lambda: gguf.prefill_linear(x, w, q, n), args.iters)
+            t_exact = timed(lambda: gguf.linear(x.float(), w, q, n), args.iters)
+            ok = not bad and wired and control and rel < 2e-2
+            failed += not ok
+            checked += 1
+            print(f"{t.tensor_type.name:7} {t.name:28} N={n:6} K={k:6}  chunk-independent={'yes' if not bad else bad}  "
+                  f"wired={'yes' if wired else 'NO'}  vs exact: max abs={diff.max().item():.2e} max/max={worst:.1e} "
+                  f"L2 rel={rel:.1e}{'' if control else ' EQUAL (control cannot fail)'}  "
+                  f"{args.rows} rows: fast {t_fast:.2f} ms, exact {t_exact:.2f} ms ({t_exact / t_fast:.1f}x)  "
+                  f"1 row: gemv {t1_fast * 1e3:.0f} us, exact {t1_exact * 1e3:.0f} us, gemv vs exact bits {serial}  "
+                  f"16 rows: wmma {t16_fast * 1e3:.0f} us, exact {t16_exact * 1e3:.0f} us  "
+                  f"{'PASS' if ok else 'FAIL'}", flush=True)
+    if not checked:
+        print("FAIL: no quantized projection was checked")
+        failed += 1
+    print(f"ALL PASS ({checked} tensors, {len(picked)} types)" if not failed else f"{failed} FAILED")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

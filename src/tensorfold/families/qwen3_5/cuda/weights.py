@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
@@ -109,6 +110,14 @@ class Exl3:
                       self.workspace)
 
 
+def _fast() -> bool:
+    """TENSORFOLD_GGUF_FAST=1 on ROCm: GGUF projections on Gufo's production routes (speed first, see ``Gguf``)."""
+
+    from tensorfold.cuda.rocm import HIP
+
+    return HIP and os.environ.get("TENSORFOLD_GGUF_FAST") == "1"
+
+
 @dataclass
 class Gguf:
     """A GGUF K-quant/IQ projection on ``tensorfold.cuda.gguf``'s exact kernels (Gufo's): any row count, same row bits."""
@@ -140,11 +149,22 @@ class Gguf:
 
         if self.in_perm is not None:
             x = x.index_select(1, self.in_perm)
+        if x.shape[0] == 1 and _fast():        # Gufo's decode GEMV; 2+ rows below are already Gufo's verify route
+            return gguf.gemv(x, self.weight, self.qtype, self.n).to(torch.bfloat16)
         if x.shape[0] == 1:                    # two rows beat one in Gufo's dispatch; rows keep their bits at any count
             return gguf.linear(x.expand(2, -1), self.weight, self.qtype, self.n)[:1].to(torch.bfloat16)
         return gguf.linear(x, self.weight, self.qtype, self.n).to(torch.bfloat16)
 
-    prefill = __call__
+    def prefill(self, x: torch.Tensor) -> torch.Tensor:
+        """Prompt rows: the exact kernel; TENSORFOLD_GGUF_FAST=1 on ROCm: Gufo's WMMA W8A8 GEMM (not decode's bits)."""
+
+        from tensorfold.cuda import gguf
+
+        if not (_fast() and self.qtype in gguf.PREFILL):
+            return self(x)
+        if self.in_perm is not None:
+            x = x.index_select(1, self.in_perm)
+        return gguf.prefill_linear(x, self.weight, self.qtype, self.n).to(torch.bfloat16)
 
     def embed(self, ids: torch.Tensor) -> torch.Tensor:
         from tensorfold.cuda import gguf
