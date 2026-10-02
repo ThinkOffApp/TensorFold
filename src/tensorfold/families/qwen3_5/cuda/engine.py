@@ -40,6 +40,12 @@ class Qwen27Engine:
         exl3 = quant_config(Path(model_dir)) is not None
         gguf = not exl3 and gguf_file(Path(model_dir)) is not None
         nvfp4 = not exl3 and not gguf and is_quantized(Path(model_dir))
+        if gguf:
+            from tensorfold.cuda.rocm import HIP
+
+            if not HIP:                    # Gufo's kernels are HIP only: say so before building them
+                raise ValueError("GGUF files of Qwen3.8-27B run on AMD GPUs (ROCm, Gufo's kernels); on NVIDIA serve "
+                                 "the MLX checkpoint (Vontra/Qwen3.8-27B-MLX-4bit), an NVFP4 or an EXL3 one")
         if gguf and tp != 1:
             raise ValueError("GGUF files of Qwen3.8-27B run on one GPU: drop --tp 2")
         if (exl3 or nvfp4) and tp != 1:
