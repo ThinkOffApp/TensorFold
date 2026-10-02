@@ -105,6 +105,7 @@ void by_rows(const at::Tensor& x, const at::Tensor& w, const void* bp, at::Tenso
 }
 
 
+#if !defined(USE_ROCM)   // ldmatrix / cp.async / mma.sync PTX: NVIDIA only; ROCm prompt rows take b16_linear (b16.py)
 // Prompt rows on the bf16 mma: BM x 64 tiles of 2 x 2 warps, 64 inputs a stage, one fp32 chain over K a row, so a
 // row's bits never depend on its chunk or the tile height (they differ from the one-row kernel's, as prompts' do).
 constexpr int PBN = 64, PST = 3, PROW = 128;
@@ -213,6 +214,8 @@ void prompt_launch(const at::Tensor& x, const at::Tensor& w, at::Tensor& y, int 
         y1 ? reinterpret_cast<__nv_bfloat16*>(y1->data_ptr()) : nullptr, N1);
 }
 
+#endif  // !USE_ROCM
+
 }  // namespace
 
 static void pair_in(const at::Tensor& x, const at::Tensor& w) {
@@ -261,6 +264,7 @@ std::vector<at::Tensor> b16_linear_pair(const at::Tensor& x, const at::Tensor& w
     return {y0, y1};
 }
 
+#if !defined(USE_ROCM)
 static int prompt_bm(int64_t bm, int M, int N) {
     if (bm) return (int)bm;
     const long long want = 2LL * at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
@@ -304,3 +308,12 @@ std::vector<at::Tensor> b16_prompt_pair(const at::Tensor& x, const at::Tensor& w
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return {y0, y1};
 }
+#else
+at::Tensor b16_prompt(const at::Tensor&, const at::Tensor&, int64_t) {
+    TORCH_CHECK(false, "b16_prompt is NVIDIA-only (PTX mma); on ROCm prompt rows go through b16_linear");
+}
+
+std::vector<at::Tensor> b16_prompt_pair(const at::Tensor&, const at::Tensor&, const at::Tensor&, int64_t) {
+    TORCH_CHECK(false, "b16_prompt_pair is NVIDIA-only (PTX mma); on ROCm prompt rows go through b16_linear_pair");
+}
+#endif  // !USE_ROCM

@@ -14,18 +14,8 @@ from pathlib import Path
 
 import torch
 
+from .gguf_detect import gguf_file  # noqa: F401  (re-exported: callers import it from here)
 from .weights import GDN, Attention, Config, Gguf, Layer, Plain, Weights
-
-
-def gguf_file(model_dir: Path) -> Path | None:
-    """The one ``*.gguf`` in ``model_dir`` when it has no safetensors, else None."""
-
-    files = sorted(Path(model_dir).glob("*.gguf"))
-    if not files or any(Path(model_dir).glob("*.safetensors")):
-        return None
-    if len(files) > 1:
-        raise ValueError(f"{model_dir} holds {len(files)} GGUF files; keep one (split files are not read)")
-    return files[0]
 
 
 def _reader(path: Path):

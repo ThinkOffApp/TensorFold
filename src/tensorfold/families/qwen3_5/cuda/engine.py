@@ -35,7 +35,7 @@ class Qwen27Engine:
 
         from .exl3_load import admission, quant_config
 
-        from .gguf_load import gguf_file, weight_bytes
+        from .gguf_detect import gguf_file
 
         exl3 = quant_config(Path(model_dir)) is not None
         gguf = not exl3 and gguf_file(Path(model_dir)) is not None
@@ -95,6 +95,7 @@ class Qwen27Engine:
         # an affine checkpoint's packed words at their stored precision; an EXL3 pack's by its own format
         tensor_bytes = weight_transform(model_dir, one_gpu=tp == 1)
         if gguf:
+            from .gguf_load import weight_bytes
             from .weights import Config
 
             tensor_bytes = weight_bytes(Config.read(model_dir).layers)
