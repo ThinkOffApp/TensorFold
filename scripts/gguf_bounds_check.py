@@ -160,36 +160,97 @@ class Guarded:
         self.hip.hipMemAddressFree(self.base, ctypes.c_size_t(self.reserved))
 
 
-def _memcpy(hip, dst: int, src: int, n: int) -> None:
-    assert hip.hipMemcpy(ctypes.c_void_p(dst), ctypes.c_void_p(src), ctypes.c_size_t(n), 3) == 0   # device to device
+class _Device:
+    """A raw device range as a torch tensor (``__cuda_array_interface__``), so every fill, copy and compare of guarded
+    memory is a torch op on torch's own stream, followed by a sync. 39264ef filled and copied it with hipMemcpy/hipMemset
+    outside torch's ordering (a D2D hipMemcpy may return before it completes) and got 335 MISMATCH lines, no faults."""
+
+    def __init__(self, ptr: int, nbytes: int):
+        self.__cuda_array_interface__ = {"shape": (nbytes,), "typestr": "|u1", "data": (ptr, False), "version": 2}
+
+
+def device_view(ptr: int, nbytes: int) -> torch.Tensor:
+    t = torch.as_tensor(_Device(ptr, nbytes), device="cuda")
+    assert t.data_ptr() == ptr and t.numel() == nbytes, "device view does not alias the guarded range"
+    return t
+
+
+def _bits(t: torch.Tensor) -> torch.Tensor:
+    return t.contiguous().view(torch.uint8)
+
+
+def _diff(y: torch.Tensor, ref: torch.Tensor, unwritten: int) -> str:
+    bad = (y.view(torch.int32) != ref.view(torch.int32))
+    idx = bad.nonzero()
+    tok, col = (int(idx[0, 0]), int(idx[0, 1])) if len(idx) else (-1, -1)
+    rows_bad = bad.any(1).nonzero().flatten()
+    finite = torch.isfinite(y) & torch.isfinite(ref)
+    err = float((y - ref)[finite].abs().max()) if bool(finite.any()) else float("nan")
+    return (f"{int(bad.sum())}/{bad.numel()} differ, first tok={tok} col={col}, tokens {int(rows_bad.min()) if len(rows_bad) else -1}"
+            f"..{int(rows_bad.max()) if len(rows_bad) else -1}, {int((y.view(torch.int32) == unwritten).sum())} unwritten, "
+            f"max |diff| {err:.3g}")
 
 
 def child(args) -> int:
-    """One (type, m, K) over ``args.rows`` from ``args.start``: prints ``CASE`` before each launch, ``OK``/``MISMATCH``."""
+    """One (type, m, K) over ``args.rows`` from ``args.start``: prints ``CASE`` before each launch, ``OK``/``MISMATCH``.
+
+    Per case: ``ref`` is the binding's call; ``CTYPES-MISMATCH`` means the same ctypes call on ordinary torch buffers
+    already differs (a harness bug, not memory placement); on a guarded mismatch the case is rerun with one guarded
+    buffer at a time (q8 / y / w) to name the one that changes the output."""
 
     lib, hip = library(), _hip()
     name, m, k = args.child[0], int(args.child[1]), int(args.child[2])
     qtype = TYPES[name]
     w = weight(name, m, k, seed=m * 31 + k)
     gw = Guarded(hip, w.numel(), align=256)
-    _memcpy(hip, gw.ptr, w.data_ptr(), w.numel())
+    wv = device_view(gw.ptr, w.numel())
+    wv.copy_(w)
+    torch.cuda.synchronize()
+    if not torch.equal(wv, w):                                 # self-test: the guarded weight is the weight, byte for byte
+        print(f"WEIGHT-COPY-BAD {name} m={m} k={k}: {int((wv != w).sum())} bytes differ", flush=True)
+        return 3
+    unwritten = 0x7FC0DEAD                                     # a NaN no kernel writes: marks outputs left unwritten
     for rows in args.rows[args.start:]:
         print(f"CASE {name} rows={rows} m={m} k={k} size={args.size}", flush=True)
         x = torch.randn(rows, k, generator=torch.Generator().manual_seed(rows)).to(torch.bfloat16).cuda()
         ref = gguf.prefill_linear(x, w, qtype, m, pad=0)
         size = q8_size(lib, rows, k, args.size)
         assert size % 16 == 0 and lib.tf_gguf_q8_1_bytes(rows, k) == q8_size(lib, rows, k, "tiles:8"), "capi formula"
-        gq, gy = Guarded(hip, size), Guarded(hip, rows * m * 4, align=4)
-        torch.cuda.synchronize()
         tail = quantized_bytes(rows, k)
-        if size > tail:                                        # NaN scales in the slack: a read that is used shows up
-            assert hip.hipMemset(ctypes.c_void_p(gq.ptr + tail), 0xFF, ctypes.c_size_t(size - tail)) == 0
-        run(lib, qtype, gw.ptr, x, gq.ptr, gy.ptr, rows, m, k)
-        y = torch.empty(rows, m, dtype=torch.float32, device="cuda")
-        _memcpy(hip, y.data_ptr(), gy.ptr, rows * m * 4)
-        same = torch.equal(y.view(torch.int32), ref.view(torch.int32))
-        print(f"{'OK' if same else 'MISMATCH'} {name} rows={rows} m={m} k={k}", flush=True)
+
+        def call(q8: torch.Tensor, y: torch.Tensor, wt: torch.Tensor, x=x, rows=rows, tail=tail) -> torch.Tensor:
+            q8[tail:] = 0xFF                                   # NaN scales in the slack: a read that is used shows up
+            y.view(torch.int32).fill_(unwritten)
+            torch.cuda.synchronize()
+            run(lib, qtype, wt.data_ptr(), x, q8.data_ptr(), y.data_ptr(), rows, m, k)
+            return y.view(torch.float32).view(rows, m).clone()
+
+        def plain_q8(size=size) -> torch.Tensor:
+            return torch.empty(size, dtype=torch.uint8, device="cuda")
+
+        def plain_y(n=rows * m * 4) -> torch.Tensor:
+            return torch.empty(n, dtype=torch.uint8, device="cuda")
+
+        ctl = call(plain_q8(), plain_y(), w)
+        if not torch.equal(_bits(ctl), _bits(ref)):
+            print(f"CTYPES-MISMATCH {name} rows={rows} m={m} k={k}: {_diff(ctl, ref, unwritten)}", flush=True)
+        gq, gy = Guarded(hip, size), Guarded(hip, rows * m * 4, align=4)
+        q8v, yv = device_view(gq.ptr, size), device_view(gy.ptr, rows * m * 4)
+        y = call(q8v, yv, wv)
+        torch.cuda.synchronize()
+        if torch.equal(_bits(y), _bits(ref)):
+            print(f"OK {name} rows={rows} m={m} k={k}", flush=True)
+        else:
+            alone = {"q8": call(q8v, plain_y(), w), "y": call(plain_q8(), yv, w), "w": call(plain_q8(), plain_y(), wv)}
+            culprits = [b for b, out in alone.items() if not torch.equal(_bits(out), _bits(ref))]
+            weight_ok = torch.equal(wv, w)
+            print(f"MISMATCH {name} rows={rows} m={m} k={k}: {_diff(y, ref, unwritten)}; guarded alone that differ: "
+                  f"{culprits or 'none'}; weight copy {'intact' if weight_ok else 'CHANGED'}", flush=True)
+        torch.cuda.synchronize()
+        del q8v, yv
         gq.close(), gy.close()
+    del wv
+    torch.cuda.synchronize()
     gw.close()
     return 0
 
@@ -204,7 +265,7 @@ def guarded_sweep(name: str, m: int, k: int, rows: list[int], size: str) -> list
         proc = subprocess.run(cmd, capture_output=True, text=True, check=False)   # a fault is the signal
         lines = proc.stdout.splitlines()
         cases = [ln for ln in lines if ln.startswith("CASE ")]
-        bad += [ln for ln in lines if ln.startswith("MISMATCH")]
+        bad += [ln for ln in lines if ln.startswith(("MISMATCH", "CTYPES-MISMATCH", "WEIGHT-COPY-BAD"))]
         if proc.returncode == 0:
             break
         last = cases[-1] if cases else f"{name} m={m} k={k} before the first case"
