@@ -315,7 +315,7 @@ def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: 
                          "--tp 2), or pass --no-drafts for the serial reference")
     draft = Path(drafter) if drafter and not no_drafts else None
     streams = max(1, int(options.get("parallel") or 1))
-    from .cuda.gguf_load import gguf_file
+    from .cuda.gguf_detect import gguf_file
 
     # one stream on one GB10 takes the width it affords (16-row trees, widening to 128); other shapes keep 12 rows
     wide = tp == 1 and streams == 1 and gb10()
