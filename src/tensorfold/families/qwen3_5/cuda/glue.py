@@ -168,12 +168,36 @@ def _gated_norm(Yr, Z, W, OUT, XS, eps, VH: tl.constexpr, DV: tl.constexpr):
     tl.store(XS + row * (VH * DV // 64) + h * (DV // 64) + tl.arange(0, DV // 64), tl.sum(og, axis=1))
 
 
+@triton.jit
+def _gated_norm_rows(Yr, Z, W, OUT, XS, eps, NROWS, VH: tl.constexpr, DV: tl.constexpr, ROWS: tl.constexpr):
+    """``_gated_norm`` with ROWS rows of one value head a program, each row's arithmetic unchanged (ROCm: one row a
+    program is launch-bound, 196k programs per 4,096 rows on the 27B)."""
+    h = tl.program_id(1)
+    for i in range(ROWS):
+        row = tl.program_id(0) * ROWS + i
+        if row < NROWS:
+            offs = (row * VH + h) * DV + tl.arange(0, DV)
+            y = tl.load(Yr + offs).to(tl.float32)
+            z = tl.load(Z + offs).to(tl.float32)
+            w = tl.load(W + tl.arange(0, DV)).to(tl.float32)
+            yn = y * (1.0 / tl.sqrt(tl.sum(y * y, axis=0) / DV + eps)) * w
+            out = (z * tl.sigmoid(z) * yn).to(tl.bfloat16)
+            tl.store(OUT + offs, out)
+            og = tl.reshape(out.to(tl.float32), (DV // 64, 64))
+            tl.store(XS + row * (VH * DV // 64) + h * (DV // 64) + tl.arange(0, DV // 64), tl.sum(og, axis=1))
+
+
 def gated_norm(y: torch.Tensor, z: torch.Tensor, w: torch.Tensor, eps: float):
     """y, z (W, VH, DV) bf16 -> silu(z) * rmsnorm(y) * w as (W, VH*DV) bf16, plus its group sums."""
 
     W, vh, dv = y.shape
     out = torch.empty((W, vh * dv), dtype=torch.bfloat16, device=y.device)
     xs = torch.empty((W, vh * dv // 64), dtype=torch.float32, device=y.device)
+    from tensorfold.cuda.rocm import HIP
+
+    if HIP:
+        _gated_norm_rows[(triton.cdiv(W, 64), vh)](y, z, w, out, xs, eps, W, VH=vh, DV=dv, ROWS=64, num_warps=1)
+        return out, xs
     _gated_norm[(W, vh)](y, z, w, out, xs, eps, VH=vh, DV=dv, num_warps=1)
     return out, xs
 
