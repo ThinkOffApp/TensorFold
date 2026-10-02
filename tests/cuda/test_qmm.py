@@ -102,6 +102,7 @@ def test_strided_rows_buffers_and_unreduced_slices():
     assert torch.equal(total, qmm.matmul(x, q, f32=True))
 
 
+@ptx
 @pytest.mark.parametrize("n,k,gs", [(128, 5120, 64), (200, 1024, 32)])
 def test_every_nibble_decodes_exactly(n, k, gs):
     """One-hot rows read back each stored nibble (scale 1, bias 0): pair() and every K split are exact on any GPU."""
