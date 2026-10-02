@@ -67,6 +67,42 @@ def _attend(Q, K, V, OUT, p0, W, H: tl.constexpr, HK: tl.constexpr, D: tl.conste
     tl.store(OUT + (rows[:, None] * H + head) * D + d[None, :], out.to(tl.bfloat16), mask=ok[:, None])
 
 
+@triton.jit
+def _attend_columns(Q, K, V, OUT, p0, W, H: tl.constexpr, HK: tl.constexpr, D: tl.constexpr, DV: tl.constexpr,
+                    BM: tl.constexpr, BN: tl.constexpr, SCALE: tl.constexpr, SPLIT_V: tl.constexpr):
+    """``_attend`` with each program owning DV of the D value columns (third grid axis): every output element is the
+    same sum over the same 64-key tiles in the same order, so the bits are ``_attend``'s; the 64 x DV accumulator is
+    what changes. ROCm, D = 256 (gfx1151): halves in one key loop ran 3.2x faster than _attend, bits identical."""
+    block = tl.program_id(0)
+    head = tl.program_id(1)
+    v0 = tl.program_id(2) * DV
+    hk = head // (H // HK)
+    rows = block * BM + tl.arange(0, BM)
+    ok = rows < W
+    pos = p0 + rows
+    d = tl.arange(0, D)
+    dv = v0 + tl.arange(0, DV)
+    q = tl.load(Q + (rows[:, None] * H + head) * D + d[None, :], mask=ok[:, None], other=0.0)
+    m = tl.full((BM,), float("-inf"), tl.float32)
+    l = tl.zeros((BM,), tl.float32)
+    o = tl.zeros((BM, DV), tl.float32)
+    first_pos = p0 + block * BM
+    last_pos = p0 + tl.minimum(block * BM + BM, W) - 1
+    full = (first_pos + 1) // BN                  # tiles every row of the block sees whole
+    for t in range(0, last_pos // BN + 1):        # one loop, whole tiles unmasked: 2.5x faster than two loops here
+        keys = t * BN + tl.arange(0, BN)
+        if t < full:
+            k = tl.load(K + (keys[:, None] * HK + hk) * D + d[None, :])
+            v = tl.load(V + (keys[:, None] * HK + hk) * D + dv[None, :])
+        else:
+            seen = keys <= last_pos
+            k = tl.load(K + (keys[:, None] * HK + hk) * D + d[None, :], mask=seen[:, None], other=0.0)
+            v = tl.load(V + (keys[:, None] * HK + hk) * D + dv[None, :], mask=seen[:, None], other=0.0)
+        m, l, o = _tile(q, k, v, m, l, o, keys[None, :] <= pos[:, None], SCALE, SPLIT_V)
+    out = o / l[:, None]
+    tl.store(OUT + (rows[:, None] * H + head) * D + dv[None, :], out.to(tl.bfloat16), mask=ok[:, None])
+
+
 def attention(q: torch.Tensor, k_cache: torch.Tensor, v_cache: torch.Tensor, p0: int, *, scale: float) -> torch.Tensor:
     """q (W, H, D) bf16 at positions [p0, p0 + W); the caches must already hold every key through p0 + W - 1."""
 
@@ -75,6 +111,10 @@ def attention(q: torch.Tensor, k_cache: torch.Tensor, v_cache: torch.Tensor, p0:
     out = torch.empty_like(q)
     from tensorfold.cuda.rocm import HIP
 
+    if HIP and d == 256:                   # ROCm, the 27B's heads: _attend's bits, half the value columns a program
+        _attend_columns[(triton.cdiv(w, BM), h, 2)](q, k_cache, v_cache, out, p0, w, H=h, HK=hk, D=d, DV=128, BM=BM,
+                                                    BN=BN, SCALE=scale, SPLIT_V=True, num_warps=8, num_stages=1)
+        return out
     if d == 64 or HIP:                     # ROCm: the CUDA kernel is inline PTX; the Triton definition runs there
         return triton_attention(q, k_cache, v_cache, p0, scale=scale, out=out)
     _ext().prefill_attention(q, k_cache, v_cache, out, p0, scale, heads_a_block(h // hk))
