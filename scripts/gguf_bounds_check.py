@@ -14,6 +14,10 @@ activation buffer's slack is filled with 0xFF (NaN scales) and ``y`` must equal 
 Controls run first and MUST fault: Q8_0, m=256, K=5120 at 96 rows with the old exact-size buffer (the Strix fault
 f328ee8 fixed), and at 129 rows with 5 slack tiles (the model says 6 is the least that fits). If they do not fault,
 the guard is not working and the run reports so and fails instead of passing.
+A control counts only if the child printed CASE-START (flushed just before the guarded launch) and died with a GPU
+memory-fault signature (FAULT_TEXT); any other death is INCONCLUSIVE. The 6-tile control must be clean. The run
+prints the tree, torch/HIP, device/arch, library path, Gufo revision and kSlackTiles, logs every child's stdout,
+stderr and return code to logs/bounds/guard-<time>.log (--log), and ends PASS (0), FAIL (1) or INCONCLUSIVE (2).
 
 ``sentinel``: no VMM; the activation buffer sits inside a larger torch tensor whose tail is filled with 0x00, 0xFF and
 0x7F in turn; ``y`` must be identical bit for bit across the patterns and the tail must be unchanged after the call.
@@ -33,8 +37,10 @@ import argparse
 import ctypes
 import glob
 import os
+import re
 import subprocess
 import sys
+import time
 
 import torch
 
@@ -236,8 +242,10 @@ def child(args) -> int:
             print(f"CTYPES-MISMATCH {name} rows={rows} m={m} k={k}: {_diff(ctl, ref, unwritten)}", flush=True)
         gq, gy = Guarded(hip, size), Guarded(hip, rows * m * 4, align=4)
         q8v, yv = device_view(gq.ptr, size), device_view(gy.ptr, rows * m * 4)
+        print(f"CASE-START {name} m={m} k={k} rows={rows} size={args.size}", flush=True)   # a fault after this is the guard
         y = call(q8v, yv, wv)
         torch.cuda.synchronize()
+        print(f"CASE-DONE {name} m={m} k={k} rows={rows}", flush=True)
         if torch.equal(_bits(y), _bits(ref)):
             print(f"OK {name} rows={rows} m={m} k={k}", flush=True)
         else:
@@ -255,24 +263,95 @@ def child(args) -> int:
     return 0
 
 
-def guarded_sweep(name: str, m: int, k: int, rows: list[int], size: str) -> list[str]:
-    """Runs one (type, shape) in children, restarting after each fault. Returns the faulting/mismatching cases."""
+# What a guard-page hit looks like from the parent. ROCr prints "Memory access fault by GPU node-N ... Page not present"
+# and aborts (SIGABRT: return code -6, or 134 through a shell); with the fault reported as an error instead, HIP's
+# synchronize raises hipErrorIllegalAddress ("an illegal memory access was encountered") and Python exits 1.
+FAULT_TEXT = ("Memory access fault by GPU", "hipErrorIllegalAddress", "illegal memory access")
+
+
+def is_gpu_fault(returncode: int, stderr: str) -> bool:
+    if "Memory access fault by GPU" in stderr:
+        return returncode in (-6, 134)
+    return returncode != 0 and any(t in stderr for t in FAULT_TEXT[1:])
+
+
+class Log:
+    """Every child's command, return code, stdout and stderr, in one file per run."""
+
+    def __init__(self, path: str):
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        self.path, self.file = path, open(path, "w")      # noqa: SIM115 - held for the run
+
+    def write(self, text: str) -> None:
+        self.file.write(text if text.endswith("\n") else text + "\n")
+        self.file.flush()
+
+
+def guarded_sweep(name: str, m: int, k: int, rows: list[int], size: str, log: Log) -> list[tuple[str, str]]:
+    """Runs one (type, shape) in children, restarting after each fault. Returns (kind, line) for every case that is not
+    clean: kind FAULT (reached CASE-START, died with a GPU memory-fault signature), MISMATCH, or INCONCLUSIVE (the
+    child died any other way: build, VMM setup, an assert, a fault outside the guarded launch)."""
 
     bad, start = [], 0
     while start < len(rows):
         cmd = [sys.executable, __file__, "--child", name, str(m), str(k), "--size", size, "--start", str(start),
                "--rows", *map(str, rows)]
         proc = subprocess.run(cmd, capture_output=True, text=True, check=False)   # a fault is the signal
+        log.write(f"=== {' '.join(cmd[1:])}\nreturn code {proc.returncode}\n--- stdout\n{proc.stdout}--- stderr\n"
+                  f"{proc.stderr}")
         lines = proc.stdout.splitlines()
         cases = [ln for ln in lines if ln.startswith("CASE ")]
-        bad += [ln for ln in lines if ln.startswith(("MISMATCH", "CTYPES-MISMATCH", "WEIGHT-COPY-BAD"))]
+        bad += [("MISMATCH", ln) for ln in lines if ln.startswith(("MISMATCH", "CTYPES-MISMATCH", "WEIGHT-COPY-BAD"))]
         if proc.returncode == 0:
             break
-        last = cases[-1] if cases else f"{name} m={m} k={k} before the first case"
-        err = (proc.stderr.strip().splitlines() or ["?"])[-1]
-        bad.append(f"FAULT {last[5:]} (exit {proc.returncode}: {err[:160]})")
+        err = (proc.stderr.strip().splitlines() or ["?"])[-1][:160]
+        started = [ln for ln in lines if ln.startswith(("CASE-START", "CASE-DONE"))]
+        in_launch = bool(started) and started[-1].startswith("CASE-START")
+        if in_launch and is_gpu_fault(proc.returncode, proc.stderr):
+            bad.append(("FAULT", f"FAULT {started[-1][11:]} (exit {proc.returncode}: {err})"))
+        else:
+            where = started[-1] if in_launch else (cases[-1] if cases else "before the first case")
+            died = f"CHILD-DIED {name} m={m} k={k} at {where!r}, not a guard fault (exit {proc.returncode}: {err})"
+            bad.append(("INCONCLUSIVE", died))
+            if not cases:                                      # setup failed: every later case would fail the same way
+                break
         start += max(len(cases), 1)
     return bad
+
+
+def _read(path: str) -> str:
+    with open(path) as f:
+        return f.read()
+
+
+def identity() -> list[str]:
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def git(*a: str) -> str:
+        out = subprocess.run(["git", "-C", root, *a], capture_output=True, text=True, check=False)
+        return out.stdout.strip() or "?"
+
+    with open(os.path.join(root, "src/tensorfold/cuda/gguf/capi.hip")) as f:
+        capi = f.read()
+    slack = re.search(r"kSlackTiles = (\d+)", capi)
+    props = torch.cuda.get_device_properties(0)
+    gufo = os.path.join(root, "src/tensorfold/cuda/gguf/vendor/GUFO_REVISION")
+    return [f"tree {git('rev-parse', 'HEAD')}{' (dirty)' if git('status', '--porcelain', '--untracked-files=no') != '?' else ''}",
+            f"torch {torch.__version__}, HIP {torch.version.hip}",
+            f"device {props.name}, {getattr(props, 'gcnArchName', '?')}",
+            f"libtfgguf {gguf._library()}",
+            f"Gufo {_read(gufo).strip() if os.path.exists(gufo) else '?'}",
+            f"capi.hip kSlackTiles = {slack.group(1) if slack else '?'}"]
+
+
+def verdict(log: Log, fail: list[str], inconclusive: list[str]) -> int:
+    for line in fail + inconclusive:
+        print("  " + line)
+    word, code = ("FAIL", 1) if fail else (("INCONCLUSIVE", 2) if inconclusive else ("PASS", 0))
+    summary = f"guard: {word} ({len(fail)} fail, {len(inconclusive)} inconclusive); log {log.path}"
+    print(summary)
+    log.write(summary)
+    return code
 
 
 def sentinel(args) -> int:
@@ -299,7 +378,7 @@ def sentinel(args) -> int:
                     print(f"FAIL {name} rows={rows} m={m} k={k}: "
                           f"{'output depends on the tail ' if not same else ''}{'tail written' if clobbered else ''}")
         print(f"{name}: done", flush=True)
-    print("sentinel: PASS" if failures == 0 else f"sentinel: {failures} FAIL")
+    print("sentinel: PASS" if failures == 0 else f"sentinel: FAIL ({failures})")
     return 1 if failures else 0
 
 
@@ -309,6 +388,7 @@ def main() -> int:
     ap.add_argument("--size", default="slack", help="slack (tf_gguf_q8_1_bytes), exact (no slack) or tiles:N")
     ap.add_argument("--types", nargs="+", default=list(TYPES))
     ap.add_argument("--rows", nargs="+", type=int, default=ROWS)
+    ap.add_argument("--log", help="per-run log of every child's output (default logs/bounds/guard-<time>.log)")
     ap.add_argument("--child", nargs=3, help=argparse.SUPPRESS)
     ap.add_argument("--start", type=int, default=0, help=argparse.SUPPRESS)
     args = ap.parse_args()
@@ -317,28 +397,38 @@ def main() -> int:
     if args.mode == "sentinel":
         return sentinel(args)
 
-    # Controls: the guard must catch the over-reads the CPU model predicts, or a clean sweep means nothing.
-    controls = [("exact", 96), ("tiles:5", 129)]
-    for size, rows in controls:
-        bad = guarded_sweep("Q8_0", 256, 5120, [rows], size)
-        caught = any(b.startswith("FAULT") for b in bad)
-        print(f"control Q8_0 m=256 k=5120 rows={rows} size={size}: {'faulted (guard works)' if caught else 'NO FAULT'}")
-        if not caught:
-            print("guard: INEFFECTIVE, the known over-read went undetected; the sweep below would prove nothing")
-            return 2
-    ok = guarded_sweep("Q8_0", 256, 5120, [129, 144], "tiles:6")
-    print(f"control Q8_0 rows=129,144 size=tiles:6 (the model's least sufficient slack): {ok or 'clean'}")
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    log = Log(args.log or os.path.join("logs", "bounds", f"guard-{stamp}.log"))
+    for line in identity():
+        print(line)
+        log.write(line)
+    print(f"log {log.path}", flush=True)
 
-    failures = []
+    # Controls: the guard must catch the over-reads the CPU model predicts, or a clean sweep means nothing. A control
+    # counts only if the child reached the guarded launch and died with a GPU memory-fault signature.
+    fail, inconclusive = [], []
+    for size, rows in [("exact", 96), ("tiles:5", 129)]:
+        bad = guarded_sweep("Q8_0", 256, 5120, [rows], size, log)
+        kinds = {kind for kind, _ in bad}
+        state = "faulted (guard works)" if kinds == {"FAULT"} else ("INCONCLUSIVE" if "INCONCLUSIVE" in kinds
+                                                                     else "NO FAULT (guard ineffective)")
+        print(f"control Q8_0 m=256 k=5120 rows={rows} size={size}: {state}", flush=True)
+        if kinds != {"FAULT"}:
+            inconclusive.append(f"CONTROL-INCONCLUSIVE size={size} rows={rows}: {state}; "
+                                f"{[line for _, line in bad] or 'child finished cleanly'}")
+            return verdict(log, fail, inconclusive)          # the sweep below would prove nothing
+    bad = guarded_sweep("Q8_0", 256, 5120, [129, 144], "tiles:6", log)   # the model's least sufficient slack
+    print(f"control Q8_0 m=256 k=5120 rows=129,144 size=tiles:6: {'clean' if not bad else 'NOT CLEAN'}", flush=True)
+    fail += [f"control tiles:6: {line}" for kind, line in bad if kind != "INCONCLUSIVE"]
+    inconclusive += [f"control tiles:6: {line}" for kind, line in bad if kind == "INCONCLUSIVE"]
+
     for name in args.types:
         for m, k in SHAPES.get(name, DEFAULT_SHAPES):
-            bad = guarded_sweep(name, m, k, args.rows, args.size)
-            failures += bad
-            print(f"{name} m={m} k={k}: {'clean' if not bad else f'{len(bad)} bad'}", flush=True)
-            for b in bad:
-                print("  " + b)
-    print("guard: PASS" if not failures else f"guard: {len(failures)} FAIL")
-    return 1 if failures else 0
+            bad = guarded_sweep(name, m, k, args.rows, args.size, log)
+            fail += [line for kind, line in bad if kind != "INCONCLUSIVE"]
+            inconclusive += [line for kind, line in bad if kind == "INCONCLUSIVE"]
+            print(f"{name} m={m} k={k}: {'clean' if not bad else f'{len(bad)} not clean'}", flush=True)
+    return verdict(log, fail, inconclusive)
 
 
 if __name__ == "__main__":
