@@ -82,6 +82,50 @@ def _gdn_pre(QKV, CS, CW, WIN, A, B, ALOG, DTB, Q, K, V, G, BETA, SID,
         tl.store(BETA + row * VH + hv, tl.sigmoid(b))
 
 
+@triton.jit
+def _gdn_pre_rows(QKV, CS, CW, WIN, A, B, ALOG, DTB, Q, K, V, G, BETA, SID, W,
+                  C: tl.constexpr, KH: tl.constexpr, VH: tl.constexpr, DK: tl.constexpr, NKEEP: tl.constexpr,
+                  MULTI: tl.constexpr, ROWS: tl.constexpr):
+    """``_gdn_pre`` with ROWS rows a program, each row's arithmetic unchanged (ROCm: one row a program left the
+    GPU launch-bound, 327k programs per 4,096 rows; 64 rows ran 7.2x faster on gfx1151, same bits)."""
+    head = tl.program_id(1)
+    ch = head * DK + tl.arange(0, DK)
+    for i in range(ROWS):
+        row = tl.program_id(0) * ROWS + i
+        if row < W:
+            acc = tl.zeros((DK,), dtype=tl.float32)
+            cs_row = tl.load(SID + row) * NKEEP if MULTI else 0
+            for j in tl.static_range(NKEEP + 1):
+                src = tl.load(WIN + row * (NKEEP + 1) + j)
+                from_state = src < NKEEP
+                xs = tl.load(CS + (cs_row + src) * C + ch, mask=(ch < C) & from_state, other=0.0)
+                xw = tl.load(QKV + (src - NKEEP) * C + ch, mask=(ch < C) & (src >= NKEEP), other=0.0)
+                x = tl.where(from_state, xs, xw).to(tl.float32)
+                w = tl.load(CW + ch * (NKEEP + 1) + j).to(tl.float32)
+                acc = acc + x * w
+            c = (acc * tl.sigmoid(acc)).to(tl.bfloat16).to(tl.float32)
+            if head < 2 * KH:
+                inv = 1.0 / tl.sqrt(tl.sum(c * c, axis=0) / DK + 1e-6)
+                is_q = head < KH
+                scale = tl.where(is_q, 1.0 / DK, 1.0 / tl.sqrt(DK * 1.0))
+                out = (c * inv * scale).to(tl.bfloat16)
+                hk = tl.where(is_q, head, head - KH)
+                base = (row * KH + hk) * DK + tl.arange(0, DK)
+                if is_q:
+                    tl.store(Q + base, out)
+                else:
+                    tl.store(K + base, out)
+            else:
+                hv = head - 2 * KH
+                tl.store(V + (row * VH + hv) * DK + tl.arange(0, DK), c.to(tl.bfloat16))
+                a = tl.load(A + row * VH + hv).to(tl.float32) + tl.load(DTB + hv)
+                sp = tl.where(a > 20.0, a, tl.log(1.0 + tl.exp(a)))
+                g = tl.exp(-tl.exp(tl.load(ALOG + hv)) * sp)
+                b = tl.load(B + row * VH + hv).to(tl.float32)
+                tl.store(G + row * VH + hv, g)
+                tl.store(BETA + row * VH + hv, tl.sigmoid(b))
+
+
 def gdn_pre(qkv: torch.Tensor, conv_state: torch.Tensor, conv_w: torch.Tensor, windows: torch.Tensor,
             a: torch.Tensor, b: torch.Tensor, A_log: torch.Tensor, dt_bias: torch.Tensor, *, kh: int, vh: int, dk: int,
             stream_ids: torch.Tensor | None = None, nkeep: int | None = None):
@@ -96,6 +140,13 @@ def gdn_pre(qkv: torch.Tensor, conv_state: torch.Tensor, conv_w: torch.Tensor, w
     g = torch.empty((W, vh), dtype=torch.float32, device=dev)
     beta = torch.empty((W, vh), dtype=torch.float32, device=dev)
     multi = stream_ids is not None
+    from tensorfold.cuda.rocm import HIP
+
+    if HIP:
+        _gdn_pre_rows[(triton.cdiv(W, 64), 2 * kh + vh)](qkv, conv_state, conv_w, windows, a, b, A_log, dt_bias, q, k, v,
+                                                       g, beta, stream_ids if multi else windows, W, C=C, KH=kh,
+                                                       VH=vh, DK=dk, NKEEP=nkeep, MULTI=multi, ROWS=64, num_warps=2)
+        return q, k, v, g, beta
     _gdn_pre[(W, 2 * kh + vh)](qkv, conv_state, conv_w, windows, a, b, A_log, dt_bias, q, k, v, g, beta,
                               stream_ids if multi else windows, C=C, KH=kh, VH=vh, DK=dk, NKEEP=nkeep, MULTI=multi,
                               num_warps=2)
