@@ -119,6 +119,36 @@ def _fast() -> bool:
     return HIP and os.environ.get("TENSORFOLD_GGUF_FAST", "1") != "0"
 
 
+def bf16_prefill() -> bool:
+    """TENSORFOLD_GGUF_BF16_PREFILL=1 on ROCm: prompt rows on bf16 copies of the GGUF weights (hipBLASLt), not the int8
+    WMMA route. Changes prompt bits (closer to the exact route: no int8 rounding of activations); off by default."""
+
+    from tensorfold.cuda.rocm import HIP
+
+    return HIP and os.environ.get("TENSORFOLD_GGUF_BF16_PREFILL") == "1"
+
+
+def bf16_rows(rows: int, gran: int) -> int:
+    """Rows a bf16 prompt call is padded to: up to 1024 rows, the next multiple of ``gran``; above, 4096. hipBLASLt on
+    gfx1151 picks its algorithm by row count, and ``gran`` is the smallest step at which a weight's shape keeps every
+    row's bits equal to a 4096-row call (chosen per shape at load; shapes with none stay on the int8 route)."""
+
+    return -(-rows // gran) * gran if rows <= 1024 else 4096
+
+
+def dense_prompt(x: torch.Tensor, dense: torch.Tensor, gran: int) -> torch.Tensor:
+    """x (rows, K) bf16 times dense (N, K) bf16 transposed, in 4096-row blocks, each padded per ``bf16_rows``."""
+
+    outs = []
+    for r0 in range(0, x.shape[0], 4096):
+        part = x[r0:r0 + 4096]
+        m = bf16_rows(part.shape[0], gran)
+        if m != part.shape[0]:
+            part = torch.cat([part, part.new_zeros((m - part.shape[0], part.shape[1]))])
+        outs.append((part @ dense.t())[:min(4096, x.shape[0] - r0)])
+    return outs[0] if len(outs) == 1 else torch.cat(outs)
+
+
 @dataclass
 class Gguf:
     """A GGUF K-quant/IQ projection on ``tensorfold.cuda.gguf``'s exact kernels (Gufo's): any row count, same row bits."""
@@ -128,6 +158,8 @@ class Gguf:
     cols: int                 # K
     in_perm: torch.Tensor | None = None   # input columns in the file's order (out_proj's tiled V heads)
     layout: str = "gguf"
+    dense: torch.Tensor | None = None     # (N, K) bf16 copy for prompt rows under TENSORFOLD_GGUF_BF16_PREFILL
+    gran: int = 128                       # its padding step (``bf16_rows``), chosen per shape at load
 
     @property
     def n(self) -> int:
@@ -143,7 +175,8 @@ class Gguf:
     def rows(self, index: torch.Tensor) -> "Gguf":
         """The rows at ``index`` (whole packed rows, so the same bits per row)."""
 
-        return Gguf(self.weight.index_select(0, index).contiguous(), self.qtype, self.cols, self.in_perm)
+        return Gguf(self.weight.index_select(0, index).contiguous(), self.qtype, self.cols, self.in_perm,
+                    dense=None)    # a new N is a new hipBLASLt shape, unchecked: the int8 route
 
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
         from tensorfold.cuda import gguf
@@ -184,6 +217,10 @@ class Gguf:
 
         from tensorfold.cuda import gguf
 
+        if self.dense is not None:
+            if self.in_perm is not None:
+                x = x.index_select(1, self.in_perm)
+            return dense_prompt(x.to(torch.bfloat16).contiguous(), self.dense, self.gran)
         if not (_fast() and self.qtype in gguf.PREFILL):
             return self(x)
         if self.in_perm is not None:

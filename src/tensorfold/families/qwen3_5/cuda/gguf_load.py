@@ -15,7 +15,7 @@ from pathlib import Path
 import torch
 
 from .gguf_detect import gguf_file  # noqa: F401  (re-exported: callers import it from here)
-from .weights import GDN, Attention, Config, Gguf, Layer, Plain, Weights
+from .weights import GDN, Attention, Config, Gguf, Layer, Plain, Weights, bf16_prefill, dense_prompt
 
 
 def _reader(path: Path):
@@ -120,7 +120,79 @@ def load_gguf(model_dir: str | Path, device: str = "cuda") -> Weights:
     left = [n for n in tensors if n not in used and not n.startswith(f"blk.{cfg.layers}.")]   # the MTP block is not read
     if left:
         raise ValueError(f"unused GGUF tensors: {left[:5]} ...")
+    if bf16_prefill():
+        _attach_dense(w)
     return w
+
+
+def _dense(g: Gguf) -> torch.Tensor:
+    """g's weights as an (N, K) bf16 matrix: Gufo's dequantizer where it has one (Q8_0, Q5_K, Q6_K), otherwise the exact
+    linear route on one-hot rows (each output is one weight times 1.0 plus zeros, so the fp32 value is that weight)."""
+
+    from tensorfold.cuda import gguf
+
+    n, k = g.n, g.k
+    if g.qtype in (gguf.Q8_0, gguf.Q5_K, gguf.Q6_K):
+        return gguf.dequant(g.weight, g.qtype, n * k).view(n, k)
+    out = torch.empty((n, k), dtype=torch.bfloat16, device=g.weight.device)
+    for j0 in range(0, k, 512):
+        j1 = min(k, j0 + 512)
+        eye = torch.zeros((j1 - j0, k), dtype=torch.float32, device=g.weight.device)
+        eye[:, j0:j1] = torch.eye(j1 - j0, device=g.weight.device)
+        out[:, j0:j1] = gguf.linear(eye, g.weight, g.qtype, n).t().to(torch.bfloat16)
+    return out
+
+
+# Row counts and offsets the per-shape check compares with one 4096-row call: the padding edges at every step, both
+# sides of 1024, and slices away from row 0 (a row's bits must not depend on where it sits in the call).
+_CHECK = [(1, 0), (2, 5), (7, 100), (37, 3), (95, 1), (127, 0), (128, 256), (129, 7), (300, 9), (513, 7), (1000, 1000),
+          (1023, 1), (1024, 0), (1025, 3), (2048, 0), (2048, 2048), (3000, 50), (4095, 1), (4096, 0)]
+
+
+def _gran(d: torch.Tensor, gen: torch.Generator) -> int | None:
+    """The smallest padding step (128..1024) at which every checked slice of a prompt on ``d`` has the same bits as the
+    same rows of one 4096-row call, or None if no step does (the shape stays on the int8 route)."""
+
+    x = torch.randn((4096, d.shape[1]), generator=gen, device=d.device).to(torch.bfloat16)
+    full = (x @ d.t()).view(torch.int16)
+    for gran in (128, 256, 512, 1024):
+        if all(torch.equal(dense_prompt(x[o:o + r], d, gran).view(torch.int16), full[o:o + r]) for r, o in _CHECK):
+            return gran
+    return None
+
+
+def _attach_dense(w: Weights) -> None:
+    """TENSORFOLD_GGUF_BF16_PREFILL: bf16 copies of every layer projection, each shape with its checked padding step
+    (``_gran``); a shape no step keeps bit-stable drops its copies and stays on the int8 route."""
+
+    projs = []
+    for layer in w.layers:
+        parts = [layer.gate, layer.up, layer.down]
+        if layer.gdn is not None:
+            parts += [layer.gdn.qkv, layer.gdn.z, layer.gdn.b, layer.gdn.a, layer.gdn.out]
+        if layer.attn is not None:
+            parts += [layer.attn.q, layer.attn.k, layer.attn.v, layer.attn.o]
+        projs += [p for p in parts if isinstance(p, Gguf)]
+    gen = torch.Generator(device=projs[0].weight.device).manual_seed(0)
+    grans, kept = {}, []
+    for p in projs:
+        shape = (p.n, p.k)
+        if shape not in grans:
+            d = _dense(p)
+            grans[shape] = _gran(d, gen)
+            if grans[shape] is None:
+                del d
+                continue
+            p.dense = d
+        elif grans[shape] is not None:
+            p.dense = _dense(p)
+        if p.dense is not None:
+            p.gran = grans[shape]
+            kept.append(p)
+    mib = sum(p.dense.numel() * 2 for p in kept) / 2**20
+    steps = ", ".join(f"{n}x{k}:{g or 'int8'}" for (n, k), g in sorted(grans.items()))
+    print(f"[tensorfold] bf16 prompt weights: {len(kept)} of {len(projs)} projections, {mib:.0f} MiB; padding step per "
+          f"shape {steps}", flush=True)
 
 
 def weight_bytes(layers: int):
@@ -130,6 +202,8 @@ def weight_bytes(layers: int):
         if name.startswith(f"model.layers.{layers}."):          # the MTP block is not read
             return 0, 0
         size = int(info["data_offsets"][1])
+        if bf16_prefill() and name.startswith("model.layers.") and info.get("gguf_type", 0) not in (0, 1, 30):
+            size += 2 * int(info.get("elements", 0))            # the bf16 prompt copy (F32/F16/BF16 load as Plain)
         return (size * 7 // 5 if name == "output.weight" else size), 0
 
     return transform

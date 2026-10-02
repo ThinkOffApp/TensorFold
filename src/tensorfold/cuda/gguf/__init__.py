@@ -166,5 +166,6 @@ def headers(path) -> dict:
             _, index, rest = name.split(".", 2)
             name = f"model.layers.{index}.{rest}"
         size = int(t.n_bytes)
-        out[name] = {"dtype": "U8", "shape": [size], "data_offsets": [0, size], "gguf_type": int(t.tensor_type)}
+        out[name] = {"dtype": "U8", "shape": [size], "data_offsets": [0, size], "gguf_type": int(t.tensor_type),
+                     "elements": int(t.n_elements)}
     return out
