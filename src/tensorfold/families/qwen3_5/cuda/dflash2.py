@@ -159,6 +159,13 @@ def _sub_parts(head, spans: tuple[tuple[int, int], ...]) -> list[tuple[object, i
     return parts
 
 
+def _plain_sub_head(head: Plain, spans: tuple[tuple[int, int], ...]) -> Plain:
+    """An unquantized head's rows for ``spans`` (a GGUF that keeps output.weight in F16/BF16/F32): ``b16`` computes
+    each output column on its own warp, so a row's logit has the target's bits whichever rows sit beside it."""
+
+    return Plain(torch.cat([head.weight[a:b] for a, b in spans]).contiguous())
+
+
 def _exl3_sub_head(layer, spans: tuple[tuple[int, int], ...]):
     """The EXL3 head's strips holding ``spans`` as stored (the target's own logits, bit for bit), and the span columns."""
 
@@ -234,6 +241,10 @@ class DFlash2:
             if world != 1:
                 raise ValueError("a two-rank drafter needs the MLX checkpoint's 4-bit head")
             self.sub_head = target.head.rows(self.head_ids)       # whole packed rows: each row keeps its bits
+        elif isinstance(target.head, Plain):
+            if world != 1:
+                raise ValueError("a two-rank drafter needs the MLX checkpoint's 4-bit head")
+            self.sub_head = _plain_sub_head(target.head, spans)
         elif isinstance(target.head, Exl3):
             if world != 1:
                 raise ValueError("a two-rank drafter needs the MLX checkpoint's 4-bit head")
