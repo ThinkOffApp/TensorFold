@@ -5,8 +5,9 @@
 A few blk.* projections of each quant type in the file. For each, 4096 random bf16 rows through the fast kernel:
 (a) slices of 1000/1/37/513/95/96 rows at several offsets, a permuted batch, and fp32 input must give the same bits
 as the 4096-row call; (b) error against the exact kernel (``gguf.linear``, decode's bits), which must NOT match
-bitwise (else the fast path did not run); (c) both kernels timed at 4096 rows. ``Gguf.prefill`` under
-TENSORFOLD_GGUF_FAST=1 must return the fast kernel's bits (the switch is wired). Decode: 1 row on ``gguf.gemv``
+bitwise (else the fast path did not run); (c) both kernels timed at 4096 rows. ``Gguf.prefill`` with
+TENSORFOLD_GGUF_FAST unset (the default) must return the fast kernel's bits, and with TENSORFOLD_GGUF_FAST=0 the exact
+kernel's (the switch is wired both ways). Decode: 1 row on ``gguf.gemv``
 vs the exact kernel's 1 row (reported: equal bits keep drafted == serial), and 1-row and 16-row timings of
 exact vs fast. Verify widths 2/4/8/16 per TENSORFOLD_GGUF_FAST_VERIFY option (wmma unpadded, bf16, gemv per row,
 exact): time and max abs error vs exact; and 20/40-row prompt calls padded (TENSORFOLD_GGUF_FAST_PAD=1) vs not.
@@ -102,12 +103,18 @@ def main() -> int:
                     bad.append("permuted")
                 if not torch.equal(gguf.prefill_linear(x.float(), w, q, n), ref):
                     bad.append("fp32-in")
-                os.environ["TENSORFOLD_GGUF_FAST"] = "1"
-                g = Gguf(w.view(n, -1), q, k)
-                wired = torch.equal(g.prefill(x[:513]), ref[:513].to(torch.bfloat16))
+                saved = os.environ.pop("TENSORFOLD_GGUF_FAST", None)   # unset = the default, which is fast
                 one = x[:1].float()
-                wired &= torch.equal(g(x[:1]), gguf.gemv(one, w, q, n).to(torch.bfloat16))
-                del os.environ["TENSORFOLD_GGUF_FAST"]
+                try:
+                    g = Gguf(w.view(n, -1), q, k)
+                    wired = torch.equal(g.prefill(x[:513]), ref[:513].to(torch.bfloat16))
+                    wired &= torch.equal(g(x[:1]), gguf.gemv(one, w, q, n).to(torch.bfloat16))
+                    os.environ["TENSORFOLD_GGUF_FAST"] = "0"
+                    wired &= torch.equal(g.prefill(x[:513]), gguf.linear(x[:513], w, q, n).to(torch.bfloat16))
+                finally:
+                    os.environ.pop("TENSORFOLD_GGUF_FAST", None)
+                    if saved is not None:
+                        os.environ["TENSORFOLD_GGUF_FAST"] = saved
                 e1 = gguf.linear(one.expand(2, -1), w, q, n)[:1]
                 g1 = gguf.gemv(one, w, q, n)
                 serial = "equal" if torch.equal(g1, e1) else f"DIFFERS max abs {(g1 - e1).abs().max().item():.1e}"
