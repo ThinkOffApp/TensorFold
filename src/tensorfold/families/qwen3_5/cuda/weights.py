@@ -111,12 +111,13 @@ class Exl3:
 
 
 def _fast() -> bool:
-    """On ROCm by default: GGUF projections on Gufo's production routes (speed first, see ``Gguf``).
-    TENSORFOLD_GGUF_FAST=0 keeps every row count on the exact kernel (decode's bits for prompts too)."""
+    """Off by default: every row count stays on the exact kernel (decode's bits for prompts too), so prompts match the
+    native path bit for bit. TENSORFOLD_GGUF_FAST=1 on ROCm moves GGUF projections to Gufo's production routes (speed
+    first, different bits; see ``Gguf``)."""
 
     from tensorfold.cuda.rocm import HIP
 
-    return HIP and os.environ.get("TENSORFOLD_GGUF_FAST", "1") != "0"
+    return HIP and os.environ.get("TENSORFOLD_GGUF_FAST", "0") == "1"
 
 
 @dataclass
@@ -179,7 +180,7 @@ class Gguf:
         return y.to(torch.bfloat16)
 
     def prefill(self, x: torch.Tensor) -> torch.Tensor:
-        """Prompt rows: on ROCm (unless TENSORFOLD_GGUF_FAST=0) Gufo's WMMA W8A8 GEMM (not decode's bits), otherwise
+        """Prompt rows: on ROCm with TENSORFOLD_GGUF_FAST=1, Gufo's WMMA W8A8 GEMM (not decode's bits), otherwise
         the exact kernel; under 96 rows on its small-row tiles unless TENSORFOLD_GGUF_FAST_PAD=1 pads to one kernel per weight."""
 
         from tensorfold.cuda import gguf

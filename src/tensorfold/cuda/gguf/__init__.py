@@ -1,7 +1,7 @@
 """GGUF K-quant and IQ projections on Gufo's exact HIP GEMM (``vendor/``, MIT): a row's bits never depend on the row count.
 
-``gemv`` and ``prefill_linear`` are Gufo's own decode GEMV and WMMA prompt GEMM, the default on ROCm;
-TENSORFOLD_GGUF_FAST=0 turns them off.
+``gemv`` and ``prefill_linear`` are Gufo's own decode GEMV and WMMA prompt GEMM. They are off by default (their bits
+differ from the exact kernel's); TENSORFOLD_GGUF_FAST=1 turns them on.
 
 The vendored kernels build with hipcc into ``libtfgguf.so``; a small torch binding calls it on the current stream.
 """

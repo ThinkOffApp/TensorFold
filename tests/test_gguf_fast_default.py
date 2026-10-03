@@ -1,4 +1,4 @@
-"""GGUF projections take Gufo's fast routes by default on ROCm; TENSORFOLD_GGUF_FAST=0 is the off switch, and NVIDIA never does."""
+"""GGUF projections stay on the exact kernel by default; TENSORFOLD_GGUF_FAST=1 turns Gufo's fast routes on (ROCm only, never NVIDIA)."""
 
 import pytest
 
@@ -6,7 +6,7 @@ pytest.importorskip("torch")
 
 
 @pytest.mark.parametrize("hip, value, fast", [
-    (True, None, True), (True, "1", True), (True, "0", False),
+    (True, None, False), (True, "1", True), (True, "0", False),
     (False, None, False), (False, "1", False),
 ])
 def test_gguf_fast_switch(monkeypatch, hip, value, fast):
