@@ -120,6 +120,24 @@ def _fast() -> bool:
     return HIP and os.environ.get("TENSORFOLD_GGUF_FAST", "0") == "1"
 
 
+def _fast_part(part: str) -> bool:
+    """The fast routes, switchable separately for the prompt GEMM and the decode GEMV.
+
+    TENSORFOLD_GGUF_FAST=1 turns both on, as before. TENSORFOLD_GGUF_FAST_PREFILL and TENSORFOLD_GGUF_FAST_DECODE
+    override one side each, so the two can be told apart: they change different kernels (Gufo's WMMA W8A8 GEMM over
+    the prompt, and Gufo's GEMV once per generated token) and only measurement says which one moves a reply.
+    """
+
+    from tensorfold.cuda.rocm import HIP
+
+    if not HIP:
+        return False
+    v = os.environ.get(f"TENSORFOLD_GGUF_FAST_{part.upper()}")
+    if v is not None:
+        return v == "1"
+    return _fast()
+
+
 @dataclass
 class Gguf:
     """A GGUF K-quant/IQ projection on ``tensorfold.cuda.gguf``'s exact kernels (Gufo's): any row count, same row bits."""
@@ -151,7 +169,7 @@ class Gguf:
 
         if self.in_perm is not None:
             x = x.index_select(1, self.in_perm)
-        if _fast():
+        if _fast_part("decode") if x.shape[0] == 1 else _fast():
             return self._fast(x)
         if x.shape[0] == 1:                    # two rows beat one in Gufo's dispatch; rows keep their bits at any count
             return gguf.linear(x.expand(2, -1), self.weight, self.qtype, self.n)[:1].to(torch.bfloat16)
@@ -185,10 +203,13 @@ class Gguf:
 
         from tensorfold.cuda import gguf
 
-        if not (_fast() and self.qtype in gguf.PREFILL):
+        mode = os.environ.get("TENSORFOLD_GGUF_FAST_PREFILL_MODE", "wmma")
+        if not (_fast_part("prefill") and (mode == "bf16" or self.qtype in gguf.PREFILL)):
             return self(x)
         if self.in_perm is not None:
             x = x.index_select(1, self.in_perm)
+        if mode == "bf16":                      # quant-direct bf16: more precision than the W8A8 GEMM, maybe enough speed
+            return gguf.linear_bf16(x, self.weight, self.qtype, self.n).to(torch.bfloat16)
         pad = 96 if os.environ.get("TENSORFOLD_GGUF_FAST_PAD") == "1" else 0
         return gguf.prefill_linear(x, self.weight, self.qtype, self.n, pad=pad).to(torch.bfloat16)
 
