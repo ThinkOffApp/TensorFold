@@ -8,6 +8,10 @@ pub const Context = ?*opaque {};
 pub const Stream = ?*opaque {};
 pub const Module = ?*opaque {};
 pub const Function = ?*opaque {};
+pub const success: Result = 0;
+pub const error_out_of_memory: Result = 2;
+pub const error_not_found: Result = 500;
+pub const error_not_ready: Result = 600;
 
 pub const Api = struct {
     hipInit: *const fn (c_uint) callconv(.c) Result,
@@ -26,13 +30,15 @@ pub const Api = struct {
     hipMemcpyHtoD: *const fn (DevicePtr, [*]const u8, usize) callconv(.c) Result,
     hipMemcpyDtoH: *const fn ([*]u8, DevicePtr, usize) callconv(.c) Result,
     hipMemset: *const fn (DevicePtr, c_int, usize) callconv(.c) Result,
-    hipMemsetAsync: *const fn (DevicePtr, c_int, usize, Stream) callconv(.c) Result,
+    hipMemsetD8Async: *const fn (DevicePtr, u8, usize, Stream) callconv(.c) Result,
     hipStreamCreateWithFlags: *const fn (*Stream, c_uint) callconv(.c) Result,
     hipStreamDestroy: *const fn (Stream) callconv(.c) Result,
     hipStreamSynchronize: *const fn (Stream) callconv(.c) Result,
     hipModuleLoadData: *const fn (*Module, [*]const u8) callconv(.c) Result,
     hipModuleUnload: *const fn (Module) callconv(.c) Result,
     hipModuleGetFunction: *const fn (*Function, Module, [*:0]const u8) callconv(.c) Result,
+    hipGetErrorName: *const fn (Result) callconv(.c) ?[*:0]const u8,
+    hipGetErrorString: *const fn (Result) callconv(.c) ?[*:0]const u8,
     hipModuleLaunchKernel: *const fn (Function, c_uint, c_uint, c_uint, c_uint, c_uint, c_uint, c_uint, Stream, ?[*]?*anyopaque, ?[*]?*anyopaque) callconv(.c) Result,
 };
 
