@@ -12,7 +12,7 @@ pub const DeviceBuffer = struct {
     pub fn alloc(r: *const runtime.Runtime, len: usize) runtime.Error!DeviceBuffer {
         var ptr: abi.DevicePtr = null;
         if (len != 0) {
-            try runtime.check(r.api.hipMalloc(&ptr, len));
+            try r.check(r.api.hipMalloc(&ptr, len));
             if (ptr == null) return error.Invalid;
         }
         return .{ .r = r, .ptr = ptr, .len = len };
@@ -31,39 +31,38 @@ pub const DeviceBuffer = struct {
 
     pub fn upload(self: DeviceBuffer, offset: usize, bytes: []const u8) runtime.Error!void {
         const dst = try self.span(offset, bytes.len);
-        if (bytes.len != 0) try runtime.check(self.r.api.hipMemcpyHtoD(dst, bytes.ptr, bytes.len));
+        if (bytes.len != 0) try self.r.check(self.r.api.hipMemcpyHtoD(dst, bytes.ptr, bytes.len));
     }
 
     pub fn download(self: DeviceBuffer, offset: usize, bytes: []u8) runtime.Error!void {
         const src = try self.span(offset, bytes.len);
-        if (bytes.len != 0) try runtime.check(self.r.api.hipMemcpyDtoH(bytes.ptr, src, bytes.len));
+        if (bytes.len != 0) try self.r.check(self.r.api.hipMemcpyDtoH(bytes.ptr, src, bytes.len));
     }
 
     /// Blocks until the null-stream fill completes; later streams can read it.
     pub fn fill8(self: DeviceBuffer, value: u8) runtime.Error!void {
-        if (self.len != 0) {
-            try runtime.check(self.r.api.hipMemset(self.ptr, value, self.len));
-            try runtime.check(self.r.api.hipStreamSynchronize(null));
-        }
+        if (self.len == 0) return;
+        try self.r.check(self.r.api.hipMemset(self.ptr, value, self.len));
+        try self.r.check(self.r.api.hipStreamSynchronize(null));
     }
 
     /// The buffer must remain alive until the supplied stream completes.
     pub fn fill8Async(self: DeviceBuffer, value: u8, stream: @import("stream.zig").Stream) runtime.Error!void {
         if (self.r != stream.r) return error.Invalid;
-        if (self.len != 0) try runtime.check(self.r.api.hipMemsetAsync(self.ptr, value, self.len, stream.handle));
+        if (self.len != 0) try self.r.check(self.r.api.hipMemsetD8Async(self.ptr, value, self.len, stream.handle));
     }
 
     /// Host storage must stay alive and unmodified until the stream completes.
     pub fn uploadAsync(self: DeviceBuffer, offset: usize, host: HostBuffer, stream: @import("stream.zig").Stream) runtime.Error!void {
         if (self.r != host.r or self.r != stream.r) return error.Invalid;
         const dst = try self.span(offset, host.bytes.len);
-        if (host.bytes.len != 0) try runtime.check(self.r.api.hipMemcpyHtoDAsync(dst, host.bytes.ptr, host.bytes.len, stream.handle));
+        if (host.bytes.len != 0) try self.r.check(self.r.api.hipMemcpyHtoDAsync(dst, host.bytes.ptr, host.bytes.len, stream.handle));
     }
 
     pub fn downloadAsync(self: DeviceBuffer, offset: usize, host: HostBuffer, stream: @import("stream.zig").Stream) runtime.Error!void {
         if (self.r != host.r or self.r != stream.r) return error.Invalid;
         const src = try self.span(offset, host.bytes.len);
-        if (host.bytes.len != 0) try runtime.check(self.r.api.hipMemcpyDtoHAsync(host.bytes.ptr, src, host.bytes.len, stream.handle));
+        if (host.bytes.len != 0) try self.r.check(self.r.api.hipMemcpyDtoHAsync(host.bytes.ptr, src, host.bytes.len, stream.handle));
     }
 };
 
@@ -74,7 +73,7 @@ pub const HostBuffer = struct {
     pub fn alloc(r: *const runtime.Runtime, len: usize) runtime.Error!HostBuffer {
         if (len == 0) return error.Invalid;
         var ptr: abi.DevicePtr = null;
-        try runtime.check(r.api.hipHostMalloc(&ptr, len, 0));
+        try r.check(r.api.hipHostMalloc(&ptr, len, 0));
         if (ptr == null) return error.Invalid;
         const bytes: [*]u8 = @ptrCast(ptr.?);
         return .{ .r = r, .bytes = bytes[0..len] };
@@ -102,16 +101,16 @@ test "fills synchronize only the synchronous path and propagate errors" {
             calls = calls * 10 + 2;
             return if (fail_sync) 1 else 0;
         }
-        fn asyncFill(_: abi.DevicePtr, _: c_int, _: usize, s: abi.Stream) callconv(.c) abi.Result {
+        fn asyncFill(_: abi.DevicePtr, _: u8, _: usize, s: abi.Stream) callconv(.c) abi.Result {
             seen_stream = s;
             calls = calls * 10 + 3;
             return if (fail_fill) 1 else 0;
         }
     };
-    var r: runtime.Runtime = undefined;
+    var r = runtime.Runtime.forTests();
     r.api.hipMemset = Mock.fill;
     r.api.hipStreamSynchronize = Mock.sync;
-    r.api.hipMemsetAsync = Mock.asyncFill;
+    r.api.hipMemsetD8Async = Mock.asyncFill;
     const b: DeviceBuffer = .{ .r = &r, .ptr = @ptrFromInt(16), .len = 8 };
     Mock.calls = 0;
     Mock.fail_fill = false;
@@ -160,4 +159,38 @@ test "async copies reject foreign owners and out-of-range bytes before HIP" {
     try std.testing.expectError(error.Invalid, b.downloadAsync(0, foreign, stream));
     try std.testing.expectError(error.Invalid, b.uploadAsync(1, host, stream));
     try std.testing.expectError(error.Invalid, b.downloadAsync(1, host, stream));
+    const foreign_stream = @import("stream.zig").Stream{ .r = @ptrFromInt(32), .handle = null };
+    try std.testing.expectError(error.Invalid, b.fill8Async(0, foreign_stream));
+}
+
+test "a stream-less fill waits for the null stream and propagates its failure" {
+    const Mock = struct {
+        var calls: [4]u8 = undefined;
+        var count: usize = 0;
+        var sync_result: c_int = 0;
+        fn memset(_: abi.DevicePtr, value: c_int, len: usize) callconv(.c) abi.Result {
+            calls[count] = 'm';
+            count += 1;
+            return if (value == 0x5a and len == 8) 0 else 1;
+        }
+        fn synchronize(stream: abi.Stream) callconv(.c) abi.Result {
+            calls[count] = if (stream == null) 's' else '?';
+            count += 1;
+            return sync_result;
+        }
+    };
+    var r = runtime.Runtime.forTests();
+    r.api.hipMemset = Mock.memset;
+    r.api.hipStreamSynchronize = Mock.synchronize;
+    const b = DeviceBuffer{ .r = &r, .ptr = @ptrFromInt(16), .len = 8 };
+    Mock.count = 0;
+    try b.fill8(0x5a);
+    try std.testing.expectEqualStrings("ms", Mock.calls[0..Mock.count]);
+    Mock.count = 0;
+    try std.testing.expectError(error.HipFailed, b.fill8(0x11));
+    try std.testing.expectEqualStrings("m", Mock.calls[0..Mock.count]);
+    Mock.count = 0;
+    Mock.sync_result = 1;
+    try std.testing.expectError(error.HipFailed, b.fill8(0x5a));
+    try std.testing.expectEqualStrings("ms", Mock.calls[0..Mock.count]);
 }
