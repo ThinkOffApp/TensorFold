@@ -176,6 +176,13 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 its stage sequences and their purposes, its rules for when a task needs outside sources, and its instruction-filter patterns,
 rewritten in Zig. MIT License, Copyright (c) 2026 Cortheon contributors; the license text is below.
 
+## LLWZ note lookup
+
+`--notes` (`zig/src/server/notes/`) vendors the read path of [LLWZ](https://github.com/ThinkOffApp/llwz)'s note
+store, its Zig port `zig/notes/src/notes.zig` (branch `notes-zig`, commit a81d1a9), split into files and loading the
+snapshot with this server's JSON reader; `past.zig` ports the `is_past` rule of its `zengine/notes.py`.
+MIT License, Copyright (c) 2026 ThinkOff; the license text is below.
+
 ## MIT License text
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
