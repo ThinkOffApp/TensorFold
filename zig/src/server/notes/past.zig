@@ -119,7 +119,7 @@ pub fn isPast(s: []const u8) bool {
     return false;
 }
 
-/// CPython's notes.is_past on each text, run by tools/notes/past_cases.py (macOS 27.0.1, CPython 3.12.8).
+/// CPython's notes.is_past on each text, checked by tools/notes/past_cases.py (CPython 3.12.8 and 3.14.3 agree).
 const cases = [_]struct { []const u8, bool }{
     .{ "In which city is my home?", false },
     .{ "What colour did my eyes use to be?", true },
