@@ -138,8 +138,8 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
             std.debug.print("tensorfold: --notes {s}: {s} ({s})\n", .{ path, why, @errorName(e) });
             return 2;
         };
-        const ix = srv.notes.?.idx;
-        log.line("notes: {d} notes ({d} current) from {s}, cap {d}, loaded in {d:.1} ms; a chat request sends \"notes\": true to have them looked up", .{ ix.notes(), ix.n_cur, path, ix.settings.cap, srv.notes.?.load_ms });
+        var line_buf: [1024]u8 = undefined;
+        log.line("{s}", .{srv.notes.?.startupLine(&line_buf, path)});
     }
     if (args.loop_guard and !srv.info.loop_guard) {
         std.debug.print("tensorfold: --loop-guard is not supported by this native engine\n", .{});

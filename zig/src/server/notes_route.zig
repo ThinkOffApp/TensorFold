@@ -14,6 +14,12 @@ const Cx = errors.Cx;
 const Allocator = std.mem.Allocator;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
+/// How a snapshot's tokenizer was checked: the tokenizer.json SHA-256 it names, or its vocabulary size only.
+pub const Check = enum { sha256, vocabulary_only };
+
+/// The most of tokenizer.json the startup check reads (the grammar compiler reads it under the same limit).
+pub const tokenizer_limit: usize = 256 << 20;
+
 /// One owner's notes (a snapshot from LLWZ's zengine/notes_export.py), read-only, and lookup scratch for its threads.
 pub const Store = struct {
     gpa: Allocator,
@@ -22,9 +28,15 @@ pub const Store = struct {
     mutex: std.Io.Mutex = .init,
     free: std.ArrayList(*lookup.Scratch) = .empty,
     load_ms: f64 = 0,
+    check: Check = .vocabulary_only,
 
     /// Loads the snapshot at `path` for a model whose tokenizer is `text` (its tokenizer.json lies in `model_dir`).
     pub fn open(gpa: Allocator, io: std.Io, path: []const u8, text: model_text.Text, model_dir: []const u8, problem: *[]const u8) !*Store {
+        return openLimited(gpa, io, path, text, model_dir, tokenizer_limit, problem);
+    }
+
+    /// open() with the tokenizer.json read limit given; a named hash passes only when the model's is read and equal.
+    pub fn openLimited(gpa: Allocator, io: std.Io, path: []const u8, text: model_text.Text, model_dir: []const u8, limit: usize, problem: *[]const u8) !*Store {
         const t0 = clock.nowNs(io);
         const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .unlimited) catch |e| {
             problem.* = "the snapshot file cannot be read";
@@ -33,14 +45,26 @@ pub const Store = struct {
         defer gpa.free(bytes);
         const s = try load(gpa, io, bytes, text, problem);
         errdefer s.deinit();
-        if (s.idx.tokenizer_sha256.len > 0) if (try fileSha(gpa, io, model_dir)) |sha| {
+        if (s.idx.tokenizer_sha256.len > 0) {
+            const sha = try tokenizerSha(gpa, io, model_dir, limit, problem);
             if (!std.mem.eql(u8, &sha, s.idx.tokenizer_sha256)) {
-                problem.* = "the snapshot was exported with another tokenizer.json than this model's";
-                return error.BadSnapshot;
+                problem.* = "the snapshot names a tokenizer.json SHA-256 that is not this model's: it was exported with another tokenizer";
+                return error.TokenizerMismatch;
             }
-        };
+            s.check = .sha256;
+        }
         s.load_ms = clock.seconds(clock.nowNs(io) - t0) * 1e3;
         return s;
+    }
+
+    /// The startup log line: what was loaded, and how its tokenizer was checked.
+    pub fn startupLine(s: *const Store, buf: []u8, path: []const u8) []const u8 {
+        const ix = s.idx;
+        const checked = switch (s.check) {
+            .sha256 => "tokenizer checked: the model's tokenizer.json SHA-256 equals the snapshot's",
+            .vocabulary_only => "tokenizer checked by vocabulary size only (vocabulary-only compatibility): the snapshot names no tokenizer.json SHA-256",
+        };
+        return std.fmt.bufPrint(buf, "notes: {d} notes ({d} current) from {s}, cap {d}, loaded in {d:.1} ms; {s}; a chat request sends \"notes\": true to have them looked up", .{ ix.notes(), ix.n_cur, path, ix.settings.cap, s.load_ms, checked }) catch buf;
     }
 
     /// A snapshot's JSON text as a store, checked against the model's vocabulary size.
@@ -242,12 +266,23 @@ fn hexSha(a: Allocator, text: []const u8) Allocator.Error![]const u8 {
     return a.dupe(u8, &hex);
 }
 
-/// The SHA-256 of `model_dir`/tokenizer.json in hex, or null when there is none to read.
-fn fileSha(gpa: Allocator, io: std.Io, model_dir: []const u8) !?[64]u8 {
-    if (model_dir.len == 0) return null;
+/// The SHA-256 of `model_dir`/tokenizer.json in hex; a file that cannot be read is an error naming why, never a pass.
+fn tokenizerSha(gpa: Allocator, io: std.Io, model_dir: []const u8, limit: usize, problem: *[]const u8) ![64]u8 {
+    if (model_dir.len == 0) {
+        problem.* = "the snapshot names a tokenizer.json SHA-256, and the server has no model folder to read tokenizer.json from";
+        return error.NoModelDir;
+    }
     const path = try std.fs.path.join(gpa, &.{ model_dir, "tokenizer.json" });
     defer gpa.free(path);
-    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 30)) catch return null;
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(limit)) catch |e| {
+        problem.* = switch (e) {
+            error.FileNotFound => "the snapshot names a tokenizer.json SHA-256, and the model folder has no tokenizer.json to check it against",
+            error.StreamTooLong => "the snapshot names a tokenizer.json SHA-256, and the model's tokenizer.json is over the read limit (256 MiB), so it cannot be checked",
+            error.OutOfMemory => "out of memory reading the model's tokenizer.json",
+            else => "the snapshot names a tokenizer.json SHA-256, and the model's tokenizer.json cannot be read to check it",
+        };
+        return e;
+    };
     defer gpa.free(bytes);
     var out: [Sha256.digest_length]u8 = undefined;
     Sha256.hash(bytes, &out, .{});

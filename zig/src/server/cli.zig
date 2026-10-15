@@ -170,7 +170,7 @@ pub const Args = struct {
     master: []const u8 = "",
     master_port: u16 = 29551,
     policy: []const u8 = "", // every --policy joined by commas
-    notes: ?[]const u8 = null, // an LLWZ note snapshot that chat requests asking "notes": true look up before prefill
+    notes: ?[]const u8 = null, // an LLWZ note snapshot for "notes": true requests; no named tokenizer hash: vocabulary-only check
     cortheon: bool = false, // Cortheon's program, research before building, and cortheon_search/cortheon_fetch run by the server
 };
 

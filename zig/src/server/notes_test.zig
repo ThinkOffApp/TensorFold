@@ -16,8 +16,8 @@ const snapshot = @embedFile("notes/testdata/l6_bytes_snapshot.json");
 const cases_json = @embedFile("notes/testdata/l6_bytes_cases.json");
 
 /// Token ids are UTF-8 bytes, as the fixture's tokenizer; a prompt renders as "[role]content" lines.
-const Bytes = struct {
-    fn text(t: *@This()) model_text.Text {
+pub const Bytes = struct {
+    pub fn text(t: *@This()) model_text.Text {
         return .{ .ctx = t, .vtable = &.{ .encode = encode, .decode = decode, .token_id = tokenId, .token_string = tokenString, .vocab_size = vocabSize, .eos_ids = eosIds, .render = render, .template_source = templateSource } };
     }
 
