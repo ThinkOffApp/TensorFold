@@ -1,4 +1,4 @@
-//! Vendored from LLWZ notes-zig a81d1a9 (zig/notes/src/notes.zig; MIT, (c) 2026 ThinkOff): one question's lookup.
+//! Vendored from LLWZ notes-zig a81d1a9 (zig/notes/src/notes.zig; MIT, (c) 2026 ThinkOff), Scratch.init from f54344f.
 const std = @import("std");
 const builtin = @import("builtin");
 const index = @import("index.zig");
@@ -36,7 +36,12 @@ pub const Scratch = struct {
 
     pub fn init(gpa: Allocator, idx: *const Index) Allocator.Error!Scratch {
         const n = idx.notes();
-        var sc: Scratch = .{ .gpa = gpa, .slot = try gpa.alloc(Slot, n), .xstamp = try gpa.alloc(u32, n), .gen = 0 };
+        const slot = try gpa.alloc(Slot, n);
+        errdefer gpa.free(slot);
+        const xstamp = try gpa.alloc(u32, n);
+        errdefer gpa.free(xstamp);
+        var sc: Scratch = .{ .gpa = gpa, .slot = slot, .xstamp = xstamp, .gen = 0 };
+        errdefer inline for (lists) |f| @field(sc, f).deinit(gpa);
         @memset(sc.slot, .{ .score = 0, .stamp = 0, .pstamp = 0 });
         @memset(sc.xstamp, 0);
         try sc.touched.ensureTotalCapacity(gpa, n);

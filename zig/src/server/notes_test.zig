@@ -8,6 +8,8 @@ const routes = @import("routes.zig");
 const errors = @import("errors.zig");
 const notes_route = @import("notes_route.zig");
 const past = @import("notes/past.zig");
+const index = @import("notes/index.zig");
+const lookup = @import("notes/lookup.zig");
 const Conn = @import("http_conn.zig").Conn;
 const testing = std.testing;
 
@@ -318,4 +320,46 @@ test "a chat request asking for notes gets the block as its first system message
     const bad = try ask(srv, &backend, a, try chatBody(a, &.{.{ "user", q }}, ",\"notes\":\"yes\""));
     try testing.expectEqual(@as(u16, 400), bad.status);
     try testing.expectEqualStrings("notes must be a boolean", bad.reply.get("error").?.strField("message").?);
+}
+
+fn scratchInit(gpa: std.mem.Allocator, idx: *const index.Index) !void {
+    var sc = try lookup.Scratch.init(gpa, idx);
+    sc.deinit();
+}
+
+fn indexLoad(gpa: std.mem.Allocator, bytes: []const u8) !void {
+    const idx = try index.Index.load(gpa, bytes);
+    idx.deinit();
+}
+
+test "a lookup's scratch and the index each free what they took when any one of their allocations fails" {
+    const idx = try index.Index.load(testing.allocator, snapshot);
+    defer idx.deinit();
+    try testing.checkAllAllocationFailures(testing.allocator, scratchInit, .{idx});
+    try testing.checkAllAllocationFailures(testing.allocator, indexLoad, .{snapshot});
+}
+
+/// A store loaded with `gpa` answers one question twice (a new scratch, then the kept one) and is freed.
+fn storeRetrieve(gpa: std.mem.Allocator, text: model_text.Text, qids: []const u32) !void {
+    var why: []const u8 = "";
+    const store = try notes_route.Store.load(gpa, testing.io, snapshot, text, &why);
+    defer store.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator); // the request's own memory, freed with the request
+    defer arena.deinit();
+    for (0..2) |_| _ = try store.retrieve(arena.allocator(), text, qids, false, store.idx.settings.cap, &.{ 7, 11 });
+}
+
+test "the server's store leaks nothing when any one of its long-lived allocations fails" {
+    // by hand, as a failed keep of the scratch frees it and succeeds: OutOfMemory or success, and all memory back
+    var text: Bytes = .{};
+    const qids = try text.text().encode(testing.allocator, "Where does my sister live?", false);
+    defer testing.allocator.free(qids);
+    var points: usize = 0;
+    while (true) : (points += 1) {
+        var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = points });
+        if (storeRetrieve(failing.allocator(), text.text(), qids)) |_| {} else |e| try testing.expectEqual(error.OutOfMemory, e);
+        try testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+        if (!failing.has_induced_failure) break;
+    }
+    try testing.expect(points >= 8); // the load's, the scratch's five, the kept-scratch list's: all were failed in turn
 }
