@@ -18,6 +18,7 @@ const http_body = @import("http_body.zig");
 const routes = @import("routes.zig");
 const warm = @import("warm.zig");
 const cortheon = @import("cortheon/cortheon.zig");
+const notes_route = @import("notes_route.zig");
 const Server = @import("server.zig").Server;
 const Conn = @import("http_conn.zig").Conn;
 const Value = json.Value;
@@ -114,6 +115,7 @@ const Plan = struct {
     separate_usage: bool,
     policy: tool_stream.Policy,
     named: []const u8,
+    notes: ?notes_route.Used = null, // --notes: the lookup this request asked for
 };
 
 /// Everything checked before a reply starts (a refusal here is a 400 with no stream opened).
@@ -126,8 +128,10 @@ fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value) errors.Refused!Plan {
     const logprobs = if (is_chat) try fields.probabilityOptions(cx, body, exact_bytes) else try fields.legacyLogprobs(cx, body, exact_bytes);
     if (srv.config.request_log) |path| request_log.append(cx.a, path, body);
     var input: chat.Input = .{ .fields = undefined };
+    var notes: ?notes_route.Used = null;
     if (is_chat) {
         input.messages = try messages.normalize(cx, body.get("messages"), "system", srv.needs_user_after_tool);
+        if (srv.notes) |store| notes = try notes_route.apply(store, srv.text, srv.needs_user_after_tool, cx, body, &input.messages);
         input.tools = try tool_specs.active(cx, body.get("tools"), body.get("tool_choice"));
     } else if (body.get("messages")) |m| if (m == .array and m.array.len > 0) {
         input.messages = try messages.normalize(cx, m, "system", srv.needs_user_after_tool);
@@ -175,6 +179,7 @@ fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value) errors.Refused!Plan {
         .separate_usage = options != null and options.? == .object and json.truthyField(options.?, "include_usage"),
         .policy = policy,
         .named = replyModel(srv, body),
+        .notes = notes,
     };
 }
 
@@ -234,6 +239,7 @@ pub fn run(srv: *Server, a: Allocator, out: Out, gone: Gone, is_chat: bool, raw:
         return;
     };
     p.input.id = id;
+    if (p.notes) |*u| u.logLine(id);
     const turn = cortheon.begin(srv, a, raw, id, is_chat, &p.input);
     var r: Run = .{ .srv = srv, .a = a, .out = out, .is_chat = is_chat, .plan = p, .id = id, .created = std.Io.Clock.real.now(srv.io).toSeconds(), .turn = turn };
     if (p.stream) r.stream(gone, field) else r.whole(gone, field);
@@ -318,6 +324,7 @@ const Run = struct {
         try o.put(r.a, "tensorfold", reply.runtime);
         try o.put(r.a, "speculative", reply.speculative);
         if (r.turn) |t| try o.put(r.a, "cortheon", try t.summary(r.a));
+        if (r.plan.notes) |*u| try o.put(r.a, "notes", try u.value(r.a));
     }
 
     /// ``ToolCallPolicy.finish``: the reply's calls parsed out of its content.

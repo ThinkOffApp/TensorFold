@@ -69,4 +69,6 @@ test {
     _ = @import("notes/index.zig");
     _ = @import("notes/lookup.zig");
     _ = @import("notes/past.zig");
+    _ = @import("notes_route.zig");
+    _ = @import("notes_test.zig");
 }

@@ -9,6 +9,7 @@ const live = @import("live.zig");
 const listener_mod = @import("listener.zig");
 const model_text = @import("model_text.zig");
 const server_mod = @import("server.zig");
+const notes_route = @import("notes_route.zig");
 const Allocator = std.mem.Allocator;
 const posix = std.posix;
 
@@ -131,6 +132,15 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         return 1;
     };
     defer srv.deinit();
+    if (args.notes) |path| {
+        var why: []const u8 = "";
+        srv.notes = notes_route.Store.open(gpa, io, path, s.text, s.model_dir, &why) catch |e| {
+            std.debug.print("tensorfold: --notes {s}: {s} ({s})\n", .{ path, why, @errorName(e) });
+            return 2;
+        };
+        const ix = srv.notes.?.idx;
+        log.line("notes: {d} notes ({d} current) from {s}, cap {d}, loaded in {d:.1} ms; a chat request sends \"notes\": true to have them looked up", .{ ix.notes(), ix.n_cur, path, ix.settings.cap, srv.notes.?.load_ms });
+    }
     if (args.loop_guard and !srv.info.loop_guard) {
         std.debug.print("tensorfold: --loop-guard is not supported by this native engine\n", .{});
         return 2;
