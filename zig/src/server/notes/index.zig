@@ -134,6 +134,7 @@ pub const Index = struct {
     post: []const u32,
     phrases: std.HashMapUnmanaged(Phrase, u32, PhraseCtx, 80),
     phrase_max: usize,
+    names: std.AutoHashMapUnmanaged(u32, u32), // one-key entity phrases: key -> entity (the decode check's, not subjects())
     n_cur: u32,
     n_hist: u32,
     owned: ?*Model = null, // the model a loaded snapshot made, freed with the index
@@ -205,6 +206,7 @@ pub const Index = struct {
         try self.groupsOf(m);
         self.phrases = .empty;
         self.phrase_max = 0;
+        self.names = .empty;
         try self.phrasesOf(m);
         try self.buildPostings(gpa, raw);
         return self;
@@ -320,6 +322,7 @@ pub const Index = struct {
         const a = self.arena.allocator();
         for (m.phrases.items) |p| {
             if (p.entity >= m.entities.items.len) return error.BadSnapshot;
+            if (p.keys.len == 1) try self.names.put(a, p.keys[0], p.entity);
             if (p.keys.len < 2 or p.keys.len > max_phrase) continue;
             try self.phrases.put(a, packPhrase(p.keys), p.entity);
             self.phrase_max = @max(self.phrase_max, p.keys.len);

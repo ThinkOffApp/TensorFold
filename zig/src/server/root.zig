@@ -86,4 +86,6 @@ test {
     _ = @import("notes_live_test.zig");
     _ = @import("notes_http_test.zig");
     _ = @import("notes_erase_test.zig");
+    _ = @import("notes_decode.zig");
+    _ = @import("notes_decode_test.zig");
 }

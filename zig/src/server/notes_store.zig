@@ -200,7 +200,7 @@ pub const Store = struct {
         return s.model.settings;
     }
 
-    fn take(s: *Store, idx: *const index.Index) Allocator.Error!*Kept {
+    pub fn take(s: *Store, idx: *const index.Index) Allocator.Error!*Kept {
         s.lock.lockUncancelable(s.io);
         const kept = s.free.pop();
         const epoch = s.epoch;
@@ -216,7 +216,7 @@ pub const Store = struct {
         return k;
     }
 
-    fn give(s: *Store, k: *Kept) void {
+    pub fn give(s: *Store, k: *Kept) void {
         s.lock.lockUncancelable(s.io);
         const keep = k.epoch == s.epoch and if (s.free.append(s.gpa, k)) |_| true else |_| false;
         s.lock.unlock(s.io);
