@@ -31,7 +31,8 @@ pub const Store = struct {
     gpa: Allocator, // zeroing.allocator(): every note's bytes are zeroed when freed
     io: std.Io,
     text: model_text.Text,
-    model: *Model,
+    model: *Model, // the writer's (under `writer`); an erase replaces it, so lookups never read it
+    fixed_settings: index.Settings, // the snapshot's, the same in every model: what a lookup may read without a lock
     lock: std.Io.Mutex = .init, // current, retired, free and epoch; held only to swap or take
     current: *Version,
     retired: std.ArrayList(*Version) = .empty,
@@ -122,7 +123,7 @@ pub const Store = struct {
             problem.* = "the snapshot's vocabulary is not the model tokenizer's size";
             return error.BadSnapshot;
         }
-        s.* = .{ .zeroing = s.zeroing, .gpa = gpa, .io = io, .text = text, .model = m, .current = undefined, .log = .{ .gpa = gpa }, .snapshot_sha = std.fmt.bytesToHex(sha, .lower) };
+        s.* = .{ .zeroing = s.zeroing, .gpa = gpa, .io = io, .text = text, .model = m, .fixed_settings = m.settings, .current = undefined, .log = .{ .gpa = gpa }, .snapshot_sha = std.fmt.bytesToHex(sha, .lower) };
         errdefer s.log.deinit();
         if (journal_path) |jp| {
             var arena = std.heap.ArenaAllocator.init(gpa);
@@ -198,7 +199,7 @@ pub const Store = struct {
 
     /// The snapshot's settings (the same in every version).
     pub fn settings(s: *const Store) index.Settings {
-        return s.model.settings;
+        return s.fixed_settings;
     }
 
     fn take(s: *Store, idx: *const index.Index) Allocator.Error!*Kept {
