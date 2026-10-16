@@ -2,6 +2,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const index = @import("index.zig");
+const sa = @import("sa.zig");
 const Index = index.Index;
 const Gram = index.Gram;
 const Allocator = std.mem.Allocator;
@@ -19,6 +20,8 @@ pub const Scratch = struct {
     slot: []Slot,
     xstamp: []u32, // == gen: the note is excluded from this lookup (apart from slot: read only when some are)
     gen: u32,
+    seen: []u32 = &.{}, // sa: == sgen: the note is counted for this n-gram already (a range may hold a note twice)
+    sgen: u32 = 0,
     touched: std.ArrayList(u32) = .empty,
     pool: std.ArrayList(u32) = .empty,
     keys: std.ArrayList(u128) = .empty,
@@ -31,8 +34,9 @@ pub const Scratch = struct {
     ids: std.ArrayList(u32) = .empty,
     scores: std.ArrayList(f64) = .empty,
     block: std.ArrayList(u8) = .empty,
+    hits: std.ArrayList(u32) = .empty, // sa: one n-gram's notes in the views searched
 
-    const lists = .{ "touched", "pool", "keys", "qkeys", "qgrams", "found", "spans", "chosen", "order", "ids", "scores", "block" };
+    const lists = .{ "touched", "pool", "keys", "qkeys", "qgrams", "found", "spans", "chosen", "order", "ids", "scores", "block", "hits" };
 
     pub fn init(gpa: Allocator, idx: *const Index) Allocator.Error!Scratch {
         const n = idx.notes();
@@ -40,7 +44,10 @@ pub const Scratch = struct {
         errdefer gpa.free(slot);
         const xstamp = try gpa.alloc(u32, n);
         errdefer gpa.free(xstamp);
-        var sc: Scratch = .{ .gpa = gpa, .slot = slot, .xstamp = xstamp, .gen = 0 };
+        const seen = try gpa.alloc(u32, if (idx.kind == .sa) n else 0);
+        errdefer gpa.free(seen);
+        @memset(seen, 0);
+        var sc: Scratch = .{ .gpa = gpa, .slot = slot, .xstamp = xstamp, .gen = 0, .seen = seen };
         errdefer inline for (lists) |f| @field(sc, f).deinit(gpa);
         @memset(sc.slot, .{ .score = 0, .stamp = 0, .pstamp = 0 });
         @memset(sc.xstamp, 0);
@@ -53,6 +60,7 @@ pub const Scratch = struct {
     pub fn deinit(sc: *Scratch) void {
         sc.gpa.free(sc.slot);
         sc.gpa.free(sc.xstamp);
+        sc.gpa.free(sc.seen);
         inline for (lists) |f| @field(sc, f).deinit(sc.gpa);
     }
 
@@ -162,6 +170,53 @@ fn subjects(idx: *const Index, sc: *Scratch) Allocator.Error!void {
     }
 }
 
+/// The base's notes that hold the packed n-gram `g`, each once, in the views searched: the current view's array for
+/// the notes current when it was built (less those retired since), and for the past both arrays whole.
+fn baseHits(idx: *const Index, b: *const sa.Base, sc: *Scratch, g: Gram, past: bool) Allocator.Error!void {
+    sc.hits.clearRetainingCapacity();
+    var keys: [index.max_n]u32 = undefined;
+    for (&keys, 0..) |*k, j| k.* = @truncate(g >> @intCast(32 * j));
+    var len: usize = index.max_n; // a packed n-gram's unused places hold none_key
+    while (len > 0 and keys[len - 1] == index.none_key) len -= 1;
+    if (len == 0) return;
+    for (keys[0..len]) |k| if (k == index.none_key) return; // no note holds none_key (the build checks the vocabulary)
+    var buf: [index.max_n]u32 = undefined;
+    const pat = b.codes(keys[0..len], &buf) orelse return;
+    if (len == 1 and !idx.settings.punct and !b.wordyCode(pat[0])) return; // punctuation alone is no note's key
+    sc.sgen +%= 1;
+    if (sc.sgen == 0) {
+        @memset(sc.seen, 0);
+        sc.sgen = 1;
+    }
+    const views = [2]sa.Packed{ b.sa_cur, b.sa_hist };
+    for (views[0..if (past) 2 else 1]) |arr| {
+        const r = b.range(arr, pat);
+        for (r[0]..r[1]) |k| {
+            const place = b.placeOf(arr.get(k));
+            if (sc.seen[place] == sc.sgen) continue;
+            sc.seen[place] = sc.sgen;
+            if (!past and idx.state[place] != .current) continue; // retired since the base was built
+            try sc.hits.append(sc.gpa, place);
+        }
+    }
+}
+
+/// One n-gram's weight added to its notes: the base's from its ranges, the side buffer's from its postings; df counts
+/// notes, not occurrences.
+fn scoreSa(idx: *const Index, b: *const sa.Base, sc: *Scratch, g: Gram, past: bool, N: u32) Allocator.Error!void {
+    try baseHits(idx, b, sc, g, past);
+    const side = idx.grams.get(g);
+    var df: u32 = @intCast(sc.hits.items.len);
+    if (side) |p| df += p.cur_len + (if (past) p.hist_len else 0);
+    if (df == 0) return;
+    const w = idx.log(1.0 + (@as(f64, @floatFromInt(N - df)) + 0.5) / (@as(f64, @floatFromInt(df)) + 0.5));
+    for (sc.hits.items) |i| sc.add(i, w);
+    if (side) |p| {
+        for (idx.post[p.cur_off..][0..p.cur_len]) |i| sc.add(i, w);
+        if (past) for (idx.post[p.hist_off..][0..p.hist_len]) |i| sc.add(i, w);
+    }
+}
+
 /// NoteStore._lookup up to pack() from a question's ids; `exclude` ids are never given; sums run in first-met order.
 pub fn lookup(idx: *const Index, sc: *Scratch, qids: []const u32, past: bool, cap: u32, exclude: []const u32) Allocator.Error!Packed {
     const st = idx.settings;
@@ -179,7 +234,9 @@ pub fn lookup(idx: *const Index, sc: *Scratch, qids: []const u32, past: bool, ca
 
     // IDF over the views searched: the current notes, and for a question about the past the earlier ones too
     const N: u32 = idx.n_cur + (if (past) idx.n_hist else 0);
-    for (sc.qgrams.items) |g| {
+    if (idx.base) |b| {
+        for (sc.qgrams.items) |g| try scoreSa(idx, b, sc, g, past, N);
+    } else for (sc.qgrams.items) |g| {
         const p = idx.grams.get(g) orelse continue;
         const df: u32 = p.cur_len + (if (past) p.hist_len else 0);
         if (df == 0) continue;

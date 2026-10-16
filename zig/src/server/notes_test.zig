@@ -14,7 +14,7 @@ const Conn = @import("http_conn.zig").Conn;
 const testing = std.testing;
 
 /// LLWZ's L6-seed1 teach store under a byte tokenizer, and retrieve()'s answers (tools/notes/fixture.py writes both).
-const snapshot = @embedFile("notes/testdata/l6_bytes_snapshot.json");
+pub const snapshot = @embedFile("notes/testdata/l6_bytes_snapshot.json");
 const cases_json = @embedFile("notes/testdata/l6_bytes_cases.json");
 
 /// Token ids are UTF-8 bytes, as the fixture's tokenizer; a prompt renders as "[role]content" lines.
@@ -156,7 +156,7 @@ fn openStore(text: model_text.Text, bytes: []const u8) !*notes_route.Store {
 }
 
 /// How many fixture cases the store answers otherwise than Python's retrieve(); `answered`: cases with a block.
-fn differing(store: *notes_route.Store, text: model_text.Text, answered: *usize) !usize {
+pub fn differing(store: *notes_route.Store, text: model_text.Text, answered: *usize) !usize {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();

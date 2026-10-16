@@ -3,6 +3,7 @@ const std = @import("std");
 const model_text = @import("model_text.zig");
 const clock = @import("clock.zig");
 const index = @import("notes/index.zig");
+const sa = @import("notes/sa.zig");
 const lookup = @import("notes/lookup.zig");
 const model_mod = @import("notes/model.zig");
 const write = @import("notes/write.zig");
@@ -57,6 +58,10 @@ pub const Store = struct {
     truncated: u64 = 0,
     auto_write: bool = true, // a "notes": true chat request's last user message is written (--no-notes-write: not)
     kind: IndexKind = .postings, // the n-gram index each version builds
+    side_max: u32 = 1024, // sa: a write's version keeps its base while at most this many notes are past it
+    merges: u64 = 0, // sa: bases built by writes and merges since startup (the load's not counted)
+    defer_erase_merge: bool = false, // tests only: an erase that leaves the old base and model to a later merge
+    parked: std.ArrayList(*Model) = .empty, // the models such an erase left
 
     /// Loads the snapshot at `path` for a model whose tokenizer is `text` (its tokenizer.json lies in `model_dir`).
     pub fn open(gpa: Allocator, io: std.Io, path: []const u8, text: model_text.Text, model_dir: []const u8, problem: *[]const u8) !*Store {
@@ -108,7 +113,9 @@ pub const Store = struct {
         };
         var w: [240]u8 = undefined;
         const writes = if (s.read_only.len > 0) std.fmt.bufPrint(&w, "writes off ({s})", .{s.read_only}) catch "writes off" else std.fmt.bufPrint(&w, "{d} writes replayed from the journal; a chat request's user statements {s}", .{ s.replayed, if (s.auto_write) "are written through the intake (--no-notes-write: not)" else "are not written (--no-notes-write)" }) catch "";
-        return std.fmt.bufPrint(buf, "notes: {d} notes ({d} current) from {s}, cap {d}, loaded in {d:.1} ms; {s}; {s}; a chat request sends \"notes\": true to have them looked up", .{ ix.notes(), ix.n_cur, path, ix.settings.cap, s.load_ms, checked, writes }) catch buf;
+        var k: [96]u8 = undefined;
+        const kind = if (s.kind == .sa) std.fmt.bufPrint(&k, "; suffix-array index (--notes-index sa, a merge past {d} written notes)", .{s.side_max}) catch "" else "";
+        return std.fmt.bufPrint(buf, "notes: {d} notes ({d} current) from {s}, cap {d}, loaded in {d:.1} ms{s}; {s}; {s}; a chat request sends \"notes\": true to have them looked up", .{ ix.notes(), ix.n_cur, path, ix.settings.cap, s.load_ms, kind, checked, writes }) catch buf;
     }
 
     /// A snapshot's JSON text as a store, checked against the model's vocabulary size; writes are off (no journal).
@@ -198,6 +205,8 @@ pub const Store = struct {
         for (s.retired.items) |v| freeVersion(s.gpa, v);
         s.retired.deinit(s.gpa);
         freeVersion(s.gpa, s.current);
+        for (s.parked.items) |m| m.deinit();
+        s.parked.deinit(s.gpa);
         s.log.deinit();
         if (s.journal) |*j| j.deinit();
         if (s.snapshot_path) |p| s.gpa.free(p);
@@ -237,7 +246,7 @@ pub const Store = struct {
         const epoch = s.epoch;
         s.lock.unlock(s.io);
         if (kept) |k| {
-            if (k.epoch == epoch and k.sc.slot.len >= idx.notes()) return k;
+            if (k.epoch == epoch and k.sc.slot.len >= idx.notes() and (idx.kind != .sa or k.sc.seen.len >= idx.notes())) return k;
             k.sc.deinit(); // made before an erase, or for fewer notes
             s.gpa.destroy(k);
         }
@@ -339,14 +348,43 @@ pub const Store = struct {
         }
     }
 
-    /// A new version of the index from the model, numbered.
+    /// A new version of the index from the model, numbered. sa: on the current base while the side buffer (the notes
+    /// written since it) holds at most side_max notes, else on a new base over them all (a merge).
     pub fn build(s: *Store) !*Version {
-        const idx = try index.Index.buildKind(s.gpa, s.model, s.kind);
+        var reuse: ?*sa.Base = null;
+        if (s.kind == .sa) if (s.current.idx.base) |b| {
+            if (s.model.notes.items.len - b.notes <= s.side_max) reuse = b;
+        };
+        return s.buildOn(reuse);
+    }
+
+    fn buildOn(s: *Store, reuse: ?*sa.Base) !*Version {
+        const idx = try index.Index.buildWith(s.gpa, s.model, s.kind, reuse);
         errdefer idx.deinit();
         const v = try s.gpa.create(Version);
         v.* = .{ .idx = idx };
         idx.ver = s.next_ver;
+        if (s.kind == .sa and reuse == null) s.merges += 1;
         return v;
+    }
+
+    /// sa: the side buffer merged into a new base now (a write merges when it passes side_max); frees what an erase
+    /// left for later (defer_erase_merge). A postings store builds its index again.
+    pub fn merge(s: *Store) !void {
+        s.writer.lockUncancelable(s.io);
+        defer s.writer.unlock(s.io);
+        try s.retired.ensureUnusedCapacity(s.gpa, 1);
+        const v = try s.buildOn(null);
+        s.swap(v, false);
+        s.next_ver += 1;
+        if (s.parked.items.len > 0) { // what a deferred erase left: freed as an erase frees it
+            s.reclaim(true);
+            for (s.parked.items) |m| m.deinit();
+            s.parked.clearRetainingCapacity();
+            s.sweep();
+            s.text.forget();
+        }
+        s.reclaim(false);
     }
 
     /// The tick a write made now is told at: after every write so far, and inside today (NoteStore._apply).

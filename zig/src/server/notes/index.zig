@@ -3,6 +3,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const model_mod = @import("model.zig");
 const exact = @import("exact_alloc.zig");
+const sa = @import("sa.zig");
 const Model = model_mod.Model;
 const Allocator = std.mem.Allocator;
 
@@ -147,6 +148,10 @@ pub const Index = struct {
     ent_cur: Groups, // entity -> places of its current notes (O.ent_cur)
     ent_keys: Groups, // entity -> its pairs (O.ent_keys)
     pair_notes: Groups, // pair -> places of its notes, every state, oldest first (O.by_key)
+    kind: Kind = .postings,
+    /// sa: the suffix arrays of places 0..base.notes-1, shared by the versions built on it (null: postings only)
+    base: ?*sa.Base = null,
+    /// postings: every note's; sa: the side buffer's, the notes written since the base (places base.notes..)
     grams: std.HashMapUnmanaged(Gram, Post, GramCtx, 80),
     post: []const u32,
     phrases: std.HashMapUnmanaged(Phrase, u32, PhraseCtx, 80),
@@ -168,6 +173,7 @@ pub const Index = struct {
 
     pub fn deinit(self: *Index) void {
         const gpa = self.arena.child;
+        if (self.base) |b| b.release();
         self.arena.deinit();
         if (self.owned) |m| m.deinit();
         gpa.destroy(self);
@@ -194,16 +200,19 @@ pub const Index = struct {
         return self;
     }
 
-    /// build() with the n-gram index of `kind`.
+    /// build() with the n-gram index of `kind` (sa: a new base over every note, nothing in the side buffer).
     pub fn buildKind(gpa: Allocator, m: *const Model, kind: Kind) LoadError!*Index {
-        return switch (kind) {
-            .postings => build(gpa, m),
-            .sa => error.Unsupported,
-        };
+        return buildWith(gpa, m, kind, null);
     }
 
     /// The index of a model's notes, as a snapshot of them would load; the model must outlive it (it reads its vocab).
     pub fn build(gpa: Allocator, m: *const Model) LoadError!*Index {
+        return buildWith(gpa, m, .postings, null);
+    }
+
+    /// The index of `kind`; for sa, on `reuse` (a base over the model's first notes, unchanged since) when given,
+    /// with the notes after it in the side buffer's postings; without one, a new base over them all.
+    pub fn buildWith(gpa: Allocator, m: *const Model, kind: Kind, reuse: ?*sa.Base) LoadError!*Index {
         const self = try gpa.create(Index);
         errdefer gpa.destroy(self);
         self.* = undefined;
@@ -211,6 +220,9 @@ pub const Index = struct {
         errdefer self.arena.deinit();
         self.owned = null;
         self.ver = 0;
+        self.kind = kind;
+        self.base = null;
+        errdefer if (self.base) |b| b.release();
         self.log = libmLog();
         self.settings = m.settings;
         self.head = m.head;
@@ -231,8 +243,49 @@ pub const Index = struct {
         self.phrases = .empty;
         self.phrase_max = 0;
         try self.phrasesOf(m);
-        try self.buildPostings(gpa, raw);
+        var first: usize = 0;
+        if (kind == .sa) {
+            self.base = if (reuse) |b| b.retain() else try baseOf(gpa, m, raw);
+            first = self.base.?.notes;
+        }
+        try self.buildPostings(gpa, raw, first);
         return self;
+    }
+
+    /// A suffix-array base over every note: their folded keys, each view's suffixes sorted (the build's memory freed).
+    fn baseOf(gpa: Allocator, m: *const Model, raw: []const Raw) LoadError!*sa.Base {
+        try saVocab(gpa, m);
+        var total: usize = 0;
+        for (raw) |x| total += x.tokens.len;
+        const keys = try gpa.alloc(u32, total);
+        defer gpa.free(keys);
+        const src = try gpa.alloc(sa.Source, raw.len);
+        defer gpa.free(src);
+        var at: usize = 0;
+        for (raw, src) |x, *o| {
+            for (x.tokens, keys[at..][0..x.tokens.len]) |t, *k| k.* = m.keyOf(t);
+            o.* = .{ .keys = keys[at..][0..x.tokens.len], .ids = x.tokens, .cur = x.state == .current };
+            at += x.tokens.len;
+        }
+        return sa.build(gpa, src, m.vwordy);
+    }
+
+    /// The suffix array matches a key sequence where the postings match a packed n-gram; that is the same only when no
+    /// key is none_key (it fills a packed n-gram's unused places) and the ids of one key agree on being a word.
+    fn saVocab(gpa: Allocator, m: *const Model) LoadError!void {
+        var max: u32 = 0;
+        for (m.vkey) |k| {
+            if (k == none_key) return error.Unsupported;
+            max = @max(max, k & ~key_id);
+        }
+        const seen = try gpa.alloc(u8, 2 * (@as(usize, max) + 1)); // by key: 0 unseen, 1 a word, 2 not
+        defer gpa.free(seen);
+        @memset(seen, 0);
+        for (m.vkey, 0..) |k, t| {
+            const at = 2 * @as(usize, k & ~key_id) + @intFromBool(k & key_id != 0);
+            const w: u8 = if (t < m.vwordy.len and m.vwordy[t]) 1 else 2;
+            if (seen[at] == 0) seen[at] = w else if (seen[at] != w) return error.Unsupported;
+        }
     }
 
     /// The notes by place, with Python's tie order (-told, id) and the least a line can add.
@@ -368,7 +421,8 @@ pub const Index = struct {
     }
 
     /// The postings of both views, from each note's token ids by the same grams() as a question's.
-    fn buildPostings(self: *Index, gpa: Allocator, raw: []const Raw) LoadError!void {
+    fn buildPostings(self: *Index, gpa: Allocator, all: []const Raw, first: usize) LoadError!void {
+        const raw = all[first..]; // the notes from place `first` on (sa: the side buffer's)
         const a = self.arena.allocator();
         const Hit = struct { entry: u32, note: u32 };
         var hits: std.ArrayList(Hit) = .empty;
@@ -393,8 +447,8 @@ pub const Index = struct {
                     try entries.append(gpa, .{ .cur_off = 0, .cur_len = 0, .hist_off = 0, .hist_len = 0 });
                 }
                 const e = &entries.items[r.value_ptr.*];
-                if (self.state[k] == .current) e.cur_len += 1 else e.hist_len += 1;
-                try hits.append(gpa, .{ .entry = r.value_ptr.*, .note = @intCast(k) });
+                if (self.state[first + k] == .current) e.cur_len += 1 else e.hist_len += 1;
+                try hits.append(gpa, .{ .entry = r.value_ptr.*, .note = @intCast(first + k) });
             }
         }
         var off: u32 = 0;

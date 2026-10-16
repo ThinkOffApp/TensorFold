@@ -84,6 +84,8 @@ test {
     _ = @import("notes/journal.zig");
     _ = @import("notes/zero_alloc.zig");
     _ = @import("notes/exact_alloc.zig");
+    _ = @import("notes/sa.zig");
+    _ = @import("notes_sa_test.zig");
     _ = @import("notes_store.zig");
     _ = @import("notes_records.zig");
     _ = @import("notes_ops.zig");

@@ -189,8 +189,13 @@ pub fn erase(s: *Store, a: Allocator, id: u32, why: *Refusal) Error!Erased {
     s.model = fresh;
     var old_log = s.log;
     s.log = log;
-    s.reclaim(true);
     old_log.deinit();
+    if (s.defer_erase_merge) {
+        // the negative control of the erase tests: the note hidden now, its bytes left to a later merge
+        s.parked.append(s.gpa, old) catch old.deinit();
+        return .{ .removed = removed.items, .moved = moved.items };
+    }
+    s.reclaim(true);
     old.deinit();
     s.sweep();
     s.text.forget(); // the tokenizer's kept encodes: a block or a prompt that quoted it

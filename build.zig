@@ -224,7 +224,9 @@ fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     test_step.?.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests })).step);
     // the server's tests alone, or those whose names hold -Dtest-server-filter=TEXT (a new test run in isolation)
     const server_filter = b.option([]const u8, "test-server-filter", "Run only the server tests whose names hold this text");
-    b.step("test-server", "The server module's unit tests (filter: -Dtest-server-filter=TEXT)").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = if (server_filter) |f| &.{f} else &.{} })).step);
+    const server_run = b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = if (server_filter) |f| &.{f} else &.{} }));
+    server_run.has_side_effects = true; // run every time, so its count is printed
+    b.step("test-server", "The server module's unit tests (filter: -Dtest-server-filter=TEXT)").dependOn(&server_run.step);
     @import("zig/build/cortheon_fuzz.zig").add(b, target, api, tokenizer, template);
     // the parse half's tests, as their own test binary (zig/src/server/tool_parse_test.zig)
     const tool_parse_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/server/tool_parse_test.zig"), .target = target, .optimize = .Debug, .link_libc = true, .imports = &.{ .{ .name = "engine_api", .module = api }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "template", .module = template } } }) });

@@ -16,6 +16,7 @@ const store_mod = @import("notes_store.zig");
 const ops = @import("notes_ops.zig");
 const intake = @import("notes/intake.zig");
 pub const Store = store_mod.Store;
+pub const IndexKind = store_mod.IndexKind;
 pub const Check = store_mod.Check;
 pub const tokenizer_limit = store_mod.tokenizer_limit;
 pub const Failure = store_mod.Failure;
