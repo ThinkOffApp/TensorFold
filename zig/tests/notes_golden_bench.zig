@@ -1,7 +1,4 @@
-//! notes-golden MODEL_DIR [--index postings|sa] SNAPSHOT REF.json [SNAPSHOT REF.json ...]: each question as the server asks it.
-//! The question encoded by the model's tokenizer (no weights), the past view as the request or is_past() decides,
-//! the reference's exclusions, Store.retrieve (lookup, render, fit()): the block, ids, tokens, past and candidates
-//! must equal LLWZ Python retrieve()'s in REF.json. One JSON line per pair and a total; exit 1 when any differs.
+//! notes-golden MODEL_DIR [--index K] SNAPSHOT REF.json...: each question as the server asks it, against Python.
 const std = @import("std");
 const server = @import("server");
 const Store = server.notes_store.Store;

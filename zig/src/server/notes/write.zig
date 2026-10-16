@@ -231,15 +231,14 @@ pub fn revert(m: *Model, undo: *Undo) void {
     undo.pair = null;
 }
 
-/// Frees what apply() replaced: the retired notes' old lines (no index reads them: at startup, or a model not yet shown).
+/// Frees what apply() replaced: the retired notes' old lines (for a model no index reads yet).
 pub fn commit(m: *Model, undo: *Undo) void {
     for (undo.gone.items) |s| m.gpa.free(s.line);
     undo.gone.clearRetainingCapacity();
     undo.pair = null;
 }
 
-/// commit() for a model an index reads: the old lines go to `keep` (its room reserved), freed with the last version
-/// that can read them.
+/// commit() for a model an index reads: the old lines go to `keep` (room reserved), freed with the last reader.
 pub fn commitKeeping(m: *Model, undo: *Undo, keep: *std.ArrayList([]u8)) void {
     _ = m;
     for (undo.gone.items) |s| keep.appendAssumeCapacity(s.line);

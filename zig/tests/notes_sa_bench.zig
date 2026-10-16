@@ -1,8 +1,4 @@
-//! notes-sa-bench MODEL_DIR SNAPSHOT REF.json OUT_DIR WRITES: the postings and the suffix-array index side by side.
-//! Per kind: the index build (median of several), every question looked up REPS times by one thread as the server
-//! does it (encode, Store.retrieve with fit()), WRITES writes through ops.perform into a journal beside a copy of
-//! the snapshot (the side buffer filling, merges where it passes side_max), the lookups again on the written store,
-//! an on-demand merge, and erases. Only the tokenizer is loaded. One JSON line per kind.
+//! notes-sa-bench: postings and suffix-array index side by side (build, lookups, writes, merges, erases).
 const std = @import("std");
 const server = @import("server");
 const ops = server.notes_ops;

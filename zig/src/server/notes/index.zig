@@ -40,9 +40,7 @@ pub const State = enum(u8) { current = 0, superseded = 1, tombstoned = 2 };
 /// The n-gram index: LLWZ's posting lists, or a suffix array over the notes' folded keys.
 pub const Kind = enum { postings, sa };
 
-/// Longer matches than n_max (suffix array only; off by default, and off is the lookup LLWZ's tests check): `all`
-/// adds every n-gram of n_max+1 to `max` keys that a note in the views searched holds; `longest` adds, per question
-/// position, the longest n-gram such a note holds when it is longer than n_max (Infini-gram's longest match).
+/// Matches over n_max keys, sa only, off by default: all n-grams up to `max`, or each position's longest (lookup.zig).
 pub const Long = struct { mode: enum { off, all, longest } = .off, max: u8 = 8 };
 pub const Hop = enum { subject, subject_value, none };
 
@@ -217,8 +215,7 @@ pub const Index = struct {
         return buildWith(gpa, m, .postings, null);
     }
 
-    /// The index of `kind`; for sa, on `reuse` (a base over the model's first notes, unchanged since) when given,
-    /// with the notes after it in the side buffer's postings; without one, a new base over them all.
+    /// The index of `kind`; sa: on `reuse` (a base over the first notes) with the rest as side postings, or a new base.
     pub fn buildWith(gpa: Allocator, m: *const Model, kind: Kind, reuse: ?*sa.Base) LoadError!*Index {
         const self = try gpa.create(Index);
         errdefer gpa.destroy(self);
@@ -298,8 +295,7 @@ pub const Index = struct {
         return sa.build(gpa, src, m.vwordy);
     }
 
-    /// The suffix array matches a key sequence where the postings match a packed n-gram; that is the same only when no
-    /// key is none_key (it fills a packed n-gram's unused places) and the ids of one key agree on being a word.
+    /// Key sequences match as packed n-grams do only with no none_key key and one wordiness per key: else Unsupported.
     fn saVocab(gpa: Allocator, m: *const Model) LoadError!void {
         var max: u32 = 0;
         for (m.vkey) |k| {
@@ -378,7 +374,7 @@ pub const Index = struct {
         self.n_hist = n_hist;
     }
 
-    /// O.ent_cur, O.ent_keys and O.by_key, as note places, each flat: one pass to count, one to fill (by place, by pair order).
+    /// O.ent_cur, O.ent_keys and O.by_key as note places, flat: one pass to count, one to fill (place, pair order).
     fn groupsOf(self: *Index, m: *const Model) LoadError!void {
         const a = self.arena.allocator();
         const ne = m.entities.items.len;

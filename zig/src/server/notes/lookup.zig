@@ -173,8 +173,7 @@ fn subjects(idx: *const Index, sc: *Scratch) Allocator.Error!void {
     }
 }
 
-/// The base's notes that hold the packed n-gram `g`, each once, in the views searched: the current view's array for
-/// the notes current when it was built (less those retired since), and for the past both arrays whole.
+/// The base's notes holding packed n-gram `g`, each once: the current array less notes retired since, or both arrays.
 fn baseHits(idx: *const Index, b: *const sa.Base, sc: *Scratch, g: Gram, past: bool) Allocator.Error!void {
     sc.hits.clearRetainingCapacity();
     var keys: [index.max_n]u32 = undefined;
@@ -210,8 +209,7 @@ fn keyHits(idx: *const Index, b: *const sa.Base, sc: *Scratch, keys: []const u32
     }
 }
 
-/// One n-gram's weight added to its notes: the base's from its ranges, the side buffer's from its postings; df counts
-/// notes, not occurrences.
+/// One n-gram's weight added to its notes: the base's from ranges, the side buffer's from postings; df counts notes.
 fn scoreSa(idx: *const Index, b: *const sa.Base, sc: *Scratch, g: Gram, past: bool, N: u32) Allocator.Error!void {
     try baseHits(idx, b, sc, g, past);
     const side = idx.grams.get(g);
@@ -226,8 +224,7 @@ fn scoreSa(idx: *const Index, b: *const sa.Base, sc: *Scratch, g: Gram, past: bo
     }
 }
 
-/// Matches longer than n_max (index.Long): each n-gram found is weighted by its notes in the views searched, base and
-/// side buffer, as the n-grams up to n_max are; an n-gram met again at another place is not counted again.
+/// index.Long: n-grams over n_max keys weighed by their notes as the shorter ones are; one met again counts once.
 fn scoreLong(idx: *const Index, b: *const sa.Base, sc: *Scratch, past: bool, N: u32, long: index.Long) Allocator.Error!void {
     const q = sc.qkeys.items;
     const n_max = idx.settings.n_max;
@@ -249,8 +246,7 @@ fn scoreLong(idx: *const Index, b: *const sa.Base, sc: *Scratch, past: bool, N: 
     }
 }
 
-/// sc.hits: the notes holding `keys` in the views searched (the base's ranges, then the side buffer's notes read
-/// through); whether there are any.
+/// sc.hits: the notes holding `keys` in the views searched (base ranges, side notes read through); whether any do.
 fn longHits(idx: *const Index, b: *const sa.Base, sc: *Scratch, keys: []const u32, past: bool) Allocator.Error!bool {
     try keyHits(idx, b, sc, keys, past);
     for (0..idx.side_keys.len()) |k| {

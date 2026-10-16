@@ -24,9 +24,7 @@ pub const Check = enum { sha256, vocabulary_only };
 /// The most of tokenizer.json the startup check reads (the grammar compiler reads it under the same limit).
 pub const tokenizer_limit: usize = 256 << 20;
 
-/// One build of the index. A lookup holds it while it reads; the writer frees it once no lookup does.
-/// The index reads the model's lines; a write's replaced lines are kept by the version it retired (`garbage`), and
-/// versions are freed oldest first, so a line is freed only once no version that could read it is left.
+/// One build of the index, held by lookups; `garbage`: lines a write replaced, freed with it (oldest first).
 pub const Version = struct { idx: *index.Index, readers: std.atomic.Value(u32) = .init(0), garbage: std.ArrayList([]u8) = .empty };
 
 /// A lookup's scratch in the pool, with the erase epoch it was made in (an older one is freed, not reused).
@@ -307,8 +305,7 @@ pub const Store = struct {
         };
     }
 
-    /// Frees the retired versions no lookup holds, oldest first (a version's garbage may be read by older ones);
-    /// with `all`, waits until none holds any (an erase). Never allocates.
+    /// Frees retired versions no lookup holds, oldest first; with `all`, waits until none holds any. Never allocates.
     pub fn reclaim(s: *Store, all: bool) void {
         while (true) {
             s.lock.lockUncancelable(s.io);
@@ -350,8 +347,7 @@ pub const Store = struct {
         }
     }
 
-    /// A new version of the index from the model, numbered. sa: on the current base while the side buffer (the notes
-    /// written since it) holds at most side_max notes, else on a new base over them all (a merge).
+    /// A new numbered version; sa: on the current base while side_max or fewer notes follow it, else a merge.
     pub fn build(s: *Store) !*Version {
         var reuse: ?*sa.Base = null;
         if (s.kind == .sa) if (s.current.idx.base) |b| {
@@ -370,8 +366,7 @@ pub const Store = struct {
         return v;
     }
 
-    /// sa: the side buffer merged into a new base now (a write merges when it passes side_max); frees what an erase
-    /// left for later (defer_erase_merge). A postings store builds its index again.
+    /// sa: the side buffer merged now, and what a deferred erase left freed; postings: the index built again.
     pub fn merge(s: *Store) !void {
         s.writer.lockUncancelable(s.io);
         defer s.writer.unlock(s.io);

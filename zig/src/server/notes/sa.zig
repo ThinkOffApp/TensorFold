@@ -1,5 +1,4 @@
-//! The notes' n-grams as a suffix array (Infini-gram, Liu et al. 2024): one folded token array, its sorted suffixes.
-//! An n-gram's occurrences are one binary-searched range; its notes come from a rank over the note separators.
+//! The notes' n-grams as a suffix array (Infini-gram, Liu et al. 2024): an n-gram is one binary-searched range.
 const std = @import("std");
 const exact = @import("exact_alloc.zig");
 const Allocator = std.mem.Allocator;
@@ -85,7 +84,7 @@ pub const Rank = struct {
     }
 };
 
-/// One note's folded keys and its token ids as the builder reads them; `cur`: its suffixes go to the current view's array.
+/// One note's folded keys and token ids for the builder; `cur`: its suffixes go to the current view's array.
 pub const Source = struct { keys: []const u32, ids: []const u32, cur: bool };
 
 pub const BuildError = error{ OutOfMemory, Unsupported };
@@ -211,8 +210,7 @@ fn radix(xs: []Entry, tmp: []Entry, bits: usize) void {
     if (src.ptr != xs.ptr) @memcpy(xs, src);
 }
 
-/// The base over `notes` (places 0..len-1). `gpa` makes its memory and the build's own (freed before it returns).
-/// `vwordy` is the vocabulary's: every token id of one key must agree on it (Unsupported otherwise).
+/// The base over `notes` (places 0..len-1); the ids of one key must agree on `vwordy` (Unsupported otherwise).
 pub fn build(gpa: Allocator, notes: []const Source, vwordy: []const bool) BuildError!*Base {
     const b = try gpa.create(Base);
     b.* = .{ .mem = exact.Exact.init(gpa) };
@@ -241,8 +239,7 @@ pub fn build(gpa: Allocator, notes: []const Source, vwordy: []const bool) BuildE
     std.sort.pdq(u32, dict, {}, std.sort.asc(u32));
     for (dict, 1..) |k, c| codes.getPtr(k).?.* = @intCast(c);
     b.dict = dict;
-    // the text, as u32 codes for the sort (packed after), and each code's wordiness from its tokens: one key's ids
-    // must agree, or a 1-gram range could hold a punctuation one
+    // the text as u32 codes for the sort (packed after), and each code's wordiness (one key's ids must agree)
     const positions = tokens + notes.len;
     const text = try gpa.alloc(u32, positions + 3);
     defer gpa.free(text);
@@ -276,8 +273,7 @@ pub fn build(gpa: Allocator, notes: []const Source, vwordy: []const bool) BuildE
     const cw = widthFor(distinct);
     b.text = try Packed.alloc(a, positions, cw);
     for (text[0..positions], 0..) |c, i| b.text.put(i, c);
-    // the suffixes of each view in position order, then sorted: by their first three codes (a stable radix sort, so
-    // equal ones keep position order), then each run of an equal three-code prefix with no separator in it, whole
+    // each view's suffixes radix-sorted by their first three codes, then runs of an equal sep-free prefix sorted whole
     const fits = 3 * @as(usize, cw) <= 63;
     const ents = try gpa.alloc(Entry, tokens);
     defer gpa.free(ents);

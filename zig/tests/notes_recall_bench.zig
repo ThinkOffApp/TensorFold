@@ -1,7 +1,4 @@
-//! notes-recall MODEL_DIR DIR [off | all:MAX | longest]: recall at the cap on the paper's sets (tools/notes/recall_export.py),
-//! with the suffix-array index and its longer matches off or on. Per question: the engine's lookup as the server
-//! makes it (is_past, cap 512), against Python retrieve()'s ids and block, and whether every needed note came back.
-//! One JSON line per group (L1-L6, L7; or the listing's own) and mode.
+//! notes-recall MODEL_DIR DIR off|all:MAX|longest: recall at the cap on recall_export.py's sets, with sa.
 const std = @import("std");
 const server = @import("server");
 const Store = server.notes_store.Store;

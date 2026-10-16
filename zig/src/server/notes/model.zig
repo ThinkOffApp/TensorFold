@@ -8,8 +8,7 @@ const Allocator = std.mem.Allocator;
 
 pub const Kind = enum(u8) { fact = 0, tombstone = 1 };
 
-/// One note: the fields NoteStore keeps that a lookup, a later write or a listing reads. Its token ids, text and
-/// source never change and share one block (`body`); its line, replaced when it is retired, has its own.
+/// One note as NoteStore keeps it: ids, text and source in one block (`body`); the line (replaced on retire) its own.
 pub const Note = struct {
     told: i64,
     body: [*]align(4) u8 = undefined, // the token ids (u32), then the text, then the source
@@ -159,8 +158,7 @@ pub const Model = struct {
         return if (t < m.vkey.len) m.vkey[t] else index.none_key;
     }
 
-    /// Every list at its length (a load's replayed writes grew them by half again): copied to exact blocks, as a
-    /// shrink in place would leave the allocator's block its old size.
+    /// Every list copied to an exact block (a shrink in place would leave the allocator's block its old size).
     pub fn trim(m: *Model) Allocator.Error!void {
         const g = m.gpa;
         try trimList(model_note, g, &m.notes);
