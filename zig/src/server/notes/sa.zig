@@ -192,6 +192,25 @@ const SortCtx = struct {
     }
 };
 
+/// A stable LSD radix sort of `xs` by the low `bits` bits of their prefixes, 11 bits a pass (`tmp` as long as `xs`).
+fn radix(xs: []Entry, tmp: []Entry, bits: usize) void {
+    var src = xs;
+    var dst = tmp;
+    var shift: usize = 0;
+    while (shift < bits) : (shift += 11) {
+        var count: [2049]usize = @splat(0);
+        for (src) |e| count[((e.prefix >> @intCast(shift)) & 2047) + 1] += 1;
+        for (1..2049) |d| count[d] += count[d - 1];
+        for (src) |e| {
+            const d = (e.prefix >> @intCast(shift)) & 2047;
+            dst[count[d]] = e;
+            count[d] += 1;
+        }
+        std.mem.swap([]Entry, &src, &dst);
+    }
+    if (src.ptr != xs.ptr) @memcpy(xs, src);
+}
+
 /// The base over `notes` (places 0..len-1). `gpa` makes its memory and the build's own (freed before it returns).
 /// `vwordy` is the vocabulary's: every token id of one key must agree on it (Unsupported otherwise).
 pub fn build(gpa: Allocator, notes: []const Source, vwordy: []const bool) BuildError!*Base {
@@ -208,52 +227,46 @@ pub fn build(gpa: Allocator, notes: []const Source, vwordy: []const bool) BuildE
         tokens += n.keys.len;
         if (n.cur) n_cur += n.keys.len;
     }
-    // the dictionary: every key held, ascending
-    const all = try gpa.alloc(u32, tokens);
-    defer gpa.free(all);
-    var at: usize = 0;
-    for (notes) |n| {
-        @memcpy(all[at..][0..n.keys.len], n.keys);
-        at += n.keys.len;
-    }
-    std.sort.pdq(u32, all, {}, std.sort.asc(u32));
-    var distinct: usize = 0;
-    for (all, 0..) |k, i| {
-        if (i == 0 or k != all[i - 1]) {
-            all[distinct] = k;
-            distinct += 1;
-        }
-    }
-    const dict = try a.dupe(u32, all[0..distinct]);
-    b.dict = dict;
-    // each code's wordiness, from its tokens: one key's ids must agree, or a 1-gram range could hold a punctuation one
-    b.wordy = try a.alloc(u64, (distinct + 1 + 63) / 64);
-    @memset(b.wordy, 0);
-    const known = try gpa.alloc(u64, b.wordy.len);
-    defer gpa.free(known);
-    @memset(known, 0);
-    for (notes) |n| for (n.keys, n.ids) |k, t| {
-        const c = b.codeOf(k).?;
-        const w = t < vwordy.len and vwordy[t];
-        const bit = @as(u64, 1) << @intCast(c & 63);
-        if (known[c >> 6] & bit != 0) {
-            if ((b.wordy[c >> 6] & bit != 0) != w) return error.Unsupported;
-        } else {
-            known[c >> 6] |= bit;
-            if (w) b.wordy[c >> 6] |= bit;
-        }
+    // the dictionary: every key held, ascending (a hash set first: the store's distinct keys are few)
+    var codes: std.AutoHashMapUnmanaged(u32, u32) = .empty;
+    defer codes.deinit(gpa);
+    for (notes) |n| for (n.keys) |k| {
+        try codes.put(gpa, k, 0);
     };
-    // the text: codes as u32 for the sort, packed after
+    const distinct = codes.count();
+    const dict = try a.alloc(u32, distinct);
+    var kit = codes.keyIterator();
+    var at: usize = 0;
+    while (kit.next()) |k| : (at += 1) dict[at] = k.*;
+    std.sort.pdq(u32, dict, {}, std.sort.asc(u32));
+    for (dict, 1..) |k, c| codes.getPtr(k).?.* = @intCast(c);
+    b.dict = dict;
+    // the text, as u32 codes for the sort (packed after), and each code's wordiness from its tokens: one key's ids
+    // must agree, or a 1-gram range could hold a punctuation one
     const positions = tokens + notes.len;
     const text = try gpa.alloc(u32, positions + 3);
     defer gpa.free(text);
     @memset(text[positions..], sep);
     b.seps = try Rank.init(a, positions);
+    b.wordy = try a.alloc(u64, (distinct + 1 + 63) / 64);
+    @memset(b.wordy, 0);
+    const known = try gpa.alloc(u64, b.wordy.len);
+    defer gpa.free(known);
+    @memset(known, 0);
     at = 0;
     for (notes) |n| {
-        for (n.keys) |k| {
-            text[at] = b.codeOf(k).?;
+        for (n.keys, n.ids) |k, t| {
+            const c = codes.get(k).?;
+            text[at] = c;
             at += 1;
+            const w = t < vwordy.len and vwordy[t];
+            const bit = @as(u64, 1) << @intCast(c & 63);
+            if (known[c >> 6] & bit != 0) {
+                if ((b.wordy[c >> 6] & bit != 0) != w) return error.Unsupported;
+            } else {
+                known[c >> 6] |= bit;
+                if (w) b.wordy[c >> 6] |= bit;
+            }
         }
         text[at] = sep;
         b.seps.set(at);
@@ -263,9 +276,9 @@ pub fn build(gpa: Allocator, notes: []const Source, vwordy: []const bool) BuildE
     const cw = widthFor(distinct);
     b.text = try Packed.alloc(a, positions, cw);
     for (text[0..positions], 0..) |c, i| b.text.put(i, c);
-    // the suffixes of each view, sorted by their first three codes and then whole
-    const shift: u6 = 21;
-    const fits = distinct < (1 << shift);
+    // the suffixes of each view in position order, then sorted: by their first three codes (a stable radix sort, so
+    // equal ones keep position order), then each run of an equal three-code prefix with no separator in it, whole
+    const fits = 3 * @as(usize, cw) <= 63;
     const ents = try gpa.alloc(Entry, tokens);
     defer gpa.free(ents);
     var ci: usize = 0;
@@ -274,7 +287,7 @@ pub fn build(gpa: Allocator, notes: []const Source, vwordy: []const bool) BuildE
     for (notes) |n| {
         for (0..n.keys.len) |j| {
             const p = at + j;
-            const pre: u64 = if (fits) (@as(u64, text[p]) << 42) | (@as(u64, text[p + 1]) << 21) | text[p + 2] else 0;
+            const pre: u64 = if (fits) (@as(u64, text[p]) << @intCast(2 * cw)) | (@as(u64, text[p + 1]) << cw) | text[p + 2] else 0;
             const e: Entry = .{ .prefix = pre, .pos = @intCast(p) };
             if (n.cur) {
                 ents[ci] = e;
@@ -286,9 +299,26 @@ pub fn build(gpa: Allocator, notes: []const Source, vwordy: []const bool) BuildE
         }
         at += n.keys.len + 1;
     }
+    const tmp = try gpa.alloc(Entry, tokens);
+    defer gpa.free(tmp);
     const ctx: SortCtx = .{ .text = text };
-    std.sort.pdq(Entry, ents[0..n_cur], ctx, SortCtx.less);
-    std.sort.pdq(Entry, ents[n_cur..], ctx, SortCtx.less);
+    for ([2][2]usize{ .{ 0, n_cur }, .{ n_cur, tokens } }) |r| {
+        const view = ents[r[0]..r[1]];
+        if (!fits) {
+            std.sort.pdq(Entry, view, ctx, SortCtx.less);
+            continue;
+        }
+        radix(view, tmp[0..view.len], 3 * @as(usize, cw));
+        var lo: usize = 0;
+        while (lo < view.len) {
+            var hi = lo + 1;
+            while (hi < view.len and view[hi].prefix == view[lo].prefix) hi += 1;
+            const p = view[lo].pos;
+            if (hi - lo > 1 and text[p] != sep and text[p + 1] != sep and text[p + 2] != sep)
+                std.sort.pdq(Entry, view[lo..hi], ctx, SortCtx.less);
+            lo = hi;
+        }
+    }
     const pw = widthFor(@max(positions, 1) - 1);
     b.sa_cur = try Packed.alloc(a, n_cur, pw);
     for (ents[0..n_cur], 0..) |e, i| b.sa_cur.put(i, e.pos);
