@@ -208,6 +208,7 @@ pub const Index = struct {
         self.phrase_max = 0;
         self.names = .empty;
         try self.phrasesOf(m);
+        self.value_ent = try @import("value.zig").ofWrites(self.arena.allocator(), self, m);
         try self.buildPostings(gpa, raw);
         return self;
     }

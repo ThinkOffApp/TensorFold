@@ -132,8 +132,9 @@ fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value) errors.Refused!Plan {
     var notes: ?notes_route.Used = null;
     if (is_chat) {
         input.messages = try messages.normalize(cx, body.get("messages"), "system", srv.needs_user_after_tool);
-        if (srv.notes) |store| notes = try notes_route.apply(store, srv.text, srv.needs_user_after_tool, cx, body, &input.messages);
-        input.notes_live = try notes_decode.setup(srv, cx, body, if (notes) |*u| u else null, input.messages);
+        const shape = if (srv.notes != null) try notes_decode.shapeAsked(cx, body) else notes_route.Shape{};
+        if (srv.notes) |store| notes = try notes_route.applyShaped(store, srv.text, srv.needs_user_after_tool, cx, body, &input.messages, shape);
+        input.notes_live = try notes_decode.setup(srv, cx, body, if (notes) |*u| u else null, input.messages, shape);
         input.tools = try tool_specs.active(cx, body.get("tools"), body.get("tool_choice"));
     } else if (body.get("messages")) |m| if (m == .array and m.array.len > 0) {
         input.messages = try messages.normalize(cx, m, "system", srv.needs_user_after_tool);

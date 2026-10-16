@@ -3,7 +3,6 @@ const std = @import("std");
 const api = @import("engine_api");
 const json = @import("json.zig");
 const errors = @import("errors.zig");
-const log = @import("log.zig");
 const clock = @import("clock.zig");
 const chat = @import("chat.zig");
 const prompt_mod = @import("prompt.zig");
@@ -14,6 +13,12 @@ const notes_route = @import("notes_route.zig");
 const lookup = @import("notes/lookup.zig");
 const index = @import("notes/index.zig");
 const Mailbox = @import("mailbox.zig").Mailbox;
+const fields = @import("notes_decode_fields.zig");
+pub const Place = fields.Place;
+pub const Ask = fields.Ask;
+pub const asked = fields.asked;
+pub const shapeAsked = fields.shapeAsked;
+pub const sentenceEnd = fields.sentenceEnd;
 const Server = @import("server.zig").Server;
 const Value = json.Value;
 const Cx = errors.Cx;
@@ -25,48 +30,6 @@ pub const every: u32 = 48;
 pub const most: usize = 2;
 /// A new note qualifies when the query names its subject and its score, that boost in it, is this share of topWeight.
 pub const min_share: f64 = 1.0;
-
-/// Where new notes go: (a) into the first block (the default), or (b) a short block right before the assistant turn.
-pub const Place = enum { first, turn };
-
-/// A request's notes_decode (default on), notes_decode_place and notes_decode_dry (checks only, for measuring).
-pub const Ask = struct { on: bool = true, place: Place = .first, dry: bool = false };
-
-/// The decode fields of a request; `notes_on`: it asked for notes, which they need.
-pub fn asked(cx: *Cx, body: Value, notes_on: bool) errors.Refused!Ask {
-    var ask: Ask = .{};
-    const on = body.field("notes_decode");
-    const place = body.field("notes_decode_place");
-    const dry = body.field("notes_decode_dry");
-    if (!notes_on) {
-        if (on != null or place != null or dry != null) return cx.refuse("notes_decode, notes_decode_place and notes_decode_dry need \"notes\": true");
-        return ask;
-    }
-    if (on) |v| {
-        if (v != .bool) return cx.refuse("notes_decode must be a boolean");
-        ask.on = v.bool;
-    }
-    if (dry) |v| {
-        if (v != .bool) return cx.refuse("notes_decode_dry must be a boolean");
-        ask.dry = v.bool;
-    }
-    if (place) |v| {
-        const s = v.str() orelse "";
-        ask.place = if (std.mem.eql(u8, s, "turn")) .turn else if (std.mem.eql(u8, s, "first")) .first else return cx.refuse("notes_decode_place must be \"turn\" or \"first\"");
-    }
-    return ask;
-}
-
-/// Whether a reply piece (one token's text) ends a sentence: a full stop, ! or ? before closing marks, or a line break.
-pub fn sentenceEnd(piece: []const u8) bool {
-    if (std.mem.indexOfScalar(u8, piece, '\n') != null) return true;
-    var end = piece.len;
-    while (end > 0 and std.mem.indexOfScalar(u8, "\"')]*_ \t", piece[end - 1]) != null) end -= 1;
-    const t = piece[0..end];
-    if (t.len > 0 and std.mem.indexOfScalar(u8, ".!?", t[t.len - 1]) != null) return true;
-    for ([_][]const u8{ "\u{3002}", "\u{ff01}", "\u{ff1f}", "\u{2026}" }) |m| if (std.mem.endsWith(u8, t, m)) return true;
-    return false;
-}
 
 /// The weight of a key only one note has, log(1 + (N - 0.5) / 1.5): the lookup's subject boost at subject 1.
 pub fn topWeight(idx: *const index.Index, past: bool) f64 {
@@ -113,6 +76,8 @@ pub const Live = struct {
     place: Place,
     echo: bool,
     dry: bool = false,
+    names: bool = false, // a name the reply just wrote, of an entity with notes outside the block, is a check point
+    shape: notes_route.Shape = .{},
     markers: reply_text.Markers = reply_text.think_markers,
     held: std.ArrayList(u32) = .empty, // every note the model sees: the first block's, then the injected
     late: std.ArrayList(u32) = .empty, // (b): the late block's notes
@@ -174,7 +139,10 @@ pub const Live = struct {
     /// After a reply token (`collected` the reply so far): the continuation to switch to when a check put notes in.
     pub fn atToken(l: *Live, srv: *Server, a: Allocator, collected: []const u32) chat.Failure!?*api.Request {
         if (l.stopped != null) return null;
-        if (!l.due(try srv.text.decode(a, collected[collected.len - 1 ..]))) return null;
+        if (!l.due(try srv.text.decode(a, collected[collected.len - 1 ..]))) {
+            if (!l.names or !l.nameJustWritten(collected)) return null;
+            l.since = 0;
+        }
         const t0 = clock.nowNs(srv.io);
         defer l.check_ns += clock.nowNs(srv.io) - t0;
         // a thinking reply is read whole: its reasoning is where it names who the question is about (measured)
@@ -183,6 +151,25 @@ pub const Live = struct {
         const next = (try l.continuation(srv, a, collected, hit)) orelse return null;
         try l.took(hit, collected.len, next.prompt.len, clock.nowNs(srv.io) - t1);
         return next;
+    }
+
+    /// Whether the reply's last tokens end a name of an entity with a current note outside the block.
+    pub fn nameJustWritten(l: *Live, collected: []const u32) bool {
+        const v = l.store.acquire();
+        defer l.store.release(v);
+        const idx = v.idx;
+        if (idx.ver != l.ver) return false;
+        var keys: [index.max_phrase]u32 = undefined;
+        var n: usize = 1;
+        while (n <= @min(collected.len, @max(idx.phrase_max, 1))) : (n += 1) {
+            for (collected[collected.len - n ..], keys[0..n]) |t, *k| k.* = idx.keyOf(t);
+            const e = (if (n == 1) idx.names.get(keys[0]) else idx.phrases.get(index.packPhrase(keys[0..n]))) orelse continue;
+            for (idx.ent_cur[e]) |p| {
+                const id = idx.note_id[p];
+                if (std.mem.indexOfScalar(u32, l.held.items, id) == null and std.mem.indexOfScalar(u32, l.exclude, id) == null) return true;
+            }
+        }
+        return false;
     }
 
     /// The lookup over the question and the reply so far; the new notes that score at least min_share and fit the cap.
@@ -262,7 +249,7 @@ pub const Live = struct {
         while (n > 0) : (n -= 1) {
             const shown = try lookup.render(idx, sc, try std.mem.concat(a, u32, &.{ kept, fresh[0..n] }));
             // (b) after a first block says what notes are: its head is not said again, the titles and lines follow it
-            const late = l.place == .turn and l.block.len > 0 and std.mem.startsWith(u8, shown.block, idx.head) and shown.block.len > idx.head.len;
+            const late = l.place != .first and l.block.len > 0 and std.mem.startsWith(u8, shown.block, idx.head) and shown.block.len > idx.head.len;
             const block = if (late) shown.block[idx.head.len + 1 ..] else shown.block;
             const counted = text.encode(a, block, false) catch |e| switch (e) {
                 error.OutOfMemory => return error.OutOfMemory,
@@ -280,6 +267,7 @@ pub const Live = struct {
 
     /// The continuation request: the prompt rendered with the new notes, the reply so far after it; null: none can be.
     pub fn continuation(l: *Live, srv: *Server, a: Allocator, collected: []const u32, hit: Hit) Allocator.Error!?*api.Request {
+        if (l.place == .user) return l.spliced(srv, a, collected, hit);
         const p = l.prepared.?;
         const base = l.base.?;
         var cx: Cx = .{ .a = a };
@@ -325,35 +313,95 @@ pub const Live = struct {
             out[list.len] = try message(a, srv.late_system, block);
             return .{ .array = out };
         }
-        const lead = list.len > 0 and std.mem.eql(u8, list[0].strField("role") orelse "", "system");
-        if (!lead) {
-            if (l.prepared_block.len > 0) {
-                l.stop("the first message is no longer the notes block");
-                return null;
+        const was = l.prepared_block;
+        if (was.len == 0) { // no first block: the notes are one now, first, as the first lookup puts one
+            const lead = list.len > 0 and std.mem.eql(u8, list[0].strField("role") orelse "", "system");
+            const out = try a.alloc(Value, list.len + @intFromBool(!lead));
+            if (lead) {
+                @memcpy(out, list);
+                const first = try json.copyObject(a, list[0].object);
+                try first.put(a, "content", .{ .string = try std.mem.concat(a, u8, &.{ block, "\n\n", list[0].strField("content") orelse "" }) });
+                out[0] = .{ .object = first };
+            } else {
+                out[0] = try message(a, "system", block);
+                @memcpy(out[1..], list);
             }
-            const out = try a.alloc(Value, list.len + 1);
-            out[0] = try message(a, "system", block);
-            @memcpy(out[1..], list);
             return .{ .array = out };
         }
-        const content = list[0].strField("content") orelse "";
-        const was = l.prepared_block;
-        if (was.len > 0 and !std.mem.startsWith(u8, content, was)) {
-            l.stop("the first system message does not start with the notes block");
+        // the system message that holds the block, first or before the question (notes_position)
+        for (list, 0..) |m, i| {
+            if (!std.mem.eql(u8, m.strField("role") orelse "", "system")) continue;
+            const content = m.strField("content") orelse "";
+            const at = std.mem.indexOf(u8, content, was) orelse continue;
+            const o = try json.copyObject(a, m.object);
+            try o.put(a, "content", .{ .string = try std.mem.concat(a, u8, &.{ content[0..at], block, content[at + was.len ..] }) });
+            const out = try a.dupe(Value, list);
+            out[i] = .{ .object = o };
+            return .{ .array = out };
+        }
+        l.stop("no system message holds the notes block");
+        return null;
+    }
+
+    /// (c): the new notes as a system message spliced in right before the question, where a state is kept.
+    fn spliced(l: *Live, srv: *Server, a: Allocator, collected: []const u32, hit: Hit) Allocator.Error!?*api.Request {
+        const p = l.prepared.?;
+        const base = l.base.?;
+        var cx: Cx = .{ .a = a };
+        const list = p.input.messages.items() orelse return null;
+        var last = list.len;
+        while (last > 0) : (last -= 1) if (std.mem.eql(u8, list[last - 1].strField("role") orelse "", "user")) break;
+        if (last < 2) {
+            l.stop("no message before the question to splice the notes after");
             return null;
         }
-        const rest = if (was.len > 0) content[was.len..] else try std.mem.concat(a, u8, &.{ "\n\n", content });
-        const first = try json.copyObject(a, list[0].object);
-        try first.put(a, "content", .{ .string = try std.mem.concat(a, u8, &.{ block, rest }) });
-        const out = try a.dupe(Value, list);
-        out[0] = .{ .object = first };
-        return .{ .array = out };
+        last -= 1;
+        const before = prompt_mod.renderIds(srv, &cx, .{ .array = list[0..last] }, p.input.tools, p.thinking, p.effort, false) catch null;
+        const upto = prompt_mod.renderIds(srv, &cx, .{ .array = list[0 .. last + 1] }, p.input.tools, p.thinking, p.effort, false) catch null;
+        const with_list = try a.alloc(Value, last + 2);
+        @memcpy(with_list[0 .. last + 1], list[0 .. last + 1]);
+        with_list[last + 1] = try message(a, srv.late_system, hit.block);
+        const with = prompt_mod.renderIds(srv, &cx, .{ .array = with_list }, p.input.tools, p.thinking, p.effort, false) catch null;
+        const prompt = base.prompt;
+        if (before == null or upto == null or with == null or !std.mem.startsWith(u32, prompt, before.?) or !std.mem.startsWith(u32, with.?, upto.?)) {
+            l.stop("the template does not render the notes as a message of their own before the question");
+            return null;
+        }
+        const u = before.?.len;
+        const t = with.?[upto.?.len..];
+        const head = try std.mem.concat(a, u32, &.{ prompt[0..u], t, prompt[u..] });
+        const ids = try std.mem.concat(a, u32, &.{ head, collected });
+        var left = base.max_tokens -| @as(u32, @intCast(collected.len));
+        const window = srv.info.context_window;
+        if (window > 0) left = @min(left, @as(u32, window) -| @as(u32, @intCast(ids.len)));
+        if (left == 0) return null;
+        const n: u32 = @intCast(t.len);
+        const req = try a.create(api.Request);
+        req.* = base.*;
+        req.prompt = ids;
+        req.max_tokens = left;
+        req.history_len = if (base.history_len >= u) base.history_len + n else base.history_len;
+        req.rewind_len = if (base.rewind_len >= u) base.rewind_len + n else base.rewind_len;
+        var shared: std.ArrayList(u32) = .empty;
+        for (base.shared_prefixes) |c| if (c <= u) try shared.append(a, c);
+        req.shared_prefixes = shared.items;
+        // the first request's chunk starts before the splice (a state kept at one is resumed), the question's, the rest
+        var starts: std.ArrayList(u32) = .empty;
+        if (srv.chunks.step > 0) {
+            for (base.chunks) |c| if (c < u) try starts.append(a, c);
+            try starts.append(a, @intCast(u));
+            for (try srv.chunks.starts(a, ids)) |c| if (c >= u + srv.chunks.min_chunk) try starts.append(a, c);
+        }
+        req.chunks = starts.items;
+        req.decode_spans = prompt_mod.replySpans(srv, &cx, ids) catch &.{};
+        if (base.decide != null) req.decide = prompt_mod.decideOf(srv, head);
+        return req;
     }
 
     /// Records an injection the reply is switching to.
     fn took(l: *Live, hit: Hit, at: usize, prompt: usize, build_ns: i96) Allocator.Error!void {
         try l.held.appendSlice(l.a, hit.ids);
-        if (l.place == .turn) {
+        if (l.place != .first) {
             try l.late.appendSlice(l.a, hit.ids);
             l.late_block = hit.block;
             l.late_tokens = hit.tokens;
@@ -390,7 +438,7 @@ pub const Live = struct {
             inj.wait_ns = arrived - l.submitted;
             inj.cached = box.cached;
             l.pause_from = null;
-            logLine(id, inj);
+            fields.logLine(id, inj);
         };
         if (switching) l.pause_from = arrived;
     }
@@ -417,57 +465,20 @@ pub const Live = struct {
 
     /// The reply's notes.decode field.
     pub fn value(l: *const Live, a: Allocator) Allocator.Error!Value {
-        const o = try json.newObject(a);
-        try o.put(a, "on", .{ .bool = l.on });
-        if (!l.on) {
-            if (l.stopped) |s| try o.put(a, "stopped", .{ .string = s });
-            return .{ .object = o };
-        }
-        try o.put(a, "place", .{ .string = @tagName(l.place) });
-        if (l.dry) try o.put(a, "dry", .{ .bool = true });
-        try o.put(a, "min_share", .{ .float = min_share });
-        try o.put(a, "checks", try json.intValue(a, l.n_checks));
-        try o.put(a, "capped", try json.intValue(a, l.capped));
-        try o.put(a, "check_us", .{ .float = micro(l.check_ns) });
-        try o.put(a, "best_share", .{ .float = l.best.share });
-        try o.put(a, "best_id", if (l.best.best > 0) try json.intValue(a, l.best.best) else .null);
-        const list = try a.alloc(Value, l.injections.items.len);
-        for (l.injections.items, list) |*inj, *slot| slot.* = try injectionValue(a, inj);
-        try o.put(a, "injected", .{ .array = list });
-        try o.put(a, "ids", try intsValue(a, l.held.items));
-        try o.put(a, "stopped", if (l.stopped) |s| .{ .string = s } else .null);
-        if (!l.echo) return .{ .object = o };
-        const checks = try a.alloc(Value, l.checks.items.len);
-        for (l.checks.items, checks) |c, *slot| {
-            const x = try json.newObject(a);
-            try x.put(a, "at", try json.intValue(a, c.at));
-            try x.put(a, "best_id", if (c.best > 0) try json.intValue(a, c.best) else .null);
-            try x.put(a, "share", .{ .float = c.share });
-            try x.put(a, "ids", try intsValue(a, c.ids));
-            const ln = try a.alloc(Value, c.named.len);
-            for (c.named, ln) |b, *v| v.* = .{ .bool = b };
-            try x.put(a, "named", .{ .array = ln });
-            const sh = try a.alloc(Value, c.shares.len);
-            for (c.shares, sh) |f, *v| v.* = .{ .float = f };
-            try x.put(a, "shares", .{ .array = sh });
-            slot.* = .{ .object = x };
-        }
-        try o.put(a, "check_list", .{ .array = checks });
-        try o.put(a, "block", .{ .string = if (l.place == .first) l.block else l.late_block });
-        return .{ .object = o };
+        return fields.value(l, a);
     }
 };
 
 /// Sets up the decode-time lookup of a chat request that asked for notes (`used`); null when it asked for none.
-pub fn setup(srv: *const Server, cx: *Cx, body: Value, used: ?*const notes_route.Used, messages: Value) errors.Refused!?*Live {
+pub fn setup(srv: *const Server, cx: *Cx, body: Value, used: ?*const notes_route.Used, messages: Value, shape: notes_route.Shape) errors.Refused!?*Live {
     const store = srv.notes orelse return null;
     const ask = try asked(cx, body, used != null);
     const u = used orelse return null;
     const notes_ask = (try notes_route.asked(cx, body)) orelse notes_route.Ask{};
     const l = try cx.a.create(Live);
     // (b) needs a template that keeps a later system message in place; a template that makes it a user turn gets (a)
-    const place: Place = if (ask.place == .turn and !std.mem.eql(u8, srv.late_system, "system")) .first else ask.place;
-    l.* = .{ .a = cx.a, .on = ask.on, .store = store, .ver = u.found.ver, .question = notes_route.lastUser(messages), .past = u.past, .cap = u.cap, .exclude = notes_ask.exclude, .place = place, .echo = u.echo, .dry = ask.dry, .block = u.found.block, .prepared_block = u.found.block, .block_tokens = if (u.found.block.len > 0) u.found.tokens else 0 };
+    const place: Place = if (ask.place != .first and !std.mem.eql(u8, srv.late_system, "system")) .first else ask.place;
+    l.* = .{ .a = cx.a, .on = ask.on, .store = store, .ver = u.found.ver, .question = notes_route.lastUser(messages), .past = u.past, .cap = u.cap, .exclude = notes_ask.exclude, .place = place, .echo = u.echo, .dry = ask.dry, .names = ask.names, .shape = shape, .block = u.found.block, .prepared_block = u.found.block, .block_tokens = if (u.found.block.len > 0) u.found.tokens else 0 };
     try l.held.appendSlice(cx.a, u.found.ids);
     return l;
 }
@@ -520,45 +531,4 @@ fn placesOf(a: Allocator, idx: *const index.Index, ids: []const u32) Allocator.E
         n += 1;
     };
     return out[0..n];
-}
-
-fn micro(ns: i96) f64 {
-    return @as(f64, @floatFromInt(ns)) / 1e3;
-}
-
-fn intsValue(a: Allocator, xs: []const u32) Allocator.Error!Value {
-    const out = try a.alloc(Value, xs.len);
-    for (xs, out) |x, *slot| slot.* = try json.intValue(a, x);
-    return .{ .array = out };
-}
-
-fn injectionValue(a: Allocator, inj: *const Injection) Allocator.Error!Value {
-    const o = try json.newObject(a);
-    try o.put(a, "ids", try intsValue(a, inj.ids));
-    const shares = try a.alloc(Value, inj.shares.len);
-    for (inj.shares, shares) |s, *slot| slot.* = .{ .float = s };
-    try o.put(a, "shares", .{ .array = shares });
-    try o.put(a, "at_token", try json.intValue(a, inj.at));
-    try o.put(a, "place", .{ .string = @tagName(inj.place) });
-    try o.put(a, "block_tokens", try json.intValue(a, inj.block_tokens));
-    try o.put(a, "lookup_us", .{ .float = micro(inj.lookup_ns) });
-    try o.put(a, "prompt_tokens", try json.intValue(a, inj.prompt));
-    try o.put(a, "cached_tokens", if (inj.cached) |c| try json.intValue(a, c) else .null);
-    try o.put(a, "pause_ms", if (inj.pause_ns) |p| .{ .float = micro(p) / 1e3 } else .null);
-    try o.put(a, "build_us", .{ .float = micro(inj.build_ns) });
-    try o.put(a, "drain_ms", .{ .float = micro(inj.drain_ns) / 1e3 });
-    try o.put(a, "wait_ms", .{ .float = micro(inj.wait_ns) / 1e3 });
-    return .{ .object = o };
-}
-
-/// The server's line for one injection: which notes, after which reply token, and the pause it made.
-fn logLine(id: []const u8, inj: *const Injection) void {
-    var buf: [200]u8 = undefined;
-    var w: std.Io.Writer = .fixed(&buf);
-    for (inj.ids, 0..) |n, k| w.print("{s}{d}", .{ if (k > 0) "," else "", n }) catch break;
-    const cached = inj.cached orelse 0;
-    log.line("notes decode {s}: [{s}] put in after reply token {d} ({s}), pause {d:.1} ms (lookup {d:.1} us, render {d:.1} us, cancel {d:.1} ms, prefill and first token {d:.1} ms); prompt {d} tokens, {d} cached, {d} prefilled; notes {d} tokens", .{
-        id,                       w.buffered(),                   inj.at,     @tagName(inj.place), micro(inj.pause_ns orelse 0) / 1e3, micro(inj.lookup_ns), micro(inj.build_ns),
-        micro(inj.drain_ns) / 1e3, micro(inj.wait_ns) / 1e3, inj.prompt, cached,              inj.prompt -| cached,            inj.block_tokens,
-    });
 }

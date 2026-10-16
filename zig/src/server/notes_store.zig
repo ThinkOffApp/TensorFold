@@ -228,9 +228,19 @@ pub const Store = struct {
 
     /// NoteStore.retrieve(owner, question, cap, past, exclude) from the question's ids, fit() counted by `text`.
     pub fn retrieve(s: *Store, a: Allocator, text: model_text.Text, qids: []const u32, past: bool, cap: u32, exclude: []const u32) Failure!Found {
+        return s.retrieveWith(a, text, qids, past, cap, exclude, null);
+    }
+
+    /// retrieve() with the snapshot's hop setting replaced for this lookup (null: as the snapshot says).
+    pub fn retrieveWith(s: *Store, a: Allocator, text: model_text.Text, qids: []const u32, past: bool, cap: u32, exclude: []const u32, hop: ?index.Hop) Failure!Found {
         const v = s.acquire();
         defer s.release(v);
-        const idx = v.idx;
+        var view: index.Index = undefined; // a shallow copy: the same notes and maps, read only
+        const idx = if (hop) |h| blk: {
+            view = v.idx.*;
+            view.settings.hop = h;
+            break :blk &view;
+        } else v.idx;
         const k = try s.take(idx);
         defer s.give(k);
         const sc = &k.sc;

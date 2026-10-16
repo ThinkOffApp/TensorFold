@@ -16,13 +16,13 @@ const Allocator = std.mem.Allocator;
 const Value = json.Value;
 
 /// Words (with the space before them) and single other characters as tokens; "Anna" and " Anna" fold to one key.
-const Words = struct {
+pub const Words = struct {
     list: std.ArrayList([]const u8) = .empty,
     map: std.StringHashMapUnmanaged(u32) = .empty,
     arena: std.heap.ArenaAllocator = .init(testing.allocator),
     const size = 4096;
 
-    fn deinit(w: *Words) void {
+    pub fn deinit(w: *Words) void {
         w.list.deinit(testing.allocator);
         w.map.deinit(testing.allocator);
         w.arena.deinit();
@@ -42,7 +42,7 @@ const Words = struct {
         return id;
     }
 
-    fn ids(w: *Words, a: Allocator, s: []const u8) Allocator.Error![]u32 {
+    pub fn ids(w: *Words, a: Allocator, s: []const u8) Allocator.Error![]u32 {
         var out: std.ArrayList(u32) = .empty;
         var i: usize = 0;
         while (i < s.len) {
@@ -56,7 +56,7 @@ const Words = struct {
         return out.items;
     }
 
-    fn text(w: *Words) model_text.Text {
+    pub fn text(w: *Words) model_text.Text {
         return .{ .ctx = w, .vtable = &.{ .encode = encode, .decode = decode, .token_id = tokenId, .token_string = tokenString, .vocab_size = vocabSize, .eos_ids = eosIds, .render = render, .template_source = templateSource } };
     }
 
@@ -128,10 +128,10 @@ const notes = [_]Note{
     .{ .subject = "the tent", .text = "The tent is yellow." },
 };
 
-const question = "What car does my sister drive?";
+pub const question = "What car does my sister drive?";
 
-/// A snapshot of `notes` for `w` (every text the tests send interned first, so that folded keys meet).
-fn snapshot(a: Allocator, w: *Words, more: []const []const u8) ![]const u8 {
+/// A snapshot of `notes` for `w`, every text the tests send interned first; `links`: the sister note's value is Anna.
+pub fn snapshot(a: Allocator, w: *Words, more: []const []const u8, links: bool) ![]const u8 {
     for (more) |t| _ = try w.ids(a, t);
     _ = try w.ids(a, question);
     var lines: [notes.len][]const u8 = undefined;
@@ -168,7 +168,7 @@ fn snapshot(a: Allocator, w: *Words, more: []const []const u8) ![]const u8 {
     };
     try o.appendSlice(a, "],\"notes\":[");
     for (notes, 0..) |n, k| {
-        try o.print(a, "{s}{{\"id\":{d},\"state\":0,\"kind\":0,\"entity\":{d},\"attribute\":{d},\"pair\":{d},\"value_ent\":-1,\"told\":{d},\"line\":{f},\"cost\":{d},\"tokens\":[", .{ if (k > 0) "," else "", k + 1, entityOf(subjects.items, n.subject), k, k, 739900 * line_mod.tpd + 100 * @as(i64, @intCast(k)), std.json.fmt(lines[k], .{}), (try w.ids(a, lines[k])).len });
+        try o.print(a, "{s}{{\"id\":{d},\"state\":0,\"kind\":0,\"entity\":{d},\"attribute\":{d},\"pair\":{d},\"value_ent\":{d},\"told\":{d},\"line\":{f},\"cost\":{d},\"tokens\":[", .{ if (k > 0) "," else "", k + 1, entityOf(subjects.items, n.subject), k, k, @as(i64, if (links and k == 0) @intCast(entityOf(subjects.items, "Anna")) else -1), 739900 * line_mod.tpd + 100 * @as(i64, @intCast(k)), std.json.fmt(lines[k], .{}), (try w.ids(a, lines[k])).len });
         for (try w.ids(a, n.text), 0..) |t, j| try o.print(a, "{s}{d}", .{ if (j > 0) "," else "", t });
         try o.appendSlice(a, "]}");
     }
@@ -189,7 +189,7 @@ fn entityOf(subjects: []const []const u8, s: []const u8) usize {
 }
 
 /// Answers each prompt with the next reply of its script, four tokens a round, and keeps every prompt it was sent.
-const Script = struct {
+pub const Script = struct {
     words: *Words,
     replies: []const []const u8 = &.{},
     prompts: std.ArrayList([]u32) = .empty,
@@ -236,22 +236,25 @@ const Script = struct {
 };
 
 /// A server on the store with a scripted engine; every text the tests send interned before the snapshot.
-const Rig = struct {
+pub const Rig = struct {
     words: Words = .{},
+    links: bool = false,
+    /// Fields every request sends first (a request's own come after and win): the first version's behaviour.
+    legacy: []const u8 = ",\"notes_decode_place\":\"first\",\"notes_decode_names\":false,\"notes_value_hop\":false",
     script: Script = undefined,
     srv: *server.Server = undefined,
     arena: std.heap.ArenaAllocator = .init(testing.allocator),
 
-    fn init(r: *Rig, more: []const []const u8) !void {
+    pub fn init(r: *Rig, more: []const []const u8) !void {
         r.script = .{ .words = &r.words };
         const a = r.arena.allocator();
-        const bytes = try snapshot(a, &r.words, more);
+        const bytes = try snapshot(a, &r.words, more, r.links);
         r.srv = try server.Server.init(testing.allocator, testing.io, r.script.engine(), r.words.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false }, null);
         var why: []const u8 = "";
         r.srv.notes = try notes_route.Store.load(testing.allocator, testing.io, bytes, r.words.text(), &why);
     }
 
-    fn deinit(r: *Rig) void {
+    pub fn deinit(r: *Rig) void {
         r.srv.notes.?.deinit();
         r.srv.notes = null;
         r.srv.deinit();
@@ -261,21 +264,27 @@ const Rig = struct {
     }
 
     /// One chat request answered by `replies` in turn; the parsed reply.
-    fn ask(r: *Rig, replies: []const []const u8, extra: []const u8) !rig.Reply {
+    pub fn ask(r: *Rig, replies: []const []const u8, extra: []const u8) !rig.Reply {
+        const a = r.arena.allocator();
+        return r.askWith(replies, try std.fmt.allocPrint(a, "[{{\"role\":\"user\",\"content\":{f}}}]", .{std.json.fmt(question, .{})}), extra);
+    }
+
+    /// ask() with the messages (a JSON list) given.
+    pub fn askWith(r: *Rig, replies: []const []const u8, messages: []const u8, extra: []const u8) !rig.Reply {
         for (r.script.prompts.items) |p| testing.allocator.free(p);
         r.script.prompts.clearRetainingCapacity();
         r.script.replies = replies;
         const a = r.arena.allocator();
-        const body = try std.fmt.allocPrint(a, "{{\"model\":\"m\",\"max_tokens\":64,\"messages\":[{{\"role\":\"user\",\"content\":{f}}}],\"notes\":true,\"notes_echo\":true{s}}}", .{ std.json.fmt(question, .{}), extra });
+        const body = try std.fmt.allocPrint(a, "{{\"model\":\"m\",\"max_tokens\":64,\"messages\":{s},\"notes\":true,\"notes_echo\":true{s}{s}}}", .{ messages, r.legacy, extra });
         return rig.request(r.srv, a, "POST", "/v1/chat/completions", body);
     }
 
-    fn ids(r: *Rig, t: []const u8) ![]u32 {
+    pub fn ids(r: *Rig, t: []const u8) ![]u32 {
         return r.words.ids(r.arena.allocator(), t);
     }
 
     /// The chat prompt of `messages` ([role, content] pairs), as the server renders it.
-    fn prompt(r: *Rig, messages: []const [2][]const u8) ![]u32 {
+    pub fn prompt(r: *Rig, messages: []const [2][]const u8) ![]u32 {
         var t: std.ArrayList(u8) = .empty;
         const a = r.arena.allocator();
         for (messages) |m| try t.print(a, "[{s}]{s}\n", .{ m[0], m[1] });
@@ -284,19 +293,19 @@ const Rig = struct {
     }
 };
 
-fn content(reply: Value) []const u8 {
+pub fn content(reply: Value) []const u8 {
     return reply.get("choices").?.array[0].get("message").?.strField("content").?;
 }
 
-fn decodeOf(reply: Value) Value {
+pub fn decodeOf(reply: Value) Value {
     return reply.get("notes").?.get("decode").?;
 }
 
-fn injected(reply: Value) []Value {
+pub fn injected(reply: Value) []Value {
     return decodeOf(reply).get("injected").?.array;
 }
 
-const answers = [_][]const u8{ "Your sister is Anna. She drives a red car.", " She drives a red Volvo.", "Your sister is Anna. Anna is kind.", " Anna is kind.", "I have a red bicycle too, I think.", "I do not know. Paris is in France.", "Your sister is Anna. Your brother is Otto. Your dog is Rex. Bye.", " Your brother is Otto. Your dog is Rex. Bye.", " Your dog is Rex. Bye.", "Maybe the boat is involved." };
+pub const answers = [_][]const u8{ "Your sister is Anna. She drives a red car.", " She drives a red Volvo.", "Your sister is Anna. Anna is kind.", " Anna is kind.", "I have a red bicycle too, I think.", "I do not know. Paris is in France.", "Your sister is Anna. Your brother is Otto. Your dog is Rex. Bye.", " Your brother is Otto. Your dog is Rex. Bye.", " Your dog is Rex. Bye.", "Maybe the boat is involved." };
 
 test "a check at each sentence end, and at the latest every 48 reply tokens" {
     for ([_][]const u8{ ".", "!", "?", " Anna.", "?\"", ".)", "**.**", "\n", " done.\n", "\u{3002}" }) |p| try testing.expect(notes_decode.sentenceEnd(p));
@@ -394,7 +403,7 @@ test "streamed: the client's deltas are the reply once, in order, with the injec
     defer r.deinit();
     const a = r.arena.allocator();
     r.script.replies = &.{ answers[0], answers[1] };
-    const body = try std.fmt.allocPrint(a, "{{\"model\":\"m\",\"max_tokens\":64,\"stream\":true,\"messages\":[{{\"role\":\"user\",\"content\":{f}}}],\"notes\":true}}", .{std.json.fmt(question, .{})});
+    const body = try std.fmt.allocPrint(a, "{{\"model\":\"m\",\"max_tokens\":64,\"stream\":true,\"messages\":[{{\"role\":\"user\",\"content\":{f}}}],\"notes\":true{s}}}", .{ std.json.fmt(question, .{}), r.legacy });
     var conn: Conn = .{ .fd = -1, .peer = "", .buf = &.{}, .gpa = a };
     var seen: Stream = .{ .a = a };
     openai.run(r.srv, a, seen.out(), .{ .conn = &conn }, true, (try json.parse(a, body)).ok);
@@ -520,7 +529,10 @@ test "the request fields: wrong types and the decode fields without notes are re
     for ([_]Case{
         .{ .extra = ",\"notes_decode\":\"yes\"", .message = "notes_decode must be a boolean" },
         .{ .extra = ",\"notes_decode_dry\":1", .message = "notes_decode_dry must be a boolean" },
-        .{ .extra = ",\"notes_decode_place\":\"middle\"", .message = "notes_decode_place must be \"turn\" or \"first\"" },
+        .{ .extra = ",\"notes_decode_place\":\"middle\"", .message = "notes_decode_place must be \"first\", \"turn\" or \"user\"" },
+        .{ .extra = ",\"notes_decode_names\":\"yes\"", .message = "notes_decode_names must be a boolean" },
+        .{ .extra = ",\"notes_value_hop\":1", .message = "notes_value_hop must be a boolean" },
+        .{ .extra = ",\"notes_position\":\"last\"", .message = "notes_position must be \"first\" or \"user\"" },
     }) |c| {
         const got = try r.ask(&.{answers[0]}, c.extra);
         try testing.expectEqual(@as(u16, 400), got.status);
@@ -531,5 +543,5 @@ test "the request fields: wrong types and the decode fields without notes are re
     r.script.replies = &.{answers[0]};
     const got = try rig.request(r.srv, a, "POST", "/v1/chat/completions", body);
     try testing.expectEqual(@as(u16, 400), got.status);
-    try testing.expectEqualStrings("notes_decode, notes_decode_place and notes_decode_dry need \"notes\": true", got.value.get("error").?.strField("message").?);
+    try testing.expectEqualStrings("notes_decode, notes_decode_place, notes_decode_names and notes_decode_dry need \"notes\": true", got.value.get("error").?.strField("message").?);
 }
