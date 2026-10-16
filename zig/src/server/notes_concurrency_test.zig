@@ -147,7 +147,9 @@ test "8 lookup threads during 1,000 writes and erases: no crash, every block its
     const quiet = try joined(&sh.quiet, a);
     const busy = try joined(&sh.busy, a);
     const after = try joined(&sh.after, a);
-    std.debug.print("notes concurrency (Debug build): {d} writes ({d} erases), {d} lookups during them over {d} versions, {d} not their version's block, {d} of no version made; lookup p50/p95 alone on the {d}-note store {d:.1}/{d:.1} us ({d} lookups), during writes {d:.1}/{d:.1} us, alone on the final {d}-note store {d:.1}/{d:.1} us ({d} lookups)\n", .{ written, erased, looked, versions.count(), torn, unknown, base_notes, us(pct(quiet, 50)), us(pct(quiet, 95)), quiet.len, us(pct(busy, 50)), us(pct(busy, 95)), r.store().model.notes.items.len, us(pct(after, 50)), us(pct(after, 95)), after.len });
+    // a test's stderr reads as a failure in zig build's output: the timings are notes-live-bench's to report
+    try testing.expect(quiet.len > 0 and after.len > 0 and pct(busy, 50) > 0);
+    try testing.expect(r.store().model.notes.items.len > base_notes + 500); // the writes grew the store
     try testing.expectEqual(@as(usize, 0), torn);
     try testing.expectEqual(@as(usize, 0), unknown);
     try testing.expectEqual(@as(usize, 1000), written);
