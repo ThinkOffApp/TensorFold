@@ -1,0 +1,1 @@
+{"snapshot":"sweep-10000.snap.json","notes_before":10000,"notes_after":10740,"writes":990,"erases":10,"failed":0,"alone":{"n":320483,"p50_us":51.7,"p95_us":79.6},"during":{"n":1984098,"p50_us":52.0,"p95_us":86.8},"after":{"n":314775,"p50_us":52.4,"p95_us":81.5},"write_us":{"p50":14490.5,"p95":17169.8},"erase_us":{"p50":90726.8,"p95":104775.0}}

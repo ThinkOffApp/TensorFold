@@ -1,0 +1,442 @@
+[
+ {
+  "store": "l6-teach",
+  "notes": 29,
+  "built_s": 0.0,
+  "load_s": 2.0,
+  "replies_differing": 0,
+  "checks": [
+   [
+    "A",
+    224,
+    224,
+    true,
+    220
+   ],
+   [
+    "B",
+    224,
+    224,
+    true,
+    220
+   ],
+   [
+    "C",
+    224,
+    224,
+    true,
+    220
+   ],
+   [
+    "C after restart",
+    224,
+    224,
+    true,
+    220
+   ],
+   [
+    "C from Python's export",
+    224,
+    224,
+    true,
+    220
+   ]
+  ]
+ },
+ {
+  "store": "nights-day1",
+  "notes": 10,
+  "built_s": 0.0,
+  "load_s": 2.6,
+  "replies_differing": 0,
+  "checks": [
+   [
+    "A",
+    224,
+    224,
+    true,
+    216
+   ],
+   [
+    "B",
+    224,
+    224,
+    true,
+    214
+   ],
+   [
+    "C",
+    224,
+    224,
+    true,
+    214
+   ],
+   [
+    "C after restart",
+    224,
+    224,
+    true,
+    214
+   ],
+   [
+    "C from Python's export",
+    224,
+    224,
+    true,
+    214
+   ]
+  ]
+ },
+ {
+  "store": "nights-day2",
+  "notes": 20,
+  "built_s": 0.0,
+  "load_s": 2.6,
+  "replies_differing": 0,
+  "checks": [
+   [
+    "A",
+    224,
+    224,
+    true,
+    216
+   ],
+   [
+    "B",
+    224,
+    224,
+    true,
+    216
+   ],
+   [
+    "C",
+    224,
+    224,
+    true,
+    216
+   ],
+   [
+    "C after restart",
+    224,
+    224,
+    true,
+    216
+   ],
+   [
+    "C from Python's export",
+    224,
+    224,
+    true,
+    216
+   ]
+  ]
+ },
+ {
+  "store": "nights-day3",
+  "notes": 29,
+  "built_s": 0.0,
+  "load_s": 2.5,
+  "replies_differing": 0,
+  "checks": [
+   [
+    "A",
+    224,
+    224,
+    true,
+    220
+   ],
+   [
+    "B",
+    224,
+    224,
+    true,
+    220
+   ],
+   [
+    "C",
+    224,
+    224,
+    true,
+    220
+   ],
+   [
+    "C after restart",
+    224,
+    224,
+    true,
+    220
+   ],
+   [
+    "C from Python's export",
+    224,
+    224,
+    true,
+    220
+   ]
+  ]
+ },
+ {
+  "store": "nights-day4",
+  "notes": 32,
+  "built_s": 0.0,
+  "load_s": 2.0,
+  "replies_differing": 0,
+  "checks": [
+   [
+    "A",
+    224,
+    224,
+    true,
+    220
+   ],
+   [
+    "B",
+    224,
+    224,
+    true,
+    220
+   ],
+   [
+    "C",
+    224,
+    224,
+    true,
+    220
+   ],
+   [
+    "C after restart",
+    224,
+    224,
+    true,
+    220
+   ],
+   [
+    "C from Python's export",
+    224,
+    224,
+    true,
+    220
+   ]
+  ]
+ },
+ {
+  "store": "nights-day5",
+  "notes": 32,
+  "built_s": 0.0,
+  "load_s": 2.0,
+  "replies_differing": 0,
+  "checks": [
+   [
+    "A",
+    224,
+    224,
+    true,
+    220
+   ],
+   [
+    "B",
+    224,
+    224,
+    true,
+    220
+   ],
+   [
+    "C",
+    224,
+    224,
+    true,
+    220
+   ],
+   [
+    "C after restart",
+    224,
+    224,
+    true,
+    220
+   ],
+   [
+    "C from Python's export",
+    224,
+    224,
+    true,
+    220
+   ]
+  ]
+ },
+ {
+  "store": "sweep-100",
+  "notes": 100,
+  "built_s": 0.1,
+  "load_s": 2.5,
+  "replies_differing": 0,
+  "checks": [
+   [
+    "A",
+    56,
+    56,
+    true,
+    54
+   ],
+   [
+    "B",
+    56,
+    56,
+    true,
+    55
+   ],
+   [
+    "C",
+    56,
+    56,
+    true,
+    55
+   ],
+   [
+    "C after restart",
+    56,
+    56,
+    true,
+    55
+   ],
+   [
+    "C from Python's export",
+    56,
+    56,
+    true,
+    55
+   ]
+  ]
+ },
+ {
+  "store": "sweep-1000",
+  "notes": 1000,
+  "built_s": 1.2,
+  "load_s": 2.0,
+  "replies_differing": 0,
+  "checks": [
+   [
+    "A",
+    56,
+    56,
+    true,
+    33
+   ],
+   [
+    "B",
+    56,
+    56,
+    true,
+    44
+   ],
+   [
+    "C",
+    56,
+    56,
+    true,
+    34
+   ],
+   [
+    "C after restart",
+    56,
+    56,
+    true,
+    34
+   ],
+   [
+    "C from Python's export",
+    56,
+    56,
+    true,
+    34
+   ]
+  ]
+ },
+ {
+  "store": "sweep-10000",
+  "notes": 10000,
+  "built_s": 6.3,
+  "load_s": 2.0,
+  "replies_differing": 0,
+  "checks": [
+   [
+    "A",
+    56,
+    56,
+    true,
+    10
+   ],
+   [
+    "B",
+    56,
+    56,
+    true,
+    22
+   ],
+   [
+    "C",
+    56,
+    56,
+    true,
+    12
+   ],
+   [
+    "C after restart",
+    56,
+    56,
+    true,
+    12
+   ],
+   [
+    "C from Python's export",
+    56,
+    56,
+    true,
+    12
+   ]
+  ]
+ },
+ {
+  "store": "sweep-100000",
+  "notes": 100000,
+  "built_s": 703.6,
+  "load_s": 3.0,
+  "replies_differing": 0,
+  "checks": [
+   [
+    "A",
+    56,
+    56,
+    true,
+    13
+   ],
+   [
+    "B",
+    56,
+    56,
+    true,
+    20
+   ],
+   [
+    "C",
+    56,
+    56,
+    true,
+    14
+   ],
+   [
+    "C after restart",
+    56,
+    56,
+    true,
+    14
+   ],
+   [
+    "C from Python's export",
+    56,
+    56,
+    true,
+    14
+   ]
+  ]
+ }
+]
