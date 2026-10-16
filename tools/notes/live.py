@@ -211,6 +211,7 @@ def run_store(a, nm, nx, intake, L, tok, S, store_name, variants):
                 out.write(json.dumps({"step": "erase", "ok": ok, "server": r, "python": [removed, moved]}) + "\n")
                 continue
             n += 1
+            today = L.tick(time.strftime("%Y-%m-%d"))  # the server tells a write on the day it is made (a run may pass midnight)
             told = ns.told_next(owner, today, base_told)
             text = st.get("text") or live_intake.DEFAULT_TAKEBACK
             if st["op"] == "chat":

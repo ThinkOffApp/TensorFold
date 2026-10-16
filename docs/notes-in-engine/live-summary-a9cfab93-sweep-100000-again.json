@@ -1,0 +1,46 @@
+[
+ {
+  "store": "sweep-100000",
+  "notes": 100000,
+  "built_s": 521.4,
+  "load_s": 37.6,
+  "replies_differing": 0,
+  "checks": [
+   [
+    "A",
+    56,
+    56,
+    true,
+    13
+   ],
+   [
+    "B",
+    56,
+    56,
+    true,
+    20
+   ],
+   [
+    "C",
+    56,
+    56,
+    true,
+    14
+   ],
+   [
+    "C after restart",
+    56,
+    56,
+    true,
+    14
+   ],
+   [
+    "C from Python's export",
+    56,
+    56,
+    true,
+    14
+   ]
+  ]
+ }
+]
