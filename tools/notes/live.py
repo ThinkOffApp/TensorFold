@@ -255,6 +255,9 @@ def run_store(a, nm, nx, intake, L, tok, S, store_name, variants):
     finally:
         srv.stop()
         out.close()
+        for f in (path, path + ".journal", os.path.join(d, "exported", "after.snap.json")):
+            if os.path.exists(f):
+                os.remove(f)  # the comparisons are in live-STORE.jsonl; a snapshot can be exported again
     return {"store": store_name, "notes": len(snap["notes"]), "built_s": round(built, 1), "load_s": round(load_s, 1),
             "replies_differing": bad_replies, "checks": tally}
 

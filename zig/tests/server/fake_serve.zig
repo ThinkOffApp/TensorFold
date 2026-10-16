@@ -48,6 +48,7 @@ pub fn main(init: std.process.Init) !u8 {
         .engine = engine.engine(),
         .text = text,
         .served = server.hub.servedName(args.name, args.model, dir),
+        .model_dir = init.environ_map.get("TF_FAKE_TOKENIZER") orelse dir, // where --notes checks tokenizer.json
         .environ = init.environ_map,
         .on_listen = announce,
     });
