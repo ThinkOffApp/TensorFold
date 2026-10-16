@@ -157,6 +157,7 @@ pub const Store = struct {
             s.truncated = s.journal.?.truncated;
             for (recs.items) |r| try s.replay(r, problem);
             s.replayed = recs.items.len;
+            try m.trim(); // the lists the writes grew, at their lengths
             s.log.next_source = @max(s.log.next_source, s.journal.?.next_source);
             s.snapshot_bytes = try gpa.dupe(u8, bytes);
         } else s.read_only = "the store has no journal";

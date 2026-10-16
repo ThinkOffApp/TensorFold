@@ -115,6 +115,18 @@ pub const Model = struct {
         return if (t < m.vkey.len) m.vkey[t] else index.none_key;
     }
 
+    /// Every list at its length (a load's replayed writes grew them by half again): copied to exact blocks, as a
+    /// shrink in place would leave the allocator's block its old size.
+    pub fn trim(m: *Model) Allocator.Error!void {
+        const g = m.gpa;
+        try trimList(model_note, g, &m.notes);
+        try trimList([]u8, g, &m.entities);
+        try trimList([]u8, g, &m.attributes);
+        for (m.pairs.items) |*p| try trimList(u32, g, &p.ids);
+        try trimList(Pair, g, &m.pairs);
+        try trimList(Phrase, g, &m.phrases);
+    }
+
     /// Notes counted by view: current, and the rest.
     pub fn counts(m: *const Model) [2]u32 {
         var c: [2]u32 = .{ 0, 0 };
@@ -122,6 +134,16 @@ pub const Model = struct {
         return c;
     }
 };
+
+const model_note = Note;
+
+fn trimList(comptime T: type, g: Allocator, list: *std.ArrayList(T)) Allocator.Error!void {
+    if (list.capacity == list.items.len) return;
+    const exact = try g.alloc(T, list.items.len);
+    @memcpy(exact, list.items);
+    g.free(list.allocatedSlice());
+    list.* = .fromOwnedSlice(exact);
+}
 
 /// Reads a snapshot (zengine/notes_export.py's JSON): its settings, vocabulary, notes, pairs and phrases.
 pub fn parse(gpa: Allocator, text: []const u8) LoadError!*Model {
@@ -169,6 +191,7 @@ pub fn parse(gpa: Allocator, text: []const u8) LoadError!*Model {
     m.grams_current = try uint(grams, "current");
     m.grams_history = try uint(grams, "history");
     m.base_notes = m.notes.items.len;
+    try m.trim(); // the entity and attribute names grew one at a time
     return m;
 }
 
@@ -222,7 +245,7 @@ fn readSettings(m: *Model, js: Value) LoadError!void {
 /// The notes, by ascending id; each line must be one line() gives for its state and kind.
 fn readNotes(m: *Model, list: []const Value) LoadError!void {
     const g = m.gpa;
-    try m.notes.ensureTotalCapacity(g, list.len);
+    try m.notes.ensureTotalCapacityPrecise(g, list.len);
     for (list) |x| {
         const id = try uint(x, "id");
         if (m.notes.items.len > 0 and id <= m.notes.items[m.notes.items.len - 1].id) return error.BadSnapshot;
@@ -263,7 +286,7 @@ fn readNotes(m: *Model, list: []const Value) LoadError!void {
 /// by_key: each pair's notes oldest first; a note's version is its place in its pair, from 1.
 fn readPairs(m: *Model, list: []const Value) LoadError!void {
     const g = m.gpa;
-    try m.pairs.ensureTotalCapacity(g, list.len);
+    try m.pairs.ensureTotalCapacityPrecise(g, list.len);
     const seen = try g.alloc(bool, m.notes.items.len);
     defer g.free(seen);
     @memset(seen, false);
@@ -274,7 +297,7 @@ fn readPairs(m: *Model, list: []const Value) LoadError!void {
         m.pairs.appendAssumeCapacity(.{ .entity = entity, .attribute = attribute });
         const pr = &m.pairs.items[m.pairs.items.len - 1];
         const ids = try arr(p, "ids");
-        try pr.ids.ensureTotalCapacity(g, ids.len);
+        try pr.ids.ensureTotalCapacityPrecise(g, ids.len);
         for (ids, 1..) |v, version| {
             const place = m.placeOf(try asU32(v)) orelse return error.BadSnapshot;
             const n = &m.notes.items[place];
@@ -289,7 +312,7 @@ fn readPairs(m: *Model, list: []const Value) LoadError!void {
 
 fn readPhrases(m: *Model, list: []const Value) LoadError!void {
     const g = m.gpa;
-    try m.phrases.ensureTotalCapacity(g, list.len);
+    try m.phrases.ensureTotalCapacityPrecise(g, list.len);
     for (list) |p| {
         const entity = try uint(p, "entity");
         if (entity >= m.entities.items.len) return error.BadSnapshot;

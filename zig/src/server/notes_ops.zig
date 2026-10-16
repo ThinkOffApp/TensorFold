@@ -163,6 +163,7 @@ pub fn erase(s: *Store, a: Allocator, id: u32, why: *Refusal) Error!Erased {
         write.commit(fresh, &undo);
         try log.add(e.r, out, fresh);
     }
+    try fresh.trim(); // as at startup: the lists the kept writes grew, at their lengths
     const idx = index.Index.buildKind(s.gpa, fresh, s.kind) catch return error.OutOfMemory;
     var idx_owned = true;
     defer if (idx_owned) idx.deinit();
