@@ -57,11 +57,22 @@ pub const Ask = struct {
     target: u32 = 0,
 };
 
+/// The reply to the write whose append and rollback both failed: what is known, and what is not.
+const rollback_failed = "the write could not be stored on disk, and the journal could not be put back as it was: nothing was applied in memory, but the journal on disk may hold part of this write. Writes are refused until the server restarts (startup cuts a torn last record); lookups go on";
+
+/// The reply to every write after that.
+const needs_recovery = "the notes journal needs recovery, restart the server: an earlier write failed and could not be rolled back (lookups go on from the last good version)";
+
+fn poisoned(s: *const Store) bool {
+    return if (s.journal) |j| j.poisoned else false;
+}
+
 /// One write, whole or not at all: intake, the model, a new index version, the journal synced, then the swap.
 pub fn perform(s: *Store, a: Allocator, ask: Ask, why: *Refusal) Error!Written {
     s.writer.lockUncancelable(s.io);
     defer s.writer.unlock(s.io);
     if (s.read_only.len > 0) return refuse(why, 503, s.read_only);
+    if (poisoned(s)) return refuse(why, 503, needs_recovery);
     const m = s.model;
     const source = try std.fmt.allocPrint(a, "w{d}", .{s.log.next_source});
     var r: write.Record = .{ .op = ask.op, .source = source, .told = s.toldNow(), .subject = ask.subject orelse "me", .attribute = "", .text = ask.text };
@@ -101,6 +112,7 @@ pub fn perform(s: *Store, a: Allocator, ask: Ask, why: *Refusal) Error!Written {
     s.journal.?.append(a, r) catch |e| return switch (e) {
         error.OutOfMemory => error.OutOfMemory,
         error.JournalIo => refuse(why, 500, "the write could not be stored on disk; nothing changed"),
+        error.JournalPoisoned => refuse(why, 500, rollback_failed),
     };
     // stored: from here the write stands, and nothing below can fail
     applied = false;
@@ -125,6 +137,7 @@ pub fn erase(s: *Store, a: Allocator, id: u32, why: *Refusal) Error!Erased {
     s.writer.lockUncancelable(s.io);
     defer s.writer.unlock(s.io);
     if (s.read_only.len > 0) return refuse(why, 503, s.read_only);
+    if (poisoned(s)) return refuse(why, 503, needs_recovery);
     const old = s.model;
     const p = old.placeOf(id) orelse return refuse(why, 404, "no note has this id");
     if (p < old.base_notes) return refuse(why, 409, "this note comes from the snapshot: erase it in LLWZ (NoteStore.delete) and export again");

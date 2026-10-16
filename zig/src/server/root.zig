@@ -95,4 +95,5 @@ test {
     _ = @import("notes_auto_test.zig");
     _ = @import("notes_concurrency_test.zig");
     _ = @import("notes_journal_tmp_test.zig");
+    _ = @import("notes_journal_fault_test.zig");
 }

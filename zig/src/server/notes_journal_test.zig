@@ -86,7 +86,7 @@ test "a journal with a bad line, one for another snapshot, or one another server
     try testing.expectEqual(@as(usize, 1), r.store().replayed);
 }
 
-test "a write the journal cannot store is refused with 500 and changes nothing" {
+test "a write the journal can neither store nor roll back is a 500 that applies nothing and stops writes" {
     const r = try rig.Rig.init(testing.allocator);
     defer r.deinit();
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -95,7 +95,7 @@ test "a write the journal cannot store is refused with 500 and changes nothing" 
     _ = try add(r, a, "My favourite colour is green.");
     const notes = r.store().model.notes.items.len;
     const journal = try r.journal(a);
-    // the journal's descriptor swapped for one that cannot be written
+    // the journal's descriptor swapped for one that can be neither written nor truncated (the rollback fails too)
     const ro = std.c.open("/dev/null", .{ .ACCMODE = .RDONLY });
     try testing.expect(ro >= 0);
     const fd = r.store().journal.?.fd;
@@ -103,7 +103,9 @@ test "a write the journal cannot store is refused with 500 and changes nothing" 
     _ = std.c.close(ro);
     const got = try rig.request(r.srv, a, "POST", "/v1/notes", "{\"text\": \"I like long walks.\"}");
     try testing.expectEqual(@as(u16, 500), got.status);
-    try testing.expect(std.mem.indexOf(u8, rig.message(got), "nothing changed") != null);
+    try testing.expect(std.mem.indexOf(u8, rig.message(got), "nothing was applied in memory") != null);
+    try testing.expect(r.store().journal.?.poisoned);
+    try testing.expectEqual(@as(u16, 503), (try rig.request(r.srv, a, "POST", "/v1/notes", "{\"text\": \"I like tea.\"}")).status);
     try testing.expectEqual(notes, r.store().model.notes.items.len);
     try testing.expectEqual(@as(u64, 1), r.store().current.idx.ver); // still the first write's version
     try testing.expectEqualStrings(journal, try r.journal(a));

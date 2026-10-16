@@ -12,6 +12,24 @@ pub const format = "tf-notes-journal/1";
 
 pub const OpenError = error{ OutOfMemory, JournalIo, BadJournal, OtherSnapshot, Locked };
 pub const IoError = error{ OutOfMemory, JournalIo };
+/// JournalPoisoned: an append failed and so did putting the file back; it may hold part of a record until a restart.
+pub const AppendError = IoError || error{JournalPoisoned};
+
+/// Tests only: an append's Nth write, truncate or sync fails (from 0); a failing write puts down half its bytes.
+pub const Faults = struct {
+    write: ?u32 = null,
+    truncate: ?u32 = null,
+    sync: ?u32 = null,
+    writes: u32 = 0,
+    truncates: u32 = 0,
+    syncs: u32 = 0,
+
+    fn hit(at: ?u32, count: *u32) bool {
+        const n = count.*;
+        count.* += 1;
+        return at != null and at.? == n;
+    }
+};
 
 /// One snapshot's journal: its path, the open file (after the first write or a replay), and its size.
 pub const Journal = struct {
@@ -24,6 +42,8 @@ pub const Journal = struct {
     next_source: u64 = 1, // the header's: an erase rewrites it, so an erased write's source is never used again
     stale: usize = 0, // temporary files of a rewrite that died before its rename, removed at open (lock held)
     hook: ?*const fn (ctx: *anyopaque, tmp: [:0]const u8) void = null, // tests: between a rewrite's sync and rename
+    faults: ?*Faults = null, // tests: an append's write, truncate or sync made to fail
+    poisoned: bool = false, // an append and its rollback both failed: no more appends until a restart cuts the tail
     hook_ctx: *anyopaque = undefined,
 
     pub fn deinit(j: *Journal) void {
@@ -85,16 +105,39 @@ pub const Journal = struct {
     }
 
     /// Appends one record and syncs it to the drive; on any failure the file is cut back to what it was.
-    pub fn append(j: *Journal, a: Allocator, r: Record) IoError!void {
+    pub fn append(j: *Journal, a: Allocator, r: Record) AppendError!void {
+        if (j.poisoned) return error.JournalPoisoned;
         if (j.fd < 0) try j.create(a);
         const line = try encode(a, r);
         defer a.free(line);
-        if (!writeAll(j.fd, line, j.size) or !fullSync(j.fd)) {
-            _ = std.c.ftruncate(j.fd, @intCast(j.size));
-            _ = fullSync(j.fd);
-            return error.JournalIo;
+        if (j.put(line, j.size) and j.sync()) {
+            j.size += line.len;
+            return;
         }
-        j.size += line.len;
+        // not whole: cut back to the last record and sync; failing that the file may hold part of it (startup cuts it)
+        if (!j.cut(j.size) or !j.sync()) {
+            j.poisoned = true;
+            return error.JournalPoisoned;
+        }
+        return error.JournalIo;
+    }
+
+    fn put(j: *Journal, data: []const u8, at: u64) bool {
+        if (j.faults) |f| if (Faults.hit(f.write, &f.writes)) {
+            _ = writeAll(j.fd, data[0 .. data.len / 2], at);
+            return false;
+        };
+        return writeAll(j.fd, data, at);
+    }
+
+    fn cut(j: *Journal, len: u64) bool {
+        if (j.faults) |f| if (Faults.hit(f.truncate, &f.truncates)) return false;
+        return std.c.ftruncate(j.fd, @intCast(len)) == 0;
+    }
+
+    fn sync(j: *Journal) bool {
+        if (j.faults) |f| if (Faults.hit(f.sync, &f.syncs)) return false;
+        return fullSync(j.fd);
     }
 
     /// The journal as `records` alone (an erase): written whole to a new file of our own, synced, renamed over it.
