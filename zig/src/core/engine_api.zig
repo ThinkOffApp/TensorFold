@@ -2,10 +2,9 @@
 const std = @import("std");
 const lanes = @import("lanes");
 const Allocator = std.mem.Allocator;
-
-/// The server's name for one request, unique while the process lives.
 pub const tfvideo = @import("tfvideo.zig");
 
+/// The server's name for one request, unique while the process lives.
 pub const Id = u64;
 
 /// One request's sampling (Python's exact_sampling.Sampling); a request without one decodes greedily.
@@ -590,11 +589,5 @@ pub const keepalive = @import("keepalive.zig");
 pub const originals = @import("originals.zig");
 
 test {
-    _ = @import("lane_host.zig");
-    _ = @import("lane_host_test.zig");
-    _ = @import("prompt_cache.zig");
-    _ = @import("prompt_radix.zig");
-    _ = @import("prompt_imprint.zig");
-    _ = @import("keepalive.zig");
-    _ = @import("originals_test.zig");
+    _ = @import("engine_api_test.zig");
 }
