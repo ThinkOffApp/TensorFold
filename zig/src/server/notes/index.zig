@@ -2,6 +2,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const model_mod = @import("model.zig");
+const exact = @import("exact_alloc.zig");
 const Model = model_mod.Model;
 const Allocator = std.mem.Allocator;
 
@@ -117,7 +118,7 @@ pub const Groups = struct {
 const Raw = struct { id: u32, state: State, entity: u32, pair: u32, value_ent: i32, told: i64, line: []const u8, cost: u32, tokens: []const u32 };
 
 pub const Index = struct {
-    arena: std.heap.ArenaAllocator,
+    arena: exact.Exact, // every array at its exact size: no arena node grown 1.5 times past the postings
     log: LogFn,
     settings: Settings,
     head: []const u8,
@@ -166,7 +167,7 @@ pub const Index = struct {
     }
 
     pub fn deinit(self: *Index) void {
-        const gpa = self.arena.child_allocator;
+        const gpa = self.arena.child;
         self.arena.deinit();
         if (self.owned) |m| m.deinit();
         gpa.destroy(self);
@@ -206,7 +207,7 @@ pub const Index = struct {
         const self = try gpa.create(Index);
         errdefer gpa.destroy(self);
         self.* = undefined;
-        self.arena = std.heap.ArenaAllocator.init(gpa);
+        self.arena = exact.Exact.init(gpa);
         errdefer self.arena.deinit();
         self.owned = null;
         self.ver = 0;
@@ -419,7 +420,7 @@ pub const Index = struct {
         }
         self.post = post;
         self.grams = .empty;
-        try self.grams.ensureTotalCapacity(a, @intCast(entries.items.len));
+        try self.grams.ensureTotalCapacity(a, @intCast(entries.items.len)); // counted first: one table, no regrowth
         var it = map.iterator();
         while (it.next()) |kv| self.grams.putAssumeCapacity(kv.key_ptr.*, entries.items[kv.value_ptr.*]);
     }

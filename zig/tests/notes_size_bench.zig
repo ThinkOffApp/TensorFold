@@ -101,6 +101,12 @@ fn resident(start: usize, end: usize) !usize {
     return n * page;
 }
 
+/// The index's exact arena: what it asked its child for (each allocation's own size), its record list the overhead.
+fn exactUse(e: anytype) ArenaUse {
+    const header = e.held.capacity * @sizeOf(@TypeOf(e.held.items[0]));
+    return .{ .nodes = e.held.items.len, .held = e.bytes(), .header = header, .cap = e.bytes() - header, .newest_tail = 0 };
+}
+
 /// The newest node's unused tail as an address range.
 fn newestTail(ar: std.heap.ArenaAllocator) [2]usize {
     const node = ar.state.used_list orelse return .{ 0, 0 };
@@ -203,7 +209,7 @@ fn walkModelArena(r: *Report, m: *const model_mod.Model) !void {
 fn walkIndex(r: *Report, idx: *const index.Index, m: *const model_mod.Model) !void {
     const n = idx.notes();
     const ne = m.entities.items.len;
-    const u = arenaUse(idx.arena);
+    const u = exactUse(idx.arena);
     const cols = n * (@sizeOf(u32) * 5 + @sizeOf(index.State) + @sizeOf(i64) + @sizeOf(i32));
     const lines: usize = n * @sizeOf([]const u8); // slices of the model's lines: the bytes are counted there
     const id_place = idx.id_place.len * 4;
@@ -229,7 +235,7 @@ fn walkIndex(r: *Report, idx: *const index.Index, m: *const model_mod.Model) !vo
     const grown: usize = 0;
     _ = ne;
     try r.add("other", "index: Index struct", @sizeOf(index.Index), "measured");
-    try r.add("other", "index arena: node headers", u.header, "measured");
+    try r.add("other", "index arena: its record of each allocation (exact sizes, no nodes)", u.header, "measured");
     const rest = @as(i64, @intCast(u.cap)) - @as(i64, @intCast(reach + raw + groups + grown));
     if (rest < 0) return error.ArenaWalkOver; // a derived piece is wrong: the walk claims more than the arena holds
     if (@as(usize, @intCast(rest)) < u.newest_tail) return error.ArenaTailOver;
@@ -297,7 +303,7 @@ pub fn main(init: std.process.Init) !u8 {
             if (eq) same += 1;
         }
         // the server's own copy: are the arena tail and the note list's spare capacity in memory, or only reserved?
-        const tail = newestTail(store.current.idx.arena);
+        const tail: [2]usize = .{ 0, 0 }; // the index arena has no tail now: each allocation is its own size
         const tail_resident = try resident(tail[0], tail[1]);
         const nl = store.model.notes;
         const spare_lo = @intFromPtr(nl.items.ptr) + nl.items.len * @sizeOf(model_mod.Note);
@@ -325,7 +331,7 @@ pub fn main(init: std.process.Init) !u8 {
         try walkModelArena(&rep, m);
         try walkIndex(&rep, idx, m);
         const model_arena = arenaUse(m.arena).held;
-        const index_arena = arenaUse(idx.arena).held;
+        const index_arena = exactUse(idx.arena).held;
         // the walk must come to what the counters saw, to the byte
         const model_gap = @as(i64, @intCast(cm.live)) - @as(i64, @intCast(direct + model_arena));
         const index_gap = @as(i64, @intCast(ci.live)) - @as(i64, @intCast(@sizeOf(index.Index) + index_arena));
