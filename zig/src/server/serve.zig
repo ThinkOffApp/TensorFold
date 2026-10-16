@@ -138,6 +138,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
             std.debug.print("tensorfold: --notes {s}: {s} ({s})\n", .{ path, why, @errorName(e) });
             return 2;
         };
+        srv.notes.?.auto_write = args.notes_write;
         var line_buf: [1024]u8 = undefined;
         log.line("{s}", .{srv.notes.?.startupLine(&line_buf, path)});
     }

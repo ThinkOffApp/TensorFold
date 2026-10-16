@@ -50,6 +50,7 @@ pub const Store = struct {
     today: ?i64 = null, // the day writes are told on, as an ordinal (tests); null: the local date
     replayed: usize = 0,
     truncated: u64 = 0,
+    auto_write: bool = true, // a "notes": true chat request's last user message is written (--no-notes-write: not)
 
     /// Loads the snapshot at `path` for a model whose tokenizer is `text` (its tokenizer.json lies in `model_dir`).
     pub fn open(gpa: Allocator, io: std.Io, path: []const u8, text: model_text.Text, model_dir: []const u8, problem: *[]const u8) !*Store {
@@ -90,8 +91,8 @@ pub const Store = struct {
             .sha256 => "tokenizer checked: the model's tokenizer.json SHA-256 equals the snapshot's",
             .vocabulary_only => "tokenizer checked by vocabulary size only (vocabulary-only compatibility): the snapshot names no tokenizer.json SHA-256",
         };
-        var w: [200]u8 = undefined;
-        const writes = if (s.read_only.len > 0) std.fmt.bufPrint(&w, "writes off ({s})", .{s.read_only}) catch "writes off" else std.fmt.bufPrint(&w, "{d} writes replayed from the journal", .{s.replayed}) catch "";
+        var w: [240]u8 = undefined;
+        const writes = if (s.read_only.len > 0) std.fmt.bufPrint(&w, "writes off ({s})", .{s.read_only}) catch "writes off" else std.fmt.bufPrint(&w, "{d} writes replayed from the journal; a chat request's user statements {s}", .{ s.replayed, if (s.auto_write) "are written through the intake (--no-notes-write: not)" else "are not written (--no-notes-write)" }) catch "";
         return std.fmt.bufPrint(buf, "notes: {d} notes ({d} current) from {s}, cap {d}, loaded in {d:.1} ms; {s}; {s}; a chat request sends \"notes\": true to have them looked up", .{ ix.notes(), ix.n_cur, path, ix.settings.cap, s.load_ms, checked, writes }) catch buf;
     }
 

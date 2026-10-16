@@ -13,6 +13,8 @@ const Allocator = std.mem.Allocator;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
 const store_mod = @import("notes_store.zig");
+const ops = @import("notes_ops.zig");
+const intake = @import("notes/intake.zig");
 pub const Store = store_mod.Store;
 pub const Check = store_mod.Check;
 pub const tokenizer_limit = store_mod.tokenizer_limit;
@@ -25,6 +27,7 @@ pub const Ask = struct {
     past: ?bool = null, // null: notes.is_past(question), as retrieve() decides
     cap: ?u32 = null, // null: the snapshot's cap
     echo: bool = false, // the block itself in the reply's "notes" field
+    write: ?bool = null, // "notes_write": false keeps the user's message out of the notes (null: the server's switch)
 };
 
 fn optBool(cx: *Cx, body: Value, key: []const u8) errors.Refused!?bool {
@@ -49,6 +52,7 @@ pub fn asked(cx: *Cx, body: Value) errors.Refused!?Ask {
         listed = true;
     }
     ask.past = try optBool(cx, body, "notes_past");
+    ask.write = try optBool(cx, body, "notes_write");
     ask.echo = (try optBool(cx, body, "notes_echo")) orelse false;
     if (body.field("notes_cap")) |c| {
         const n = if (c == .int) c.int64() else null;
@@ -58,12 +62,58 @@ pub fn asked(cx: *Cx, body: Value) errors.Refused!?Ask {
     if (on == false and listed) return cx.refuse("notes is false but notes_exclude names notes to leave out");
     if (on == true or listed) return ask;
     if (ask.past != null or ask.cap != null or ask.echo) return cx.refuse("notes_past, notes_cap and notes_echo need \"notes\": true");
+    if (ask.write != null) return cx.refuse("notes_write needs \"notes\": true");
     return null;
+}
+
+/// What a chat request's own last message did to the notes: written (a verdict), skipped and why, or refused.
+pub const Wrote = struct {
+    verdict: ?intake.Verdict = null,
+    id: u32 = 0,
+    source: []const u8 = "",
+    skipped: []const u8 = "",
+    failed: []const u8 = "", // the store refused the write (no journal, a disk error); the reply goes on
+
+    fn value(w: Wrote, a: Allocator) Allocator.Error!Value {
+        const o = try json.newObject(a);
+        if (w.verdict) |v| {
+            try o.put(a, "verdict", .{ .string = @tagName(v) });
+            try o.put(a, "id", if (w.id > 0) try json.intValue(a, w.id) else .null);
+            try o.put(a, "source", .{ .string = w.source });
+        } else if (w.failed.len > 0) {
+            try o.put(a, "failed", .{ .string = w.failed });
+        } else try o.put(a, "skipped", .{ .string = w.skipped });
+        return .{ .object = o };
+    }
+};
+
+/// The intake on a chat request's last message when it is the user's (never the model's or a tool's) and a statement.
+fn autoWrite(store: *Store, a: Allocator, ask: Ask, body: Value, normalized: Value) Allocator.Error!Wrote {
+    if (!store.auto_write) return .{ .skipped = "off: the server runs with --no-notes-write" };
+    if (ask.write == false) return .{ .skipped = "off: the request sends \"notes_write\": false" };
+    const msgs: Value = body.get("messages") orelse .null;
+    const raw: []const Value = msgs.items() orelse &.{};
+    if (raw.len == 0 or !std.mem.eql(u8, json.strOr(raw[raw.len - 1].get("role")), "user"))
+        return .{ .skipped = "the last message is not the user's: only the user's own words are written" };
+    const said = lastUser(normalized);
+    if (!std.unicode.utf8ValidateSlice(said)) return .{ .skipped = "not valid Unicode" };
+    const t = switch (intake.statement(said)) {
+        .skip => |why| return .{ .skipped = why },
+        .text => |x| x,
+    };
+    var why: ops.Refusal = .{};
+    const done = ops.perform(store, a, .{ .op = .add, .text = t }, &why) catch |e| return switch (e) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.Refused => .{ .failed = why.message },
+    };
+    return .{ .verdict = done.verdict, .id = if (done.note) |n| n.id else 0, .source = done.source };
 }
 
 /// One request's lookup, as its reply and the server's log report it.
 pub const Used = struct {
     found: Found,
+    wrote: Wrote = .{},
+    write_ns: i96 = 0, // the intake and the write, journal sync included (not in total_ns)
     past: bool,
     past_given: bool,
     cap: u32,
@@ -94,6 +144,8 @@ pub const Used = struct {
         try o.put(a, "total_us", .{ .float = micro(u.total_ns) });
         try o.put(a, "block_sha256", if (u.found.block.len > 0) .{ .string = try hexSha(a, u.found.block) } else .null);
         if (u.echo) try o.put(a, "block", .{ .string = u.found.block });
+        try o.put(a, "write", try u.wrote.value(a));
+        try o.put(a, "write_us", .{ .float = micro(u.write_ns) });
         return .{ .object = o };
     }
 
@@ -102,9 +154,12 @@ pub const Used = struct {
         var buf: [600]u8 = undefined;
         var w: std.Io.Writer = .fixed(&buf);
         for (u.found.ids, 0..) |n, k| w.print("{s}{d}", .{ if (k > 0) "," else "", n }) catch break;
-        log.line("notes {s}: [{s}] {d} tokens of {d}, past {s}, {d} candidates; tokenize {d:.1} us, lookup {d:.1} us, fit {d:.1} us, total {d:.1} us", .{
-            id,                     w.buffered(),                 u.found.tokens,            u.cap, if (u.past) "yes" else "no", u.found.candidates,
-            micro(u.tokenize_ns), micro(u.found.lookup_ns), micro(u.found.fit_ns), micro(u.total_ns),
+        const ids = w.buffered();
+        var wb: [200]u8 = undefined;
+        const wrote = if (u.wrote.verdict) |v| std.fmt.bufPrint(&wb, "{s} [{d}] in {d:.1} us", .{ @tagName(v), u.wrote.id, micro(u.write_ns) }) catch "" else if (u.wrote.failed.len > 0) std.fmt.bufPrint(&wb, "refused ({s})", .{u.wrote.failed}) catch "" else std.fmt.bufPrint(&wb, "skipped ({s})", .{u.wrote.skipped}) catch "";
+        log.line("notes {s}: [{s}] {d} tokens of {d}, past {s}, {d} candidates; tokenize {d:.1} us, lookup {d:.1} us, fit {d:.1} us, total {d:.1} us; write {s}", .{
+            id,                     ids,                          u.found.tokens,            u.cap,            if (u.past) "yes" else "no", u.found.candidates,
+            micro(u.tokenize_ns), micro(u.found.lookup_ns), micro(u.found.fit_ns), micro(u.total_ns), wrote,
         });
     }
 };
@@ -162,14 +217,19 @@ pub fn apply(store: *Store, text: model_text.Text, needs_user_after_tool: bool, 
         error.Tokenizer => cx.other("the tokenizer cannot count the notes block"),
     };
     if (found.block.len > 0) normalized.* = try withBlock(cx, body.get("messages").?, found.block, needs_user_after_tool);
+    const t_done = clock.nowNs(io);
+    // after the lookup, before the reply: the next request's lookup reads it
+    const wrote = try autoWrite(store, cx.a, ask, body, normalized.*);
     return .{
+        .wrote = wrote,
+        .write_ns = clock.nowNs(io) - t_done,
         .found = found,
         .past = past,
         .past_given = ask.past != null,
         .cap = cap,
         .question_tokens = qids.len,
         .tokenize_ns = t1 - t0,
-        .total_ns = clock.nowNs(io) - t0,
+        .total_ns = t_done - t0,
         .in_store = found.in_store,
         .echo = ask.echo,
     };

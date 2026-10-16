@@ -114,6 +114,7 @@ pub const flags = [_]Flag{
     // the native server's own: Cortheon's reasoning program and server-run web research for every chat request
     .{ .name = "--cortheon", .kind = .store_true, .native = true },
     .{ .name = "--notes", .native = true },
+    .{ .name = "--no-notes-write", .kind = .store_true, .native = true },
 };
 
 /// The variables this binary honours as the Python engine does, then the CUDA build's.
@@ -171,6 +172,7 @@ pub const Args = struct {
     master_port: u16 = 29551,
     policy: []const u8 = "", // every --policy joined by commas
     notes: ?[]const u8 = null, // an LLWZ note snapshot for "notes": true requests; no named tokenizer hash: vocabulary-only check
+    notes_write: bool = true, // a "notes": true request's last user message goes through the intake into the notes
     cortheon: bool = false, // Cortheon's program, research before building, and cortheon_search/cortheon_fetch run by the server
 };
 
@@ -277,7 +279,7 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         const n = try int(u, a, name, v);
         if (n < 0) return fail(u, a, "argument --compact-keep: expected a token count from 0: '{s}'", .{v});
         out.compact_keep = @intCast(n);
-    } else if (is(name, "--compact-memory")) out.compact_memory = v else if (is(name, "--slide")) out.slide = true else if (is(name, "--slide-graph")) out.slide_graph = v else if (is(name, "--parallel")) out.parallel = v else if (is(name, "--backend")) out.backend = v else if (is(name, "--cortheon")) out.cortheon = true else if (is(name, "--notes")) out.notes = v;
+    } else if (is(name, "--compact-memory")) out.compact_memory = v else if (is(name, "--slide")) out.slide = true else if (is(name, "--slide-graph")) out.slide_graph = v else if (is(name, "--parallel")) out.parallel = v else if (is(name, "--backend")) out.backend = v else if (is(name, "--cortheon")) out.cortheon = true else if (is(name, "--notes")) out.notes = v else if (is(name, "--no-notes-write")) out.notes_write = false;
 }
 
 /// The CUDA build's --device and --segments; false for any other flag.
