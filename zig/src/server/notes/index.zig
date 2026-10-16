@@ -39,6 +39,11 @@ pub const no_note: u32 = 0xFFFF_FFFF;
 pub const State = enum(u8) { current = 0, superseded = 1, tombstoned = 2 };
 /// The n-gram index: LLWZ's posting lists, or a suffix array over the notes' folded keys.
 pub const Kind = enum { postings, sa };
+
+/// Longer matches than n_max (suffix array only; off by default, and off is the lookup LLWZ's tests check): `all`
+/// adds every n-gram of n_max+1 to `max` keys that a note in the views searched holds; `longest` adds, per question
+/// position, the longest n-gram such a note holds when it is longer than n_max (Infini-gram's longest match).
+pub const Long = struct { mode: enum { off, all, longest } = .off, max: u8 = 8 };
 pub const Hop = enum { subject, subject_value, none };
 
 pub const Settings = struct {
@@ -151,6 +156,8 @@ pub const Index = struct {
     kind: Kind = .postings,
     /// sa: the suffix arrays of places 0..base.notes-1, shared by the versions built on it (null: postings only)
     base: ?*sa.Base = null,
+    /// sa: the side buffer's notes' keys (place base.notes + k is group k), for matches longer than n_max
+    side_keys: Groups = .{},
     /// postings: every note's; sa: the side buffer's, the notes written since the base (places base.notes..)
     grams: std.HashMapUnmanaged(Gram, Post, GramCtx, 80),
     post: []const u32,
@@ -244,12 +251,33 @@ pub const Index = struct {
         self.phrase_max = 0;
         try self.phrasesOf(m);
         var first: usize = 0;
+        self.side_keys = .{};
         if (kind == .sa) {
             self.base = if (reuse) |b| b.retain() else try baseOf(gpa, m, raw);
             first = self.base.?.notes;
+            try self.sideKeys(m, raw[first..]);
         }
         try self.buildPostings(gpa, raw, first);
         return self;
+    }
+
+    /// The side buffer's notes' keys, flat.
+    fn sideKeys(self: *Index, m: *const Model, side: []const Raw) LoadError!void {
+        const a = self.arena.allocator();
+        const off = try a.alloc(u32, side.len + 1);
+        var total: u32 = 0;
+        for (side, 0..) |x, k| {
+            off[k] = total;
+            total += @intCast(x.tokens.len);
+        }
+        off[side.len] = total;
+        const items = try a.alloc(u32, total);
+        var at: usize = 0;
+        for (side) |x| for (x.tokens) |t| {
+            items[at] = m.keyOf(t);
+            at += 1;
+        };
+        self.side_keys = .{ .off = off, .items = items };
     }
 
     /// A suffix-array base over every note: their folded keys, each view's suffixes sorted (the build's memory freed).

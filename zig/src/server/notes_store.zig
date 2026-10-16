@@ -58,6 +58,7 @@ pub const Store = struct {
     truncated: u64 = 0,
     auto_write: bool = true, // a "notes": true chat request's last user message is written (--no-notes-write: not)
     kind: IndexKind = .postings, // the n-gram index each version builds
+    long: index.Long = .{}, // sa: matches longer than n_max (off: the lookup LLWZ's tests check)
     side_max: u32 = 1024, // sa: a write's version keeps its base while at most this many notes are past it
     merges: u64 = 0, // sa: bases built by writes and merges since startup (the load's not counted)
     defer_erase_merge: bool = false, // tests only: an erase that leaves the old base and model to a later merge
@@ -276,7 +277,7 @@ pub const Store = struct {
         const sc = &k.sc;
         const io = s.io;
         const t0 = clock.nowNs(io);
-        const packed_notes = try lookup.lookup(idx, sc, qids, past, cap, exclude);
+        const packed_notes = try lookup.lookup(idx, sc, qids, past, cap, exclude, s.long);
         const chosen = try a.dupe(u32, packed_notes.chosen);
         var shown = try lookup.render(idx, sc, chosen);
         const t1 = clock.nowNs(io);
@@ -298,6 +299,7 @@ pub const Store = struct {
             .pack_tokens = packed_notes.tokens,
             .dropped = chosen.len - n,
             .candidates = packed_notes.candidates,
+            .long = packed_notes.long,
             .lookup_ns = t1 - t0,
             .fit_ns = t2 - t1,
             .in_store = idx.notes(),
@@ -416,6 +418,7 @@ pub const Found = struct {
     pack_tokens: u32, // pack()'s sum of the parts
     dropped: usize, // notes fit() took out
     candidates: u32,
+    long: u32 = 0, // sa with longer matches on: the n-grams over n_max weighted
     lookup_ns: i96,
     fit_ns: i96,
     in_store: usize = 0, // notes in the version it read

@@ -250,6 +250,9 @@ fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     // the postings and the suffix-array index side by side: build, lookups, writes with the side buffer, merges, erases
     const notes_sa_bench = b.addExecutable(.{ .name = "notes-sa-bench", .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/notes_sa_bench.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{.{ .name = "server", .module = server_safe }} }) });
     b.step("notes-sa-bench", "Postings against the suffix-array index: build, lookup, write, merge and erase times (MODEL_DIR SNAPSHOT REF.json OUT_DIR WRITES [SIDE_MAX])").dependOn(&b.addInstallArtifact(notes_sa_bench, .{}).step);
+    // recall at the cap on the paper's sets, the suffix array's longer matches off or on
+    const notes_recall = b.addExecutable(.{ .name = "notes-recall", .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/notes_recall_bench.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{.{ .name = "server", .module = server_safe }} }) });
+    b.step("notes-recall", "Recall at the cap on tools/notes/recall_export.py's sets (MODEL_DIR DIR off|all:MAX|longest)").dependOn(&b.addInstallArtifact(notes_recall, .{}).step);
     b.step("test-native", "The Metal engines module's host-side tests").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = engines })).step);
     const reuse = b.addExecutable(.{ .name = "tf-flashnext-reuse", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/flashnext_reuse.zig"),

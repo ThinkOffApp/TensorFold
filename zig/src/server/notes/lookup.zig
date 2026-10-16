@@ -35,8 +35,10 @@ pub const Scratch = struct {
     scores: std.ArrayList(f64) = .empty,
     block: std.ArrayList(u8) = .empty,
     hits: std.ArrayList(u32) = .empty, // sa: one n-gram's notes in the views searched
+    codes: std.ArrayList(u32) = .empty, // sa: a pattern's codes
+    long: std.ArrayList([2]usize) = .empty, // sa, longer matches: the n-grams added (start and length in qkeys)
 
-    const lists = .{ "touched", "pool", "keys", "qkeys", "qgrams", "found", "spans", "chosen", "order", "ids", "scores", "block", "hits" };
+    const lists = .{ "touched", "pool", "keys", "qkeys", "qgrams", "found", "spans", "chosen", "order", "ids", "scores", "block", "hits", "codes", "long" };
 
     pub fn init(gpa: Allocator, idx: *const Index) Allocator.Error!Scratch {
         const n = idx.notes();
@@ -102,6 +104,7 @@ pub const Packed = struct {
     chosen: []const u32,
     tokens: u32, // pack()'s sum: the head, the titles, the lines and the line breaks
     candidates: u32,
+    long: u32 = 0, // index.Long: the n-grams longer than n_max that were weighted
 };
 
 /// render() of some packed notes.
@@ -179,10 +182,16 @@ fn baseHits(idx: *const Index, b: *const sa.Base, sc: *Scratch, g: Gram, past: b
     var len: usize = index.max_n; // a packed n-gram's unused places hold none_key
     while (len > 0 and keys[len - 1] == index.none_key) len -= 1;
     if (len == 0) return;
-    for (keys[0..len]) |k| if (k == index.none_key) return; // no note holds none_key (the build checks the vocabulary)
-    var buf: [index.max_n]u32 = undefined;
-    const pat = b.codes(keys[0..len], &buf) orelse return;
-    if (len == 1 and !idx.settings.punct and !b.wordyCode(pat[0])) return; // punctuation alone is no note's key
+    try keyHits(idx, b, sc, keys[0..len], past);
+}
+
+/// The base's notes that hold the key sequence `keys`, each once, in the views searched, into sc.hits.
+fn keyHits(idx: *const Index, b: *const sa.Base, sc: *Scratch, keys: []const u32, past: bool) Allocator.Error!void {
+    sc.hits.clearRetainingCapacity();
+    for (keys) |k| if (k == index.none_key) return; // no note holds none_key (the build checks the vocabulary)
+    try sc.codes.resize(sc.gpa, keys.len);
+    const pat = b.codes(keys, sc.codes.items) orelse return;
+    if (keys.len == 1 and !idx.settings.punct and !b.wordyCode(pat[0])) return; // punctuation alone is no note's key
     sc.sgen +%= 1;
     if (sc.sgen == 0) {
         @memset(sc.seen, 0);
@@ -217,8 +226,53 @@ fn scoreSa(idx: *const Index, b: *const sa.Base, sc: *Scratch, g: Gram, past: bo
     }
 }
 
+/// Matches longer than n_max (index.Long): each n-gram found is weighted by its notes in the views searched, base and
+/// side buffer, as the n-grams up to n_max are; an n-gram met again at another place is not counted again.
+fn scoreLong(idx: *const Index, b: *const sa.Base, sc: *Scratch, past: bool, N: u32, long: index.Long) Allocator.Error!void {
+    const q = sc.qkeys.items;
+    const n_max = idx.settings.n_max;
+    var reach: usize = 0; // where the longest match so far ends: a match inside it is a part of it
+    for (0..q.len) |j| {
+        var best: usize = 0;
+        var m: usize = n_max + 1;
+        const limit = if (long.mode == .all) @min(q.len - j, long.max) else q.len - j;
+        while (m <= limit) : (m += 1) {
+            if (!try longHits(idx, b, sc, q[j..][0..m], past)) break;
+            best = m;
+            if (long.mode == .all) try addLong(idx, sc, j, m, N);
+        }
+        if (long.mode == .longest and best > 0 and j + best > reach) {
+            _ = try longHits(idx, b, sc, q[j..][0..best], past);
+            try addLong(idx, sc, j, best, N);
+            reach = j + best;
+        }
+    }
+}
+
+/// sc.hits: the notes holding `keys` in the views searched (the base's ranges, then the side buffer's notes read
+/// through); whether there are any.
+fn longHits(idx: *const Index, b: *const sa.Base, sc: *Scratch, keys: []const u32, past: bool) Allocator.Error!bool {
+    try keyHits(idx, b, sc, keys, past);
+    for (0..idx.side_keys.len()) |k| {
+        const place: u32 = @intCast(b.notes + k);
+        if (!past and idx.state[place] != .current) continue;
+        if (std.mem.indexOf(u32, idx.side_keys.of(k), keys) != null) try sc.hits.append(sc.gpa, place);
+    }
+    return sc.hits.items.len > 0;
+}
+
+/// The weight of the n-gram at q[j..j+m] (its notes in sc.hits) added, once per distinct n-gram.
+fn addLong(idx: *const Index, sc: *Scratch, j: usize, m: usize, N: u32) Allocator.Error!void {
+    const q = sc.qkeys.items;
+    for (sc.long.items) |x| if (x[1] == m and std.mem.eql(u32, q[x[0]..][0..m], q[j..][0..m])) return;
+    try sc.long.append(sc.gpa, .{ j, m });
+    const df: u32 = @intCast(sc.hits.items.len);
+    const w = idx.log(1.0 + (@as(f64, @floatFromInt(N - df)) + 0.5) / (@as(f64, @floatFromInt(df)) + 0.5));
+    for (sc.hits.items) |i| sc.add(i, w);
+}
+
 /// NoteStore._lookup up to pack() from a question's ids; `exclude` ids are never given; sums run in first-met order.
-pub fn lookup(idx: *const Index, sc: *Scratch, qids: []const u32, past: bool, cap: u32, exclude: []const u32) Allocator.Error!Packed {
+pub fn lookup(idx: *const Index, sc: *Scratch, qids: []const u32, past: bool, cap: u32, exclude: []const u32, long: index.Long) Allocator.Error!Packed {
     const st = idx.settings;
     const gpa = sc.gpa;
     sc.next();
@@ -236,6 +290,7 @@ pub fn lookup(idx: *const Index, sc: *Scratch, qids: []const u32, past: bool, ca
     const N: u32 = idx.n_cur + (if (past) idx.n_hist else 0);
     if (idx.base) |b| {
         for (sc.qgrams.items) |g| try scoreSa(idx, b, sc, g, past, N);
+        if (long.mode != .off) try scoreLong(idx, b, sc, past, N, long);
     } else for (sc.qgrams.items) |g| {
         const p = idx.grams.get(g) orelse continue;
         const df: u32 = p.cur_len + (if (past) p.hist_len else 0);
@@ -266,7 +321,7 @@ pub fn lookup(idx: *const Index, sc: *Scratch, qids: []const u32, past: bool, ca
         sc.touched.shrinkRetainingCapacity(w);
     }
     const cands: u32 = @intCast(sc.touched.items.len);
-    if (cands == 0) return .{ .chosen = &.{}, .tokens = 0, .candidates = 0 };
+    if (cands == 0) return .{ .chosen = &.{}, .tokens = 0, .candidates = 0, .long = @intCast(sc.long.items.len) };
 
     // the candidate cut: the 4*room best when there are more than 8*room candidates (4 tokens a line or more)
     const room: usize = @intCast(@max(1, @divFloor(@as(i64, cap) - @as(i64, idx.fx_head), 4)));
@@ -349,8 +404,8 @@ pub fn lookup(idx: *const Index, sc: *Scratch, qids: []const u32, past: bool, ca
         }
         rest = rest[m..];
     }
-    if (sc.chosen.items.len == 0) return .{ .chosen = &.{}, .tokens = 0, .candidates = cands };
-    return .{ .chosen = sc.chosen.items, .tokens = used, .candidates = cands };
+    if (sc.chosen.items.len == 0) return .{ .chosen = &.{}, .tokens = 0, .candidates = cands, .long = @intCast(sc.long.items.len) };
+    return .{ .chosen = sc.chosen.items, .tokens = used, .candidates = cands, .long = @intCast(sc.long.items.len) };
 }
 
 /// render(): the head, then the current notes and the earlier ones, each by told (ties keep pack order).

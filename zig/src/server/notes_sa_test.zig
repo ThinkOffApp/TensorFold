@@ -164,3 +164,37 @@ test "a vocabulary the suffix array cannot match as the postings do is refused" 
     const ok = try notes_route.Store.load(testing.allocator, testing.io, bad, text.text(), &why);
     ok.deinit();
 }
+
+test "longer matches (off by default) weigh n-grams over n_max, from the base and from the side buffer" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const rig = @import("notes_rig_test.zig");
+    const ops = @import("notes_ops.zig");
+    const r = try rig.Rig.initKind(testing.allocator, .sa, 1024);
+    defer r.deinit();
+    const s = r.store();
+    const text = r.text.text();
+    var why: ops.Refusal = .{};
+    _ = try ops.perform(s, a, .{ .op = .add, .text = "Quentin keeps a xylophone in the attic." }, &why);
+    const ix = s.current.idx;
+    try testing.expect(ix.notes() > ix.base.?.notes); // the new note is in the side buffer
+    const q = try text.encode(a, "Does Quentin keep a xylophone in the attic?", false);
+    const off = try s.retrieve(a, text, q, false, 512, &.{});
+    try testing.expectEqual(@as(u32, 0), off.long);
+    for ([_]index.Long{ .{ .mode = .longest }, .{ .mode = .all, .max = 6 } }) |long| {
+        s.long = long;
+        const on = try s.retrieve(a, text, q, false, 512, &.{});
+        try testing.expect(on.long > 0); // the byte tokenizer's n-grams: " xylophone in the attic" holds many over 3
+        try testing.expectEqual(on.ids[on.ids.len - 1], off.ids[off.ids.len - 1]); // the written note is in both
+        // the same after a merge, the note now in the base
+        try s.merge();
+        const merged = try s.retrieve(a, text, q, false, 512, &.{});
+        try testing.expectEqual(on.long, merged.long);
+        try testing.expectEqualStrings(on.block, merged.block);
+    }
+    s.long = .{}; // off again: the block it gave before (the merges changed no answer)
+    const again = try s.retrieve(a, text, q, false, 512, &.{});
+    try testing.expectEqual(@as(u32, 0), again.long);
+    try testing.expectEqualStrings(off.block, again.block);
+}
