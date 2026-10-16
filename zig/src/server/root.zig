@@ -76,6 +76,7 @@ test {
     _ = @import("notes_startup_test.zig");
     _ = @import("notes/line.zig");
     _ = @import("notes/intake.zig");
+    _ = @import("notes/question.zig");
     _ = @import("notes/model.zig");
     _ = @import("notes/write.zig");
     _ = @import("notes/journal.zig");

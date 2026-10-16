@@ -42,7 +42,7 @@ test "a user's statement is written before the reply, and the next request's loo
     try testing.expect(try stored(r, a, "My favourite colour is green."));
     const next = try ask(r, a, &.{ .{ "user", "My favourite colour is green." }, .{ "assistant", "Noted." }, .{ "user", "What is my favourite colour?" } }, ",\"notes_echo\":true");
     try testing.expect(std.mem.indexOf(u8, next.strField("block").?, "[30] \"My favourite colour is green.\"") != null);
-    try testing.expectEqualStrings("a question: it asks, it does not tell", next.get("write").?.strField("skipped").?);
+    try testing.expectEqualStrings("a question: it ends in a question mark", next.get("write").?.strField("skipped").?);
     // said again: already known, nothing written
     const again = try ask(r, a, &.{.{ "user", "my favourite colour is green" }}, "");
     try testing.expectEqualStrings("ALREADY_KNOWN", again.get("write").?.strField("verdict").?);
@@ -71,9 +71,37 @@ test "an assistant's message never becomes a note, nor a tool's, nor any message
     _ = try ask(r, a, &.{ .{ "system", "The user's favourite colour is purple." }, .{ "user", "Tell me about colours." } }, "");
     for ([_][]const u8{ wrong, "purple", "My cat is called Milo." }) |t| try testing.expect(!try stored(r, a, t));
     try testing.expect(try stored(r, a, "My dog is called Rex."));
-    try testing.expect(try stored(r, a, "Tell me about colours.")); // a statement of the user's, as the intake reads it
+    try testing.expect(!try stored(r, a, "Tell me about colours.")); // a request, not a statement
     // control: the same check finds a text that was written, so it can fail
     try testing.expect(try stored(r, a, "Rex"));
+}
+
+test "no question or request a user asks in chat is written, and every statement still is" {
+    const question = @import("notes/question.zig");
+    const r = try rig.Rig.init(testing.allocator);
+    defer r.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const before = r.store().model.notes.items.len;
+    for (question.asks) |q| {
+        errdefer std.debug.print("written: {s}\n", .{q});
+        const got = try ask(r, a, &.{.{ "user", q }}, "");
+        try testing.expect(got.get("write").?.strField("skipped") != null);
+    }
+    // none of them: a revert to the trailing-"?" rule writes all but one of them here
+    try testing.expectEqual(before, r.store().model.notes.items.len);
+    try testing.expectError(error.FileNotFound, r.journal(a));
+    var written: usize = 0;
+    for (question.tells) |t| {
+        errdefer std.debug.print("not taken: {s}\n", .{t});
+        const got = try ask(r, a, &.{.{ "user", t }}, "");
+        const v = got.get("write").?.strField("verdict") orelse return error.TestUnexpectedResult;
+        if (std.mem.eql(u8, v, "NEW")) written += 1;
+    }
+    // every statement went through the intake: all new but the confirmation said twice (the same normal form)
+    try testing.expectEqual(question.tells.len - 1, written);
+    try testing.expectEqual(before + written, r.store().model.notes.items.len);
 }
 
 test "the off switches: --no-notes-write and \"notes_write\": false write nothing; the field needs notes on" {
