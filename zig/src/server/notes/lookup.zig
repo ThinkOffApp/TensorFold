@@ -192,8 +192,8 @@ pub fn lookup(idx: *const Index, sc: *Scratch, qids: []const u32, past: bool, ca
         const top = idx.log(1.0 + (@as(f64, @floatFromInt(N)) - 0.5) / 1.5) * st.subject;
         try subjects(idx, sc);
         for (sc.found.items) |e| {
-            for (idx.ent_cur[e]) |i| sc.add(i, top);
-            if (past) for (idx.ent_keys[e]) |k| for (idx.pair_notes[k]) |i| sc.add(i, top);
+            for (idx.ent_cur.of(e)) |i| sc.add(i, top);
+            if (past) for (idx.ent_keys.of(e)) |k| for (idx.pair_notes.of(k)) |i| sc.add(i, top);
         }
     }
     if (excluding) { // for i in exclude: score.pop(i, None)
@@ -243,15 +243,15 @@ pub fn lookup(idx: *const Index, sc: *Scratch, qids: []const u32, past: bool, ca
         var near: [3][]const u32 = undefined;
         var nn: usize = 0;
         if (st.hop != .none) {
-            near[nn] = idx.ent_cur[idx.entity[i]];
+            near[nn] = idx.ent_cur.of(idx.entity[i]);
             nn += 1;
             if (st.hop == .subject_value and idx.value_ent[i] >= 0) {
-                near[nn] = idx.ent_cur[@intCast(idx.value_ent[i])];
+                near[nn] = idx.ent_cur.of(@intCast(idx.value_ent[i]));
                 nn += 1;
             }
         }
         if (past and st.hop_history) {
-            near[nn] = idx.pair_notes[idx.pair[i]];
+            near[nn] = idx.pair_notes.of(idx.pair[i]);
             nn += 1;
         }
         for (near[0..nn]) |js| for (js) |j| {

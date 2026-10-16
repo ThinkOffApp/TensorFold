@@ -99,6 +99,20 @@ pub fn packPhrase(keys: []const u32) Phrase {
 /// Postings of one n-gram: note places in the current view, then in the history view.
 pub const Post = struct { cur_off: u32, cur_len: u32, hist_off: u32, hist_len: u32 };
 
+/// Groups of note places (or pairs) by a number, flat: group k is items[off[k]..off[k+1]].
+pub const Groups = struct {
+    off: []const u32 = &.{},
+    items: []const u32 = &.{},
+
+    pub inline fn of(g: Groups, k: usize) []const u32 {
+        return g.items[g.off[k]..g.off[k + 1]];
+    }
+
+    pub fn len(g: Groups) usize {
+        return g.off.len -| 1;
+    }
+};
+
 /// One note as the snapshot gives it.
 const Raw = struct { id: u32, state: State, entity: u32, pair: u32, value_ent: i32, told: i64, line: []const u8, cost: u32, tokens: []const u32 };
 
@@ -129,9 +143,9 @@ pub const Index = struct {
     cost: []const u32,
     min_line: i64, // the least any line can add in pack(): its cost and a line break
     id_place: []const u32, // a note id -> its place, or no_note
-    ent_cur: []const []const u32, // entity -> places of its current notes (O.ent_cur)
-    ent_keys: []const []const u32, // entity -> its pairs (O.ent_keys)
-    pair_notes: []const []const u32, // pair -> places of its notes, every state, oldest first (O.by_key)
+    ent_cur: Groups, // entity -> places of its current notes (O.ent_cur)
+    ent_keys: Groups, // entity -> its pairs (O.ent_keys)
+    pair_notes: Groups, // pair -> places of its notes, every state, oldest first (O.by_key)
     grams: std.HashMapUnmanaged(Gram, Post, GramCtx, 80),
     post: []const u32,
     phrases: std.HashMapUnmanaged(Phrase, u32, PhraseCtx, 80),
@@ -196,7 +210,6 @@ pub const Index = struct {
         errdefer self.arena.deinit();
         self.owned = null;
         self.ver = 0;
-        const a = self.arena.allocator();
         self.log = libmLog();
         self.settings = m.settings;
         self.head = m.head;
@@ -209,7 +222,8 @@ pub const Index = struct {
         self.tokenizer_sha256 = m.tokenizer_sha256;
         self.vkey = m.vkey;
         self.vwordy = m.vwordy;
-        const raw = try a.alloc(Raw, m.notes.items.len);
+        const raw = try gpa.alloc(Raw, m.notes.items.len); // the build's own: freed when it returns
+        defer gpa.free(raw);
         for (m.notes.items, raw) |n, *r| r.* = .{ .id = n.id, .state = n.state, .entity = n.entity, .pair = n.pair, .value_ent = n.value_ent, .told = n.told, .line = n.line, .cost = n.cost, .tokens = n.tokens };
         try self.placeNotes(gpa, raw);
         try self.groupsOf(m);
@@ -282,61 +296,72 @@ pub const Index = struct {
         self.n_hist = n_hist;
     }
 
-    /// O.ent_cur, O.ent_keys and O.by_key, as note places: one pass to count, one to fill (by place, by pair order).
+    /// O.ent_cur, O.ent_keys and O.by_key, as note places, each flat: one pass to count, one to fill (by place, by pair order).
     fn groupsOf(self: *Index, m: *const Model) LoadError!void {
         const a = self.arena.allocator();
         const ne = m.entities.items.len;
-        for (self.pair) |p| if (p >= m.pairs.items.len) return error.BadSnapshot;
+        const np = m.pairs.items.len;
+        for (self.pair) |p| if (p >= np) return error.BadSnapshot;
         for (self.entity) |e| if (e >= ne) return error.BadSnapshot;
         for (m.pairs.items) |p| if (p.entity >= ne) return error.BadSnapshot;
-        const cur_n = try a.alloc(u32, ne);
-        @memset(cur_n, 0);
-        const key_n = try a.alloc(u32, ne);
-        @memset(key_n, 0);
+        const cur_off = try a.alloc(u32, ne + 1);
+        const key_off = try a.alloc(u32, ne + 1);
+        @memset(cur_off, 0);
+        @memset(key_off, 0);
         for (self.state, self.entity) |st, e| if (st == .current) {
-            cur_n[e] += 1;
+            cur_off[e + 1] += 1;
         };
-        for (m.pairs.items) |p| key_n[p.entity] += 1;
-        const ent_cur = try a.alloc([]const u32, ne);
-        const ent_keys = try a.alloc([]const u32, ne);
-        const cur_buf = try a.alloc([]u32, ne);
-        const key_buf = try a.alloc([]u32, ne);
-        for (0..ne) |e| {
-            cur_buf[e] = try a.alloc(u32, cur_n[e]);
-            key_buf[e] = try a.alloc(u32, key_n[e]);
-            cur_n[e] = 0;
-            key_n[e] = 0;
+        for (m.pairs.items) |p| key_off[p.entity + 1] += 1;
+        for (1..ne + 1) |e| {
+            cur_off[e] += cur_off[e - 1];
+            key_off[e] += key_off[e - 1];
         }
+        const cur_items = try a.alloc(u32, cur_off[ne]);
+        const key_items = try a.alloc(u32, key_off[ne]);
+        // each group fills from its start: off[e] is moved along it, then back
         for (self.state, self.entity, 0..) |st, e, k| if (st == .current) {
-            cur_buf[e][cur_n[e]] = @intCast(k);
-            cur_n[e] += 1;
+            cur_items[cur_off[e]] = @intCast(k);
+            cur_off[e] += 1;
         };
         for (m.pairs.items, 0..) |p, k| {
-            key_buf[p.entity][key_n[p.entity]] = @intCast(k);
-            key_n[p.entity] += 1;
+            key_items[key_off[p.entity]] = @intCast(k);
+            key_off[p.entity] += 1;
         }
-        for (0..ne) |e| {
-            ent_cur[e] = cur_buf[e];
-            ent_keys[e] = key_buf[e];
+        var e = ne;
+        while (e > 0) : (e -= 1) {
+            cur_off[e] = cur_off[e - 1];
+            key_off[e] = key_off[e - 1];
         }
-        const pair_notes = try a.alloc([]const u32, m.pairs.items.len);
-        for (m.pairs.items, pair_notes) |p, *slot| {
-            const out = try a.alloc(u32, p.ids.items.len);
-            for (p.ids.items, out) |id, *place| place.* = self.placeOfId(id) orelse return error.BadSnapshot;
-            slot.* = out;
+        cur_off[0] = 0;
+        key_off[0] = 0;
+        var total: usize = 0;
+        for (m.pairs.items) |p| total += p.ids.items.len;
+        const pair_off = try a.alloc(u32, np + 1);
+        const pair_items = try a.alloc(u32, total);
+        var at: u32 = 0;
+        for (m.pairs.items, 0..) |p, k| {
+            pair_off[k] = at;
+            for (p.ids.items) |id| {
+                pair_items[at] = self.placeOfId(id) orelse return error.BadSnapshot;
+                at += 1;
+            }
         }
-        self.ent_cur = ent_cur;
-        self.ent_keys = ent_keys;
-        self.pair_notes = pair_notes;
+        pair_off[np] = at;
+        self.ent_cur = .{ .off = cur_off, .items = cur_items };
+        self.ent_keys = .{ .off = key_off, .items = key_items };
+        self.pair_notes = .{ .off = pair_off, .items = pair_items };
     }
 
     /// Entity phrases: only 2 to 8 keys can ever match (subjects() looks at those lengths).
     fn phrasesOf(self: *Index, m: *const Model) LoadError!void {
         const a = self.arena.allocator();
+        var count: u32 = 0;
+        for (m.phrases.items) |p| count += @intFromBool(p.keys.len >= 2 and p.keys.len <= max_phrase);
+        try self.phrases.ensureTotalCapacity(a, count); // once: no outgrown table left behind
         for (m.phrases.items) |p| {
             if (p.entity >= m.entities.items.len) return error.BadSnapshot;
             if (p.keys.len < 2 or p.keys.len > max_phrase) continue;
-            try self.phrases.put(a, packPhrase(p.keys), p.entity);
+            self.phrases.putAssumeCapacity(packPhrase(p.keys), p.entity);
             self.phrase_max = @max(self.phrase_max, p.keys.len);
         }
     }

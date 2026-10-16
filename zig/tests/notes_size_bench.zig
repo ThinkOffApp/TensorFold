@@ -139,6 +139,10 @@ const Report = struct {
     }
 };
 
+fn groupBytes(g: index.Groups) usize {
+    return (g.off.len + g.items.len) * 4;
+}
+
 fn sliceBytes(comptime T: type, xs: []const []const T) usize {
     var s: usize = xs.len * @sizeOf([]const T);
     for (xs) |x| s += x.len * @sizeOf(T);
@@ -210,24 +214,20 @@ fn walkIndex(r: *Report, idx: *const index.Index, m: *const model_mod.Model) !vo
     const post = idx.post.len * 4;
     try r.add("grams", "index: n-gram table (u128 key, 16-byte postings head, 1 control byte; 80% load)", grams, "measured");
     try r.add("grams", "index: postings (u32 note place per n-gram per note)", post, "measured");
-    const ent_cur = sliceBytes(u32, idx.ent_cur);
-    const ent_keys = sliceBytes(u32, idx.ent_keys);
-    const pair_notes = sliceBytes(u32, idx.pair_notes);
+    const ent_cur = groupBytes(idx.ent_cur);
+    const ent_keys = groupBytes(idx.ent_keys);
+    const pair_notes = groupBytes(idx.pair_notes);
     const phrases = try mapBytes(@TypeOf(idx.phrases), idx.phrases.capacity());
     try r.add("entities", "index: entity -> current notes", ent_cur, "measured");
     try r.add("entities", "index: entity -> pairs", ent_keys, "measured");
     try r.add("entities", "index: pair -> notes", pair_notes, "measured");
     try r.add("entities", "index: entity phrase table", phrases, "measured");
     const reach = cols + lines + id_place + grams + post + ent_cur + ent_keys + pair_notes + phrases;
-    // kept in the arena, never read again: Raw copies, groupsOf's counts and buffers, the phrase table's earlier sizes
-    const raw = n * @sizeOf(RawMirror);
-    const groups = ne * (4 + 4 + @sizeOf([]u32) * 2);
-    var grown: usize = 0;
-    var cap: usize = 8;
-    while (cap < idx.phrases.capacity()) : (cap *= 2) grown += try mapBytes(@TypeOf(idx.phrases), cap);
-    try r.add("notes", "index arena: Raw note copies left from build (unreachable)", raw, "derived");
-    try r.add("entities", "index arena: groupsOf counts and slice buffers left (unreachable)", groups, "derived");
-    try r.add("entities", "index arena: entity phrase table's outgrown sizes (unreachable)", grown, "derived");
+    // the build leaves nothing behind in the arena now (Raw copies, groupsOf's counts, outgrown phrase tables)
+    const raw: usize = 0;
+    const groups: usize = 0;
+    const grown: usize = 0;
+    _ = ne;
     try r.add("other", "index: Index struct", @sizeOf(index.Index), "measured");
     try r.add("other", "index arena: node headers", u.header, "measured");
     const rest = @as(i64, @intCast(u.cap)) - @as(i64, @intCast(reach + raw + groups + grown));
