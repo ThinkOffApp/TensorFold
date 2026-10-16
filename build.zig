@@ -236,6 +236,9 @@ fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     const server_safe = b.createModule(.{ .root_source_file = b.path("zig/src/server/root.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{ .{ .name = "engine_api", .module = api }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "template", .module = template } } });
     const notes_bench = b.addExecutable(.{ .name = "notes-live-bench", .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/notes_live_bench.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{.{ .name = "server", .module = server_safe }} }) });
     b.step("notes-live-bench", "Note lookups by 8 threads alone, during writes and after (MODEL_DIR SNAPSHOT REF.json OUT_DIR WRITES)").dependOn(&b.addInstallArtifact(notes_bench, .{}).step);
+    // the bytes a loaded notes store holds, counted per allocation and walked field by field (no server, no model load)
+    const notes_size = b.addExecutable(.{ .name = "notes-size-bench", .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/notes_size_bench.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{.{ .name = "server", .module = server_safe }} }) });
+    b.step("notes-size-bench", "The bytes a loaded notes store holds, per part (MODEL_DIR REF_DIR SNAPSHOT...)").dependOn(&b.addInstallArtifact(notes_size, .{}).step);
     b.step("test-native", "The Metal engines module's host-side tests").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = engines })).step);
     const reuse = b.addExecutable(.{ .name = "tf-flashnext-reuse", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/flashnext_reuse.zig"),
