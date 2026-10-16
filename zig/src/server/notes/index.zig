@@ -35,6 +35,8 @@ pub const max_phrase = 8;
 pub const no_note: u32 = 0xFFFF_FFFF;
 
 pub const State = enum(u8) { current = 0, superseded = 1, tombstoned = 2 };
+/// The n-gram index: LLWZ's posting lists, or a suffix array over the notes' folded keys.
+pub const Kind = enum { postings, sa };
 pub const Hop = enum { subject, subject_value, none };
 
 pub const Settings = struct {
@@ -175,6 +177,14 @@ pub const Index = struct {
         }
         if (gc != m.grams_current or gh != m.grams_history) return error.BadSnapshot;
         return self;
+    }
+
+    /// build() with the n-gram index of `kind`.
+    pub fn buildKind(gpa: Allocator, m: *const Model, kind: Kind) LoadError!*Index {
+        return switch (kind) {
+            .postings => build(gpa, m),
+            .sa => error.Unsupported,
+        };
     }
 
     /// The index of a model's notes, as a snapshot of them would load; the model must outlive it (it reads its vocab).

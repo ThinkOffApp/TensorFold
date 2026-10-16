@@ -162,7 +162,7 @@ pub fn erase(s: *Store, a: Allocator, id: u32, why: *Refusal) Error!Erased {
         write.commit(fresh, &undo);
         try log.add(e.r, out, fresh);
     }
-    const idx = index.Index.build(s.gpa, fresh) catch return error.OutOfMemory;
+    const idx = index.Index.buildKind(s.gpa, fresh, s.kind) catch return error.OutOfMemory;
     var idx_owned = true;
     defer if (idx_owned) idx.deinit();
     const v = try s.gpa.create(store_mod.Version);

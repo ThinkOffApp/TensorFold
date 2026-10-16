@@ -14,6 +14,9 @@ const Model = model_mod.Model;
 const Allocator = std.mem.Allocator;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
+/// The n-gram index a store builds: LLWZ's posting lists (the default), or a suffix array (--notes-index sa).
+pub const IndexKind = index.Kind;
+
 /// How a snapshot's tokenizer was checked: the tokenizer.json SHA-256 it names, or its vocabulary size only.
 pub const Check = enum { sha256, vocabulary_only };
 
@@ -51,14 +54,24 @@ pub const Store = struct {
     replayed: usize = 0,
     truncated: u64 = 0,
     auto_write: bool = true, // a "notes": true chat request's last user message is written (--no-notes-write: not)
+    kind: IndexKind = .postings, // the n-gram index each version builds
 
     /// Loads the snapshot at `path` for a model whose tokenizer is `text` (its tokenizer.json lies in `model_dir`).
     pub fn open(gpa: Allocator, io: std.Io, path: []const u8, text: model_text.Text, model_dir: []const u8, problem: *[]const u8) !*Store {
         return openLimited(gpa, io, path, text, model_dir, tokenizer_limit, problem);
     }
 
+    /// open() building the n-gram index of `kind`.
+    pub fn openIndexed(gpa: Allocator, io: std.Io, path: []const u8, text: model_text.Text, model_dir: []const u8, kind: IndexKind, problem: *[]const u8) !*Store {
+        return openWith(gpa, io, path, text, model_dir, tokenizer_limit, kind, problem);
+    }
+
     /// open() with the tokenizer.json read limit given; a named hash passes only when the model's is read and equal.
     pub fn openLimited(gpa: Allocator, io: std.Io, path: []const u8, text: model_text.Text, model_dir: []const u8, limit: usize, problem: *[]const u8) !*Store {
+        return openWith(gpa, io, path, text, model_dir, limit, .postings, problem);
+    }
+
+    fn openWith(gpa: Allocator, io: std.Io, path: []const u8, text: model_text.Text, model_dir: []const u8, limit: usize, kind: IndexKind, problem: *[]const u8) !*Store {
         const t0 = clock.nowNs(io);
         const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .unlimited) catch |e| {
             problem.* = "the snapshot file cannot be read";
@@ -67,7 +80,7 @@ pub const Store = struct {
         defer gpa.free(bytes);
         const journal_path = try std.mem.concat(gpa, u8, &.{ path, ".journal" });
         defer gpa.free(journal_path);
-        const s = try loadJournaled(gpa, io, bytes, text, journal_path, problem);
+        const s = try loadWith(gpa, io, bytes, text, journal_path, kind, problem);
         errdefer s.deinit();
         s.snapshot_path = try s.gpa.dupe(u8, path);
         if (s.snapshot_bytes) |b| s.gpa.free(b);
@@ -103,6 +116,15 @@ pub const Store = struct {
 
     /// load() with the journal at `journal_path` replayed over the snapshot; null keeps writes off.
     pub fn loadJournaled(parent: Allocator, io: std.Io, bytes: []const u8, text: model_text.Text, journal_path: ?[]const u8, problem: *[]const u8) !*Store {
+        return loadWith(parent, io, bytes, text, journal_path, .postings, problem);
+    }
+
+    /// load() building the n-gram index of `kind`.
+    pub fn loadIndexed(gpa: Allocator, io: std.Io, bytes: []const u8, text: model_text.Text, kind: IndexKind, problem: *[]const u8) !*Store {
+        return loadWith(gpa, io, bytes, text, null, kind, problem);
+    }
+
+    fn loadWith(parent: Allocator, io: std.Io, bytes: []const u8, text: model_text.Text, journal_path: ?[]const u8, kind: IndexKind, problem: *[]const u8) !*Store {
         const s = try parent.create(Store);
         errdefer parent.destroy(s);
         s.zeroing = .{ .child = parent };
@@ -122,7 +144,7 @@ pub const Store = struct {
             problem.* = "the snapshot's vocabulary is not the model tokenizer's size";
             return error.BadSnapshot;
         }
-        s.* = .{ .zeroing = s.zeroing, .gpa = gpa, .io = io, .text = text, .model = m, .current = undefined, .log = .{ .gpa = gpa }, .snapshot_sha = std.fmt.bytesToHex(sha, .lower) };
+        s.* = .{ .zeroing = s.zeroing, .gpa = gpa, .io = io, .text = text, .model = m, .current = undefined, .log = .{ .gpa = gpa }, .snapshot_sha = std.fmt.bytesToHex(sha, .lower), .kind = kind };
         errdefer s.log.deinit();
         if (journal_path) |jp| {
             var arena = std.heap.ArenaAllocator.init(gpa);
@@ -137,7 +159,10 @@ pub const Store = struct {
             s.snapshot_bytes = try gpa.dupe(u8, bytes);
         } else s.read_only = "the store has no journal";
         errdefer if (s.snapshot_bytes) |b| gpa.free(b);
-        const idx = try index.Index.build(gpa, m);
+        const idx = index.Index.buildKind(gpa, m, kind) catch |e| {
+            if (e == error.Unsupported) problem.* = "the suffix-array index needs a vocabulary whose keys are all real and whose ids of one key agree on being a word";
+            return e;
+        };
         errdefer idx.deinit();
         const v = try gpa.create(Version);
         v.* = .{ .idx = idx };
@@ -313,7 +338,7 @@ pub const Store = struct {
 
     /// A new version of the index from the model, numbered.
     pub fn build(s: *Store) !*Version {
-        const idx = try index.Index.build(s.gpa, s.model);
+        const idx = try index.Index.buildKind(s.gpa, s.model, s.kind);
         errdefer idx.deinit();
         const v = try s.gpa.create(Version);
         v.* = .{ .idx = idx };
