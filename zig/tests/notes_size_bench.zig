@@ -235,6 +235,23 @@ fn walkIndex(r: *Report, idx: *const index.Index, m: *const model_mod.Model) !vo
     const grown: usize = 0;
     _ = ne;
     try r.add("other", "index: Index struct", @sizeOf(index.Index), "measured");
+    if (idx.base) |b| {
+        const sa_text = b.text.byteLen();
+        const seps = b.seps.byteLen();
+        const sa_cur = b.sa_cur.byteLen();
+        const sa_hist = b.sa_hist.byteLen();
+        const dict = b.dict.len * 4;
+        const wordy = b.wordy.len * 8;
+        const records = b.mem.held.capacity * @sizeOf(@TypeOf(b.mem.held.items[0]));
+        try r.add("grams", try std.fmt.allocPrint(r.a, "sa: token array ({d}-bit codes, a separator after each note)", .{b.text.width}), sa_text, "measured");
+        try r.add("grams", try std.fmt.allocPrint(r.a, "sa: suffixes of the current view ({d}-bit positions)", .{b.sa_cur.width}), sa_cur, "measured");
+        try r.add("grams", try std.fmt.allocPrint(r.a, "sa: suffixes of the past view ({d}-bit positions)", .{b.sa_hist.width}), sa_hist, "measured");
+        try r.add("grams", "sa: position -> note (rank over a separator bit vector, a count per 64 bits)", seps, "measured");
+        try r.add("grams", "sa: key dictionary (u32 keys, ascending; code = place + 1)", dict, "measured");
+        try r.add("grams", "sa: wordy bit per code", wordy, "measured");
+        try r.add("other", "sa: Base struct and its record of each allocation", @sizeOf(@TypeOf(b.*)) + records, "measured");
+        if (sa_text + seps + sa_cur + sa_hist + dict + wordy + records + @sizeOf(@TypeOf(b.*)) != b.bytes()) return error.BaseWalkOff;
+    }
     try r.add("other", "index arena: its record of each allocation (exact sizes, no nodes)", u.header, "measured");
     const rest = @as(i64, @intCast(u.cap)) - @as(i64, @intCast(reach + raw + groups + grown));
     if (rest < 0) return error.ArenaWalkOver; // a derived piece is wrong: the walk claims more than the arena holds
@@ -254,7 +271,14 @@ fn sumOf(items: []const Item, part: ?[]const u8) usize {
 pub fn main(init: std.process.Init) !u8 {
     const io = init.io;
     const a = init.arena.allocator();
-    const argv = try init.minimal.args.toSlice(a);
+    const all_args = try init.minimal.args.toSlice(a);
+    // MODEL_DIR [--index postings|sa] REF_DIR SNAPSHOT...
+    var kind: server.notes_store.IndexKind = .postings;
+    var argv = all_args;
+    if (all_args.len > 3 and std.mem.eql(u8, all_args[2], "--index")) {
+        kind = std.meta.stringToEnum(server.notes_store.IndexKind, all_args[3]) orelse return 2;
+        argv = try std.mem.concat(a, [:0]const u8, &.{ all_args[0..2], all_args[4..] });
+    }
     if (argv.len < 4) {
         std.debug.print("usage: notes-size-bench MODEL_DIR REF_DIR SNAPSHOT...\n", .{});
         return 2;
@@ -273,7 +297,7 @@ pub fn main(init: std.process.Init) !u8 {
         } else |_| {}
         // 1. first, as the server opens it (tokenizer only, no weights), then the set's questions: a scratch stays
         var cs: Counter = .{};
-        const store = Store.open(cs.allocator(), io, path, text, argv[1], &problem) catch |e| {
+        const store = Store.openIndexed(cs.allocator(), io, path, text, argv[1], kind, &problem) catch |e| {
             std.debug.print("{s}: {s} ({s})\n", .{ path, problem, @errorName(e) });
             return 1;
         };
@@ -310,8 +334,9 @@ pub fn main(init: std.process.Init) !u8 {
         const spare_hi = @intFromPtr(nl.items.ptr) + nl.capacity * @sizeOf(model_mod.Note);
         const spare_resident = try resident(spare_lo, spare_hi);
         // the control: the postings were written at build, so their pages must be resident
-        const post_lo = @intFromPtr(store.current.idx.post.ptr);
-        const post_hi = post_lo + store.current.idx.post.len * 4;
+        const ctl: []const u8 = if (store.current.idx.base) |b| b.sa_hist.bytes else std.mem.sliceAsBytes(store.current.idx.post);
+        const post_lo = @intFromPtr(ctl.ptr); // the control: written at build, so resident (sa: the past view's suffixes)
+        const post_hi = post_lo + ctl.len;
         const post_resident = try resident(post_lo, post_hi);
         const post_pages = std.mem.alignBackward(usize, post_hi, std.heap.pageSize()) -| std.mem.alignForward(usize, post_lo, std.heap.pageSize());
         const scratch = cs.live - opened;
@@ -325,7 +350,7 @@ pub fn main(init: std.process.Init) !u8 {
         const m = try model_mod.parse(cm.allocator(), bytes);
         defer m.deinit();
         var ci: Counter = .{};
-        const idx = try index.Index.build(ci.allocator(), m);
+        const idx = try index.Index.buildKind(ci.allocator(), m, kind);
         defer idx.deinit();
         const direct = try walkModel(&rep, m);
         try walkModelArena(&rep, m);
@@ -334,7 +359,8 @@ pub fn main(init: std.process.Init) !u8 {
         const index_arena = exactUse(idx.arena).held;
         // the walk must come to what the counters saw, to the byte
         const model_gap = @as(i64, @intCast(cm.live)) - @as(i64, @intCast(direct + model_arena));
-        const index_gap = @as(i64, @intCast(ci.live)) - @as(i64, @intCast(@sizeOf(index.Index) + index_arena));
+        const base_bytes: usize = if (idx.base) |b| b.bytes() else 0;
+        const index_gap = @as(i64, @intCast(ci.live)) - @as(i64, @intCast(@sizeOf(index.Index) + index_arena + base_bytes));
         const walked = sumOf(rep.items.items, null);
 
         // 3. each note's stored ids against the engine tokenizer's encode of its text (no special tokens)

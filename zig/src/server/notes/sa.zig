@@ -44,16 +44,16 @@ pub fn widthFor(max: u64) u6 {
     return @intCast(@max(1, 64 - @clz(max)));
 }
 
-/// rank over a bit vector: the set bits before a place, from a count per 256 bits and popcounts.
+/// rank over a bit vector: the set bits before a place, from a count per 64 bits and one popcount.
 pub const Rank = struct {
     words: []u64 = &.{},
-    blocks: []u32 = &.{}, // set bits before each 4-word block
+    blocks: []u32 = &.{}, // set bits before each word
 
     pub fn init(a: Allocator, bits: usize) Allocator.Error!Rank {
         const nw = (bits + 63) / 64 + 1;
         const words = try a.alloc(u64, nw);
         @memset(words, 0);
-        const blocks = a.alloc(u32, nw / 4 + 1) catch |e| {
+        const blocks = a.alloc(u32, nw) catch |e| {
             a.free(words);
             return e;
         };
@@ -64,23 +64,20 @@ pub const Rank = struct {
         r.words[i >> 6] |= @as(u64, 1) << @intCast(i & 63);
     }
 
-    /// The block counts, once every bit is set.
+    /// The counts, once every bit is set.
     pub fn seal(r: Rank) void {
         var total: u32 = 0;
-        for (r.blocks, 0..) |*b, k| {
+        for (r.blocks, r.words) |*b, w| {
             b.* = total;
-            for (r.words[@min(k * 4, r.words.len)..@min(k * 4 + 4, r.words.len)]) |w| total += @popCount(w);
+            total += @popCount(w);
         }
     }
 
     /// The set bits strictly before `i`.
     pub inline fn rank(r: Rank, i: usize) u32 {
         const w = i >> 6;
-        var n = r.blocks[w >> 2];
-        var k = w & ~@as(usize, 3);
-        while (k < w) : (k += 1) n += @popCount(r.words[k]);
         const below = (@as(u64, 1) << @intCast(i & 63)) - 1;
-        return n + @popCount(r.words[w] & below);
+        return r.blocks[w] + @popCount(r.words[w] & below);
     }
 
     pub fn byteLen(r: Rank) usize {

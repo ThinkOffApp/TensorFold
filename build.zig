@@ -247,6 +247,9 @@ fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     // the golden questions asked in-process as the server asks them (the tokenizer only), against Python's references
     const notes_golden = b.addExecutable(.{ .name = "notes-golden", .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/notes_golden_bench.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{.{ .name = "server", .module = server_safe }} }) });
     b.step("notes-golden", "LLWZ Python's blocks against Store.retrieve, question by question (MODEL_DIR [--index postings|sa] SNAPSHOT REF.json ...)").dependOn(&b.addInstallArtifact(notes_golden, .{}).step);
+    // the postings and the suffix-array index side by side: build, lookups, writes with the side buffer, merges, erases
+    const notes_sa_bench = b.addExecutable(.{ .name = "notes-sa-bench", .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/notes_sa_bench.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{.{ .name = "server", .module = server_safe }} }) });
+    b.step("notes-sa-bench", "Postings against the suffix-array index: build, lookup, write, merge and erase times (MODEL_DIR SNAPSHOT REF.json OUT_DIR WRITES [SIDE_MAX])").dependOn(&b.addInstallArtifact(notes_sa_bench, .{}).step);
     b.step("test-native", "The Metal engines module's host-side tests").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = engines })).step);
     const reuse = b.addExecutable(.{ .name = "tf-flashnext-reuse", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/flashnext_reuse.zig"),
