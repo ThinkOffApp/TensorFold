@@ -89,4 +89,5 @@ test {
     _ = @import("notes_alloc_test.zig");
     _ = @import("notes_journal_test.zig");
     _ = @import("notes_auto_test.zig");
+    _ = @import("notes_concurrency_test.zig");
 }
