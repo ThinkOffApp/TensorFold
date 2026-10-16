@@ -8,7 +8,9 @@ const Record = write.Record;
 const Value = json.Value;
 const Allocator = std.mem.Allocator;
 
-pub const format = "tf-notes-journal/1";
+pub const format = "tf-notes-journal/2";
+/// The first format: no commit lines, every whole line a write (read, then rewritten as format 2, at open).
+pub const format_v1 = "tf-notes-journal/1";
 
 pub const OpenError = error{ OutOfMemory, JournalIo, BadJournal, OtherSnapshot, Locked };
 pub const IoError = error{ OutOfMemory, JournalIo };
@@ -44,6 +46,8 @@ pub const Journal = struct {
     hook: ?*const fn (ctx: *anyopaque, tmp: [:0]const u8) void = null, // tests: between a rewrite's sync and rename
     faults: ?*Faults = null, // tests: an append's write, truncate or sync made to fail
     poisoned: bool = false, // an append and its rollback both failed: no more appends until a restart cuts the tail
+    doubt: bool = false, // with poisoned: the failed append's commit line was written, so a restart may apply it
+    upgraded: bool = false, // the journal was format 1 and was rewritten as format 2 at open
     hook_ctx: *anyopaque = undefined,
 
     pub fn deinit(j: *Journal) void {
@@ -69,37 +73,48 @@ pub const Journal = struct {
         // ours now: a temporary file left by a rewrite that never reached its rename is stale (the journal holds all)
         j.stale = try tmp_file.cleanStale(a, path);
         const text = try readAll(a, fd, problem); // in `a`: the records' strings are slices of it
-        var end = text.len;
-        if (end > 0 and text[end - 1] != '\n') {
-            // a write cut short by a crash: it never had a reply, so it goes
-            end = if (std.mem.lastIndexOfScalar(u8, text, '\n')) |nl| nl + 1 else 0;
-            j.truncated = text.len - end;
-            if (std.c.ftruncate(fd, @intCast(end)) != 0 or !fullSync(fd)) {
-                problem.* = "the notes journal ends in a torn line that cannot be cut";
+        const head_end = (std.mem.indexOfScalar(u8, text, '\n') orelse {
+            problem.* = "the notes journal has no whole header line";
+            return error.BadJournal;
+        }) + 1;
+        const v = try checkHeader(a, text[0 .. head_end - 1], snapshot_sha, problem);
+        j.next_source = v.next_source;
+        // a write counts only with its commit line after it; without one (never answered as stored) it is cut, unread
+        var good = head_end;
+        var pos = head_end;
+        while (pos < text.len) {
+            const nl = std.mem.indexOfScalarPos(u8, text, pos, '\n') orelse break; // a torn last line
+            const r = try readRecord(a, text[pos..nl], problem);
+            if (v.version == 1) {
+                try records.append(a, r);
+                pos = nl + 1;
+                good = pos;
+                continue;
+            }
+            const cnl = std.mem.indexOfScalarPos(u8, text, nl + 1, '\n') orelse break; // no whole commit line
+            if (!try isCommit(a, text[nl + 1 .. cnl], r.source)) {
+                problem.* = "a write in the notes journal is followed by something other than its commit line";
+                return error.BadJournal;
+            }
+            try records.append(a, r);
+            pos = cnl + 1;
+            good = pos;
+        }
+        if (good < text.len) {
+            j.truncated = text.len - good;
+            if (std.c.ftruncate(fd, @intCast(good)) != 0 or !fullSync(fd)) {
+                problem.* = "the notes journal ends in a write without its commit line that cannot be cut";
                 return error.JournalIo;
             }
         }
-        j.size = end;
-        var lines = std.mem.splitScalar(u8, text[0..end], '\n');
-        const first = lines.next() orelse "";
-        if (end == 0) {
-            problem.* = "the notes journal is empty (no header)";
-            return error.BadJournal;
-        }
-        j.next_source = try checkHeader(a, first, snapshot_sha, problem);
-        while (lines.next()) |line| {
-            if (line.len == 0) continue;
-            const v = switch (try json.parse(a, line)) {
-                .ok => |x| x,
-                .err => {
-                    problem.* = "a line of the notes journal is not JSON";
-                    return error.BadJournal;
-                },
+        j.size = good;
+        if (v.version == 1) {
+            // format 1 had no commit lines: written anew, under the lock, by the temporary-file rules
+            j.rewrite(a, records.items, j.next_source) catch {
+                problem.* = "the notes journal (format 1) could not be rewritten as format 2";
+                return error.JournalIo;
             };
-            try records.append(a, decode(v) orelse {
-                problem.* = "a line of the notes journal is not a write";
-                return error.BadJournal;
-            });
+            j.upgraded = true;
         }
         return j;
     }
@@ -110,15 +125,23 @@ pub const Journal = struct {
         if (j.fd < 0) try j.create(a);
         const line = try encode(a, r);
         defer a.free(line);
+        const mark = try commitLine(a, r.source);
+        defer a.free(mark);
+        // the write's line, synced; then its commit line, synced: without that line a replay drops the write
         if (j.put(line, j.size) and j.sync()) {
-            j.size += line.len;
-            return;
+            const marked = j.put(mark, j.size + line.len);
+            if (marked and j.sync()) {
+                j.size += line.len + mark.len;
+                return;
+            }
+            j.doubt = marked; // the commit line is down and may reach the disk although its sync failed
         }
-        // not whole: cut back to the last record and sync; failing that the file may hold part of it (startup cuts it)
+        // not stored: cut back to the last committed write and sync; failing that, poisoned until a restart
         if (!j.cut(j.size) or !j.sync()) {
             j.poisoned = true;
             return error.JournalPoisoned;
         }
+        j.doubt = false;
         return error.JournalIo;
     }
 
@@ -155,8 +178,10 @@ pub const Journal = struct {
         for (records) |r| {
             const line = try encode(a, r);
             defer a.free(line);
-            if (!writeAll(fd, line, size)) return error.JournalIo;
-            size += line.len;
+            const mark = try commitLine(a, r.source);
+            defer a.free(mark);
+            if (!writeAll(fd, line, size) or !writeAll(fd, mark, size + line.len)) return error.JournalIo;
+            size += line.len + mark.len;
         }
         if (!fullSync(fd)) return error.JournalIo;
         if (std.c.flock(fd, std.c.LOCK.EX | std.c.LOCK.NB) != 0) return error.JournalIo;
@@ -195,8 +220,43 @@ fn header(a: Allocator, sha: [64]u8, next_source: u64) Allocator.Error![]u8 {
     return std.fmt.allocPrint(a, "{{\"format\":\"{s}\",\"snapshot_sha256\":\"{s}\",\"next_source\":{d}}}\n", .{ format, &sha, next_source });
 }
 
-/// The header checked against the snapshot; its next_source.
-fn checkHeader(a: Allocator, line: []const u8, sha: [64]u8, problem: *[]const u8) OpenError!u64 {
+fn readRecord(a: Allocator, line: []const u8, problem: *[]const u8) OpenError!Record {
+    const v = switch (try json.parse(a, line)) {
+        .ok => |x| x,
+        .err => {
+            problem.* = "a line of the notes journal is not JSON";
+            return error.BadJournal;
+        },
+    };
+    return decode(v) orelse {
+        problem.* = "a line of the notes journal is not a write";
+        return error.BadJournal;
+    };
+}
+
+/// Whether `line` is the commit line of the write `source`.
+fn isCommit(a: Allocator, line: []const u8, source: []const u8) OpenError!bool {
+    const v = switch (try json.parse(a, line)) {
+        .ok => |x| x,
+        .err => return false,
+    };
+    return std.mem.eql(u8, v.strField("commit") orelse return false, source);
+}
+
+/// A write's commit line: written and synced after the write's own line, it makes the write count.
+pub fn commitLine(a: Allocator, source: []const u8) Allocator.Error![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(a);
+    try out.appendSlice(a, "{\"commit\":");
+    try str(a, &out, source);
+    try out.appendSlice(a, "}\n");
+    return out.toOwnedSlice(a);
+}
+
+const Header = struct { next_source: u64, version: u8 };
+
+/// The header checked against the snapshot: its next_source and its format (1: no commit lines).
+fn checkHeader(a: Allocator, line: []const u8, sha: [64]u8, problem: *[]const u8) OpenError!Header {
     const v = switch (try json.parse(a, line)) {
         .ok => |x| x,
         .err => {
@@ -204,16 +264,17 @@ fn checkHeader(a: Allocator, line: []const u8, sha: [64]u8, problem: *[]const u8
             return error.BadJournal;
         },
     };
-    if (!std.mem.eql(u8, v.strField("format") orelse "", format)) {
+    const f = v.strField("format") orelse "";
+    const version: u8 = if (std.mem.eql(u8, f, format)) 2 else if (std.mem.eql(u8, f, format_v1)) 1 else {
         problem.* = "the notes journal's header names another format";
         return error.BadJournal;
-    }
+    };
     if (!std.mem.eql(u8, v.strField("snapshot_sha256") orelse "", &sha)) {
         problem.* = "the notes journal was written over another snapshot (its snapshot_sha256 differs)";
         return error.OtherSnapshot;
     }
-    const next = (v.get("next_source") orelse return 1).int64() orelse return 1;
-    return @intCast(@max(next, 1));
+    const next = if (v.get("next_source")) |n| n.int64() orelse 1 else 1;
+    return .{ .next_source = @intCast(@max(next, 1)), .version = version };
 }
 
 /// A record as one journal line: fixed keys, the text as UTF-8 (not escaped), a newline.

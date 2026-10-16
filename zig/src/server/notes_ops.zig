@@ -57,8 +57,11 @@ pub const Ask = struct {
     target: u32 = 0,
 };
 
-/// The reply to the write whose append and rollback both failed: what is known, and what is not.
-const rollback_failed = "the write could not be stored on disk, and the journal could not be put back as it was: nothing was applied in memory, but the journal on disk may hold part of this write. Writes are refused until the server restarts (startup cuts a torn last record); lookups go on";
+/// The reply to a write whose append and rollback both failed before its commit line was down: a restart drops it.
+const rollback_dropped = "the write could not be stored on disk, and the journal could not be put back as it was: nothing was applied in memory; the journal may hold this write, but not its commit line, so a restart drops it. Writes are refused until the server restarts; lookups go on";
+
+/// The same, once its commit line was written but not synced: the disk state is unknown.
+const rollback_doubt = "the write's commit line reached the journal but could not be synced, and the journal could not be put back as it was: nothing was applied in memory, but the disk state is unknown and a restart may apply this write. Writes are refused until the server restarts; lookups go on";
 
 /// The reply to every write after that.
 const needs_recovery = "the notes journal needs recovery, restart the server: an earlier write failed and could not be rolled back (lookups go on from the last good version)";
@@ -112,7 +115,7 @@ pub fn perform(s: *Store, a: Allocator, ask: Ask, why: *Refusal) Error!Written {
     s.journal.?.append(a, r) catch |e| return switch (e) {
         error.OutOfMemory => error.OutOfMemory,
         error.JournalIo => refuse(why, 500, "the write could not be stored on disk; nothing changed"),
-        error.JournalPoisoned => refuse(why, 500, rollback_failed),
+        error.JournalPoisoned => refuse(why, 500, if (s.journal.?.doubt) rollback_doubt else rollback_dropped),
     };
     // stored: from here the write stands, and nothing below can fail
     applied = false;
