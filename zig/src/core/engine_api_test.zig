@@ -7,4 +7,5 @@ test {
     _ = @import("prompt_imprint.zig");
     _ = @import("keepalive.zig");
     _ = @import("originals_test.zig");
+    _ = @import("inject.zig");
 }

@@ -145,7 +145,7 @@ pub const Engine = struct {
         } else {
             for (live.items) |s| {
                 // logprobs and grammars take verify windows: rows' logits are read, or bits made, before a forward
-                const windowed = (e.cfg.family_mtp and s.drafts) or !e.cfg.pipelined or s.logprobs != null or s.grammar != null;
+                const windowed = (e.cfg.family_mtp and s.drafts) or !e.cfg.pipelined or s.logprobs != null or s.grammar != null or s.injected.items.len > 0;
                 const r = if (windowed) try e.familyRound(s, null) else try e.pipelinedRound(s);
                 s.min_rows = if (s.min_rows == 0) r.rows else @min(s.min_rows, r.rows);
             }
@@ -186,7 +186,7 @@ pub const Engine = struct {
         var rows: u64 = 0;
         for (order) |i| {
             const s = live[i];
-            const need: u64 = if (s.drafts) @min(@min(e.cfg.base_width, e.cfg.batch_rows), 1 + s.force.items.len) else 1;
+            const need: u64 = if (s.injected.items.len > 0) @min(@min(e.cfg.family_width, e.cfg.batch_rows), 1 + s.injected.items.len) else if (s.drafts) @min(@min(e.cfg.base_width, e.cfg.batch_rows), 1 + s.force.items.len) else 1;
             if (chosen.items.len == e.cfg.batch_streams or (chosen.items.len > 0 and rows + need > e.cfg.batch_rows)) break;
             try chosen.append(a, i);
             rows += need;
@@ -212,7 +212,7 @@ pub const Engine = struct {
         if (plans[0].kind == .head and e.cfg.node_probabilities) try win.allocate(e, &plans);
         try win.constrain(e, &plans[0]);
         const plan = plans[0];
-        const early = e.cfg.family_mtp and s.drafts and plan.kind != .forced and e.cfg.speculate_early and plan.parents == null and s.grammar == null;
+        const early = e.cfg.family_mtp and s.drafts and !plan.isForced() and e.cfg.speculate_early and plan.parents == null and s.grammar == null;
         const windows = [_]be.Window{try win.build(e, plan, early)};
         const rows = windows[0].rows();
         var out = [_]be.Verified{.{ .sampled = try a.alloc(u32, rows), .drafts = try a.alloc(u32, rows - 1), .rows = if (s.logprobs != null) try a.alloc(LogRow, rows) else &.{} }};
@@ -317,11 +317,14 @@ pub const Engine = struct {
         const rows = tokens.len;
         var path: []u32 = undefined;
         var committed: std.ArrayList(u32) = .empty;
-        if (p.kind == .forced) {
+        var read: usize = 0; // injected rows lead `committed`: kept whole, already in the context, never committed
+        if (p.isForced()) {
             path = try a.alloc(u32, rows);
             for (path, 0..) |*r, i| r.* = @intCast(i);
             try committed.appendSlice(a, p.forced);
-            try committed.append(a, s.popForce() orelse sampled[rows - 1]);
+            const next = if (p.kind == .injected) s.popInjected() else s.popForce();
+            if (p.kind == .injected) read = p.forced.len + @intFromBool(next != null);
+            try committed.append(a, next orelse sampled[rows - 1]);
         } else {
             path = try accept.acceptPath(a, tokens, parents, sampled);
             for (path[1..]) |r| try committed.append(a, tokens[r]);
@@ -379,18 +382,18 @@ pub const Engine = struct {
             }
             if (s.recall) |r| if (p.kind != .copy) r.noteHead(path.len); // its own rounds: the bar a copy must beat
         }
-        const budget_cut = s.thinkCut(committed.items);
-        const loop_cut = sm.loopCut(s, committed.items);
+        const budget_cut = s.thinkCut(committed.items[read..]);
+        const loop_cut = sm.loopCut(s, committed.items[read..]);
         const loop_wins = if (loop_cut) |c| budget_cut == null or c < budget_cut.? else false;
         var cut: ?usize = null;
         if (loop_wins) {
             cut = loop_cut;
-            path = path[0 .. loop_cut.? + 1];
-            committed.shrinkRetainingCapacity(loop_cut.? + 1);
+            path = path[0 .. read + loop_cut.? + 1];
+            committed.shrinkRetainingCapacity(read + loop_cut.? + 1);
         } else if (budget_cut) |c| {
             cut = c;
-            path = path[0 .. c + 1];
-            committed.shrinkRetainingCapacity(c);
+            path = path[0 .. read + c + 1];
+            committed.shrinkRetainingCapacity(read + c);
             try committed.append(a, try s.startClose(e.gpa));
         }
         s.rounds += 1;
@@ -399,9 +402,9 @@ pub const Engine = struct {
             committed_rows = try a.alloc(LogRow, committed.items.len);
             for (committed_rows, committed.items, path[0..committed.items.len]) |*r, t, row| r.* = rows_lp[row].forToken(t);
         }
-        const landed = try s.commit(e.gpa, committed.items, committed_rows);
-        const got = committed.items[0..landed];
-        if (s.finished and got.len < path.len) path = path[0 .. got.len + 1];
+        const landed = try s.commit(e.gpa, committed.items[read..], if (committed_rows.len > 0) committed_rows[read..] else &.{});
+        const got = committed.items[read .. read + landed];
+        if (s.finished and read + got.len < path.len) path = path[0 .. read + got.len + 1];
         const keep = path.len;
         s.cache_len += keep;
         s.pending = committed.items[keep - 1];
@@ -528,6 +531,11 @@ pub const Engine = struct {
         result.got = try e.arena.allocator().dupe(u32, s.emitted()[s.emitted().len - landed ..]);
         try trail.pipe(e, s, before, result.got);
         return result;
+    }
+
+    /// Between rounds: a queued step's token lands, so nothing is in flight (before injected context joins the stream).
+    pub fn settle(e: *Engine, s: *Stream) !void {
+        if (s.inflight != null) try e.landInflight(s);
     }
 
     /// Land the queued token without queuing another (a shared round is synchronous).

@@ -1,6 +1,7 @@
 //! A lane host's lone driver: the backend's own loop runs a lone stream until a foreground request or a cancel waits.
 const LaneHost = @import("lane_host.zig").LaneHost;
 const status = @import("lane_host_status.zig");
+const injects = @import("lane_host_inject.zig");
 const Job = LaneHost.Job;
 
 /// An idle backend driver takes a lone drafted request, sampled, with logprobs, a budget or a grammar when supported.
@@ -28,14 +29,14 @@ pub fn reclaim(h: *LaneHost) void {
     h.unlock();
     const j = job orelse return;
     const s = &j.stream;
-    // a forced close the driver would hand straight back stays in the lane core
-    if (s.paused or s.force.items.len > 0 or s.budgetWithin(lone.min_budget) or !takes(h, j) or h.core.activeCount() != 1) return;
+    // a forced close or injected context the driver would hand straight back stays in the lane core
+    if (s.paused or s.force.items.len > 0 or s.injected.items.len > 0 or injects.waits(j) or s.budgetWithin(lone.min_budget) or !takes(h, j) or h.core.activeCount() != 1) return;
     if (!h.core.detach(s)) return;
     j.prefill_sent = true; // the lane core sent it
     _ = run(h, j, j.began, true);
 }
 
-/// Send lone-driver tokens as they land; arrivals and cancellation return its stream to the lane core.
+/// Send lone-driver tokens as they land; arrivals, cancels and injected context return its stream to the lane core.
 pub fn run(h: *LaneHost, job: *Job, began: i96, resumed: bool) bool {
     h.lone_job = job;
     if (!resumed) job.delivered = 0;
@@ -55,7 +56,7 @@ pub fn run(h: *LaneHost, job: *Job, began: i96, resumed: bool) bool {
             const host: *LaneHost = @ptrCast(@alignCast(ctx));
             host.lock();
             defer host.unlock();
-            return host.foregroundWaiting() or host.cancels.items.len > 0 or host.closing;
+            return host.foregroundWaiting() or host.cancels.items.len > 0 or host.closing or injects.waits(host.lone_job.?);
         }
     };
     const paused = lone.run(lone.ctx, &job.stream, .{ .ctx = h, .committed = Hooks.committed, .yield = Hooks.yield, .resumed = resumed });

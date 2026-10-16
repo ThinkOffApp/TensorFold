@@ -1,4 +1,4 @@
-//! A round's windows (Python `_plan_window`, `_copy_proposal`, `_allocate`): forced, copied or drafted rows.
+//! A round's windows (Python `_plan_window`, `_copy_proposal`, `_allocate`): injected, forced, copied or drafted rows.
 const std = @import("std");
 const accept = @import("accept.zig");
 const alloc = @import("allocate.zig");
@@ -13,7 +13,7 @@ const Stream = @import("stream.zig").Stream;
 const Value = ev.Value;
 const f = ev.f;
 
-pub const Kind = enum { forced, copy, head, fill, grammar, none };
+pub const Kind = enum { forced, copy, head, fill, grammar, none, injected };
 
 /// One stream's window as planned, then as allocated (Python's plan lists).
 pub const Plan = struct {
@@ -22,7 +22,7 @@ pub const Plan = struct {
     kind: Kind,
     held: u32 = 0, // head drafts the backend holds
     tokens: []const u32 = &.{}, // drafts known on the host (forced, copied, tree)
-    forced: []const u32 = &.{},
+    forced: []const u32 = &.{}, // forced rows, or injected context's
     parents: ?[]const i32 = null, // a tree's drafts' parents
     branch_from: u32 = 0, // the first row of suffix-match branches (0: none; lanes/fill.zig)
     tried: bool = false, // the planner read the head's chain back to graft branches
@@ -34,6 +34,11 @@ pub const Plan = struct {
 
     pub fn count(p: Plan) usize {
         return p.held + p.tokens.len;
+    }
+
+    /// Rows the host fixes (forced or injected), which no draft or graft joins.
+    pub fn isForced(p: Plan) bool {
+        return p.kind == .forced or p.kind == .injected;
     }
 
     /// Whether window row `r` (a graft) is Recall's.
@@ -57,7 +62,14 @@ pub fn plan(e: *Engine, s: *Stream, copied: ?Copy) !Plan {
         if (q.tokens) |t| e.gpa.free(t);
         if (q.parents) |parents| e.gpa.free(parents);
     };
-    if (s.force.items.len > 0) {
+    if (s.injected.items.len > 0) {
+        // injected context: the widest window's rows, the reply's own draw only past its last
+        const take = @min(@min(e.cfg.family_width, e.cfg.batch_rows) - 1, s.injected.items.len);
+        p.forced = try a.dupe(u32, s.injected.items[0..take]);
+        s.injected.replaceRangeAssumeCapacity(0, take, &.{});
+        p.kind = .injected;
+        p.tokens = p.forced;
+    } else if (s.force.items.len > 0) {
         const width: usize = if (s.drafts) @min(e.cfg.base_width, e.cfg.batch_rows) else 1;
         const take = @min(width - 1, s.force.items.len);
         const forced = try a.dupe(u32, s.force.items[0..take]);
@@ -92,7 +104,7 @@ pub fn plan(e: *Engine, s: *Stream, copied: ?Copy) !Plan {
             if (p.count() > 0) p.kind = .head;
         }
     }
-    if (e.cfg.fill_lanes > 0 and s.drafts and p.kind != .forced and (p.parents == null or p.lanes != null)) try fillLanes(e, s, &p);
+    if (e.cfg.fill_lanes > 0 and s.drafts and !p.isForced() and (p.parents == null or p.lanes != null)) try fillLanes(e, s, &p);
     try trail.event(e, &.{ f("ev", trail.str("plan")), f("stream", trail.str(s.id)), f("kind", trail.str(@tagName(p.kind))), f("n", trail.int(p.count())), f("tree", .{ .bool = p.parents != null }) });
     return p;
 }
@@ -193,7 +205,7 @@ pub fn probe(e: *Engine) depth.Probe {
 }
 
 pub fn who(s: *Stream) depth.Who {
-    return .{ .state = &s.depth, .draft_room = s.draftRoom(), .finished = s.finished, .forced = s.force.items.len > 0, .granted = s.granted, .stream = s, .sampled = s.sampling != null };
+    return .{ .state = &s.depth, .draft_room = s.draftRoom(), .finished = s.finished, .forced = s.force.items.len > 0 or s.injected.items.len > 0, .granted = s.granted, .stream = s, .sampled = s.sampling != null };
 }
 
 /// Whether any of a round's streams draws keyed samples (its rows carry their host work).
@@ -209,8 +221,8 @@ pub fn allocate(e: *Engine, plans: []Plan) !void {
     const probs = try a.alloc([]const f64, plans.len);
     for (plans, fixed, probs) |p, *fx, *pr| {
         const n = p.count();
-        if (p.kind == .forced or n == 0) {
-            fx.* = 1 + @as(u32, @intCast(if (p.kind == .forced) n else 0));
+        if (p.isForced() or n == 0) {
+            fx.* = 1 + @as(u32, @intCast(if (p.isForced()) n else 0));
             pr.* = &.{};
         } else if (p.kind == .copy) {
             fx.* = 1;

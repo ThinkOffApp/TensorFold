@@ -11,6 +11,7 @@ const admit = @import("lane_host_admit.zig");
 const recalls = @import("lane_host_recall.zig");
 const ends = @import("lane_host_end.zig");
 const rows_host = @import("lane_host_rows.zig");
+const injects = @import("lane_host_inject.zig");
 const Allocator = std.mem.Allocator;
 const Id = api.Id;
 const Request = api.Request;
@@ -104,6 +105,7 @@ pub const LaneHost = struct {
     pub fn init(gpa: Allocator, io: std.Io, core: *lanes.Engine, info_: Info) LaneHost {
         var enforced = info_;
         enforced.loop_guard = true;
+        enforced.inject = true;
         return .{ .gpa = gpa, .io = io, .core = core, .info_ = enforced };
     }
 
@@ -256,6 +258,7 @@ pub const LaneHost = struct {
         const s = &job.stream;
         const stats: Stats = if (job.started) .{ .rounds = s.rounds, .drafted = s.drafted, .accepted = s.accepted, .min_rows = s.min_rows, .loop_period = s.loop_period, .prefill_seconds = if (job.prefilled) |done| @as(f64, @floatFromInt(@as(i64, @intCast(@max(0, done - job.began))))) / 1e9 else null } else .{};
         const told = if (job.started) recalls.finished(h, job, reason, stats) else stats;
+        if (job.request.inject) |i| i.end(); // before `finished`: the server reads what went in once it ends
         emit(job, .{ .finished = .{ .reason = reason, .stats = told, .message = message } });
         if (job.started) {
             if (s.grammar) |g| g.deinit(h.gpa);
@@ -311,6 +314,7 @@ pub const LaneHost = struct {
             .id = "request",
             .prompt = r.prompt,
             .max_new = r.max_tokens,
+            .room = injects.room(r),
             .eos = r.eos,
             .sampling = r.sampling,
             .drafts = r.drafts,
@@ -531,6 +535,10 @@ pub const LaneHost = struct {
                 continue;
             }
             h.unlock();
+            injects.take(h) catch |e| {
+                ends.failAll(h, @errorName(e));
+                continue;
+            };
             h.core.step() catch |e| {
                 ends.failAll(h, @errorName(e));
                 continue;
