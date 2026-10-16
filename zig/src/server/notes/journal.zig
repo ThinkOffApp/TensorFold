@@ -3,6 +3,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const json = @import("../json.zig");
 const write = @import("write.zig");
+const tmp_file = @import("journal_tmp.zig");
 const Record = write.Record;
 const Value = json.Value;
 const Allocator = std.mem.Allocator;
@@ -21,6 +22,9 @@ pub const Journal = struct {
     size: u64 = 0,
     truncated: u64 = 0, // bytes of a torn last line cut at open
     next_source: u64 = 1, // the header's: an erase rewrites it, so an erased write's source is never used again
+    stale: usize = 0, // temporary files of a rewrite that died before its rename, removed at open (lock held)
+    hook: ?*const fn (ctx: *anyopaque, tmp: [:0]const u8) void = null, // tests: between a rewrite's sync and rename
+    hook_ctx: *anyopaque = undefined,
 
     pub fn deinit(j: *Journal) void {
         if (j.fd >= 0) _ = std.c.close(j.fd);
@@ -31,10 +35,7 @@ pub const Journal = struct {
     pub fn open(gpa: Allocator, a: Allocator, path: []const u8, snapshot_sha: [64]u8, records: *std.ArrayList(Record), problem: *[]const u8) OpenError!Journal {
         var j: Journal = .{ .gpa = gpa, .path = try gpa.dupeSentinel(u8, path, 0), .snapshot_sha = snapshot_sha };
         errdefer j.deinit();
-        const tmp = try std.mem.concatWithSentinel(gpa, u8, &.{ path, ".tmp" }, 0);
-        defer gpa.free(tmp);
-        _ = std.c.unlink(tmp); // a rewrite that never reached its rename: the journal itself still holds every write
-        const fd = std.c.open(j.path, .{ .ACCMODE = .RDWR, .CLOEXEC = true }, @as(std.c.mode_t, 0o600));
+        const fd = std.c.open(j.path, .{ .ACCMODE = .RDWR, .NOFOLLOW = true, .CLOEXEC = true }, @as(std.c.mode_t, 0o600));
         if (fd < 0) {
             if (std.c.errno(fd) == .NOENT) return j; // no write yet: the file comes with the first one
             problem.* = "the notes journal exists but cannot be opened for reading and writing";
@@ -45,6 +46,8 @@ pub const Journal = struct {
             problem.* = "another process holds the notes journal: one server per snapshot";
             return error.Locked;
         }
+        // ours now: a temporary file left by a rewrite that never reached its rename is stale (the journal holds all)
+        j.stale = try tmp_file.cleanStale(a, path);
         const text = try readAll(a, fd, problem); // in `a`: the records' strings are slices of it
         var end = text.len;
         if (end > 0 and text[end - 1] != '\n') {
@@ -94,17 +97,13 @@ pub const Journal = struct {
         j.size += line.len;
     }
 
-    /// The journal as `records` alone (an erase): written whole beside it, synced, then renamed over it.
+    /// The journal as `records` alone (an erase): written whole to a new file of our own, synced, renamed over it.
     pub fn rewrite(j: *Journal, a: Allocator, records: []const Record, next_source: u64) IoError!void {
-        const tmp = try std.mem.concatWithSentinel(a, u8, &.{ j.path, ".tmp" }, 0);
-        defer a.free(tmp);
-        const fd = std.c.open(tmp, .{ .ACCMODE = .RDWR, .CREAT = true, .TRUNC = true, .CLOEXEC = true }, @as(std.c.mode_t, 0o600));
-        if (fd < 0) return error.JournalIo;
+        const t = try tmp_file.create(a, j.path);
+        defer a.free(t.path);
         var ok = false;
-        defer if (!ok) {
-            _ = std.c.close(fd);
-            _ = std.c.unlink(tmp);
-        };
+        defer if (!ok) tmp_file.removeOwn(t);
+        const fd = t.fd;
         const head = try header(a, j.snapshot_sha, next_source);
         defer a.free(head);
         var size: u64 = 0;
@@ -118,7 +117,8 @@ pub const Journal = struct {
         }
         if (!fullSync(fd)) return error.JournalIo;
         if (std.c.flock(fd, std.c.LOCK.EX | std.c.LOCK.NB) != 0) return error.JournalIo;
-        if (std.c.rename(tmp, j.path) != 0) return error.JournalIo;
+        if (j.hook) |h| h(j.hook_ctx, t.path);
+        if (std.c.rename(t.path, j.path) != 0) return error.JournalIo;
         ok = true;
         syncDir(j.path);
         if (j.fd >= 0) _ = std.c.close(j.fd);
@@ -129,7 +129,7 @@ pub const Journal = struct {
 
     /// The file with its header, made at the first write.
     fn create(j: *Journal, a: Allocator) IoError!void {
-        const fd = std.c.open(j.path, .{ .ACCMODE = .RDWR, .CREAT = true, .EXCL = true, .CLOEXEC = true }, @as(std.c.mode_t, 0o600));
+        const fd = std.c.open(j.path, .{ .ACCMODE = .RDWR, .CREAT = true, .EXCL = true, .NOFOLLOW = true, .CLOEXEC = true }, @as(std.c.mode_t, 0o600));
         if (fd < 0) return error.JournalIo;
         if (std.c.flock(fd, std.c.LOCK.EX | std.c.LOCK.NB) != 0) {
             _ = std.c.close(fd);
