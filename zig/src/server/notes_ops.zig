@@ -191,6 +191,7 @@ pub fn erase(s: *Store, a: Allocator, id: u32, why: *Refusal) Error!Erased {
     old_log.deinit();
     old.deinit();
     s.sweep();
+    s.text.forget(); // the tokenizer's kept encodes: a block or a prompt that quoted it
     return .{ .removed = removed.items, .moved = moved.items };
 }
 

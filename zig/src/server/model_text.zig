@@ -38,7 +38,14 @@ pub const Text = struct {
         special: ?*const fn (ctx: *anyopaque, id: u32) bool = null,
         /// A token's own bytes (a partial UTF-8 sequence kept whole) for logprob rows; null: the tokenizer can't say.
         token_bytes: ?*const fn (ctx: *anyopaque, a: Allocator, id: u32) Allocator.Error!?[]u8 = null,
+        /// Drops (zeroed) every text and id the tokenizer keeps between encodes; null: it keeps none.
+        forget: ?*const fn (ctx: *anyopaque) void = null,
     };
+
+    /// The tokenizer's kept encodes dropped, as an erased note's text must be (LLWZ 4.5: caches included).
+    pub fn forget(t: Text) void {
+        if (t.vtable.forget) |f| f(t.ctx);
+    }
 
     pub fn encode(t: Text, a: Allocator, text: []const u8, add_special: bool) Error![]u32 {
         return t.vtable.encode(t.ctx, a, text, add_special);

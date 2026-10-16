@@ -145,6 +145,7 @@ test "an erase leaves the note's text in no live allocation, file or journal, an
     const erased = try rig.request(r.srv, a, "DELETE", try std.fmt.allocPrint(a, "/v1/notes/{d}?erase=true", .{id}), null);
     try testing.expectEqual(@as(u16, 200), erased.status);
     try testing.expectEqual(@as(usize, 3), erased.value.get("removed").?.array.len); // its write, the same-as, the take-back
+    try testing.expectEqual(@as(u32, 1), r.text.forgot); // the tokenizer dropped its kept encodes (a block quoted it)
     const after = try look(&tracking, r, a, own.items, own_keys.items);
     try testing.expectEqual(Where{ .memory = 0, .journal = false, .files = 0, .ids = 0 }, after);
     // what stays is what never teaching it gives: the other zebra note, current, and the questions still answer

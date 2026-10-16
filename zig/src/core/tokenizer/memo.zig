@@ -69,6 +69,21 @@ pub const Memo = struct {
         m.held += size;
     }
 
+    /// Every kept segment dropped, its text and ids zeroed first (an erased note's text must not outlive the erase).
+    pub fn clear(m: *Memo) void {
+        m.lock();
+        defer m.unlock();
+        var it = m.map.valueIterator();
+        while (it.next()) |e| {
+            std.crypto.secureZero(u8, e.text);
+            std.crypto.secureZero(u32, e.ids);
+            free(m.gpa, e.*);
+        }
+        m.map.clearRetainingCapacity();
+        m.order.clearRetainingCapacity();
+        m.held = 0;
+    }
+
     fn lock(m: *Memo) void {
         while (m.busy.cmpxchgWeak(false, true, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
     }
@@ -85,6 +100,24 @@ fn key(text: []const u8, first: bool) u64 {
 fn free(gpa: Allocator, e: Entry) void {
     gpa.free(e.text);
     gpa.free(e.ids);
+}
+
+test "clear drops every kept segment, zeroed, and the memo keeps working" {
+    const gpa = std.testing.allocator;
+    const m = try Memo.create(gpa, 1 << 10);
+    defer m.destroy();
+    var ids: std.ArrayList(u32) = .empty;
+    defer ids.deinit(gpa);
+    m.put("My zebra is called Quixotic Zanzibar.", false, &.{ 7, 8, 9 });
+    const kept = m.map.get(key("My zebra is called Quixotic Zanzibar.", false)).?.text;
+    try std.testing.expect(try m.append("My zebra is called Quixotic Zanzibar.", false, gpa, &ids));
+    m.clear();
+    try std.testing.expectEqual(@as(usize, 0), m.map.count());
+    try std.testing.expectEqual(@as(usize, 0), m.held);
+    try std.testing.expect(!try m.append("My zebra is called Quixotic Zanzibar.", false, gpa, &ids));
+    _ = kept; // freed by clear (its bytes were zeroed first; the testing allocator checks it was freed once)
+    m.put("abcd", false, &.{1});
+    try std.testing.expect(try m.append("abcd", false, gpa, &ids));
 }
 
 test "a kept segment comes back only for the same text and first flag, and the oldest goes past the cap" {

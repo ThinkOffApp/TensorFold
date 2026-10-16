@@ -211,6 +211,7 @@ pub const HfText = struct {
             .template_source = sourceFn,
             .special = specialFn,
             .token_bytes = tokenBytesFn,
+            .forget = forgetFn,
         } };
     }
 
@@ -246,6 +247,10 @@ pub const HfText = struct {
 
     fn tokenBytesFn(ctx: *anyopaque, a: Allocator, id: u32) Allocator.Error!?[]u8 {
         return self(ctx).tok.tokenBytes(a, id) catch |e| if (e == error.OutOfMemory) error.OutOfMemory else null;
+    }
+
+    fn forgetFn(ctx: *anyopaque) void {
+        if (self(ctx).tok.memo) |m| m.clear();
     }
 
     fn vocabFn(ctx: *anyopaque) u32 {
