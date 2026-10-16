@@ -161,7 +161,7 @@ fn differing(store: *notes_route.Store, text: model_text.Text, answered: *usize)
         try testing.expectEqual(c.get("past_read").?.bool, if (given) |g| g.bool else past.isPast(q));
         var ex: std.ArrayList(u32) = .empty;
         for (c.get("exclude").?.array) |x| try ex.append(a, @intCast(x.int64().?));
-        const cap: u32 = if (c.field("cap")) |x| @intCast(x.int64().?) else store.idx.settings.cap;
+        const cap: u32 = if (c.field("cap")) |x| @intCast(x.int64().?) else store.settings().cap;
         const qids = try text.encode(a, q, false);
         const got = try store.retrieve(a, text, qids, c.get("past_read").?.bool, cap, ex.items);
         var same = got.tokens == @as(usize, @intCast(c.get("tokens").?.int64().?)) and got.candidates == c.get("candidates").?.int64().?;
@@ -346,7 +346,7 @@ fn storeRetrieve(gpa: std.mem.Allocator, text: model_text.Text, qids: []const u3
     defer store.deinit();
     var arena = std.heap.ArenaAllocator.init(testing.allocator); // the request's own memory, freed with the request
     defer arena.deinit();
-    for (0..2) |_| _ = try store.retrieve(arena.allocator(), text, qids, false, store.idx.settings.cap, &.{ 7, 11 });
+    for (0..2) |_| _ = try store.retrieve(arena.allocator(), text, qids, false, store.settings().cap, &.{ 7, 11 });
 }
 
 test "the server's store leaks nothing when any one of its long-lived allocations fails" {

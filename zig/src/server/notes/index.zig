@@ -1,8 +1,8 @@
-//! Vendored from LLWZ notes-zig a81d1a9 (zig/notes/src/notes.zig; MIT, (c) 2026 ThinkOff): a note snapshot's index.
+//! Vendored from LLWZ notes-zig a81d1a9 (zig/notes/src/notes.zig; MIT, (c) 2026 ThinkOff): the notes' index.
 const std = @import("std");
 const builtin = @import("builtin");
-const json = @import("../json.zig");
-const Value = json.Value;
+const model_mod = @import("model.zig");
+const Model = model_mod.Model;
 const Allocator = std.mem.Allocator;
 
 /// A log function, called through a pointer.
@@ -136,6 +136,8 @@ pub const Index = struct {
     phrase_max: usize,
     n_cur: u32,
     n_hist: u32,
+    owned: ?*Model = null, // the model a loaded snapshot made, freed with the index
+    ver: u64 = 0, // the store's version number for this build (0: a loaded snapshot)
 
     pub fn notes(self: *const Index) usize {
         return self.note_id.len;
@@ -150,60 +152,20 @@ pub const Index = struct {
     pub fn deinit(self: *Index) void {
         const gpa = self.arena.child_allocator;
         self.arena.deinit();
+        if (self.owned) |m| m.deinit();
         gpa.destroy(self);
     }
 
     /// Reads a snapshot (notes_export.py's JSON) and builds the index, checking notes and distinct n-grams per view.
     pub fn load(gpa: Allocator, text: []const u8) LoadError!*Index {
-        var parse_arena = std.heap.ArenaAllocator.init(gpa);
-        defer parse_arena.deinit();
-        const s = switch (try json.parse(parse_arena.allocator(), text)) {
-            .ok => |v| v,
-            .err => return error.BadSnapshot,
-        };
-        if (!std.mem.eql(u8, try str(s, "format"), "lw-notes-snapshot/1")) return error.BadSnapshot;
-        const vocab = try need(s, "vocab");
-        if (vocab.get("dense")) |d| if (d.truthy()) return error.Unsupported; // a stand-in tokenizer's own numbering
-
-        const self = try gpa.create(Index);
-        errdefer gpa.destroy(self);
-        self.arena = std.heap.ArenaAllocator.init(gpa);
-        errdefer self.arena.deinit();
-        const a = self.arena.allocator();
-        self.log = libmLog();
-        try self.readSettings(try need(s, "settings"));
-        self.head = try a.dupe(u8, try str(s, "head"));
-        self.cur_title = try a.dupe(u8, try str(s, "cur_title"));
-        self.hist_title = try a.dupe(u8, try str(s, "hist_title"));
-        const fixed = try need(s, "fixed");
-        self.fx_head = try uint(fixed, "head");
-        self.fx_cur = try uint(fixed, "current");
-        self.fx_hist = try uint(fixed, "history");
-        self.fx_nl = try uint(fixed, "nl");
-        const tok = s.get("tokenizer");
-        self.tokenizer_sha256 = try a.dupe(u8, if (tok) |t| t.strField("sha256") orelse "" else "");
-
-        // the vocabulary: every token id's key and wordy flag
-        const size = try uint(vocab, "size");
-        const vk = try arr(vocab, "key");
-        const vw_text = try str(vocab, "wordy");
-        if (vk.len != size or vw_text.len != size) return error.BadSnapshot;
-        const vkey = try a.alloc(u32, size);
-        for (vk, vkey) |k, *slot| slot.* = try asU32(k);
-        self.vkey = vkey;
-        const vw = try a.alloc(bool, size);
-        for (vw_text, vw) |c, *slot| slot.* = c == '1';
-        self.vwordy = vw;
-
-        const entities = try arr(s, "entities");
-        const pairs = try arr(s, "pairs");
-        const raw = try readNotes(parse_arena.allocator(), try arr(s, "notes"), entities.len, pairs.len);
-        try self.placeNotes(gpa, raw, try need(s, "n"));
-        try self.readGroups(entities, pairs);
-        self.phrases = .empty;
-        self.phrase_max = 0;
-        try self.readPhrases(try arr(s, "phrases"), entities.len);
-        try self.buildPostings(gpa, raw);
+        const m = try model_mod.parse(gpa, text);
+        errdefer m.deinit();
+        const self = try build(gpa, m);
+        self.owned = m;
+        errdefer {
+            self.owned = null;
+            self.deinit();
+        }
         var gc: u32 = 0;
         var gh: u32 = 0;
         var it = self.grams.valueIterator();
@@ -211,36 +173,45 @@ pub const Index = struct {
             if (p.cur_len > 0) gc += 1;
             if (p.hist_len > 0) gh += 1;
         }
-        const grams = try need(s, "grams");
-        if (gc != try uint(grams, "current") or gh != try uint(grams, "history")) return error.BadSnapshot;
+        if (gc != m.grams_current or gh != m.grams_history) return error.BadSnapshot;
         return self;
     }
 
-    fn readSettings(self: *Index, js: Value) LoadError!void {
-        const n_min = try uint(js, "n_min");
-        const n_max = try uint(js, "n_max");
-        if (n_min < 1 or n_min > n_max) return error.BadSnapshot;
-        if (n_max > max_n) return error.Unsupported;
-        const hop = try str(js, "hop");
-        self.settings = .{
-            .cap = try uint(js, "cap"),
-            .n_min = n_min,
-            .n_max = n_max,
-            .fold = try boolean(js, "fold"),
-            .hop = if (std.mem.eql(u8, hop, "subject")) .subject else if (std.mem.eql(u8, hop, "subject+value"))
-                .subject_value
-            else if (std.mem.eql(u8, hop, "none")) .none else return error.BadSnapshot,
-            .hop_weight = try num(js, "hop_weight"),
-            .hop_from = try uint(js, "hop_from"),
-            .hop_history = try boolean(js, "hop_history"),
-            .min_rel = try num(js, "min_rel"),
-            .subject = try num(js, "subject"),
-            .punct = try boolean(js, "punct"),
-        };
+    /// The index of a model's notes, as a snapshot of them would load; the model must outlive it (it reads its vocab).
+    pub fn build(gpa: Allocator, m: *const Model) LoadError!*Index {
+        const self = try gpa.create(Index);
+        errdefer gpa.destroy(self);
+        self.* = undefined;
+        self.arena = std.heap.ArenaAllocator.init(gpa);
+        errdefer self.arena.deinit();
+        self.owned = null;
+        self.ver = 0;
+        const a = self.arena.allocator();
+        self.log = libmLog();
+        self.settings = m.settings;
+        self.head = m.head;
+        self.cur_title = m.cur_title;
+        self.hist_title = m.hist_title;
+        self.fx_head = m.fixed.head;
+        self.fx_cur = m.fixed.current;
+        self.fx_hist = m.fixed.history;
+        self.fx_nl = m.fixed.nl;
+        self.tokenizer_sha256 = m.tokenizer_sha256;
+        self.vkey = m.vkey;
+        self.vwordy = m.vwordy;
+        const raw = try a.alloc(Raw, m.notes.items.len);
+        for (m.notes.items, raw) |n, *r| r.* = .{ .id = n.id, .state = n.state, .entity = n.entity, .pair = n.pair, .value_ent = n.value_ent, .told = n.told, .line = n.line, .cost = n.cost, .tokens = n.tokens };
+        try self.placeNotes(gpa, raw);
+        try self.groupsOf(m);
+        self.phrases = .empty;
+        self.phrase_max = 0;
+        try self.phrasesOf(m);
+        try self.buildPostings(gpa, raw);
+        return self;
     }
 
     /// The notes by place, with Python's tie order (-told, id) and the least a line can add.
-    fn placeNotes(self: *Index, gpa: Allocator, raw: []const Raw, counts: Value) LoadError!void {
+    fn placeNotes(self: *Index, gpa: Allocator, raw: []const Raw) LoadError!void {
         const a = self.arena.allocator();
         const n = raw.len;
         const note_id = try a.alloc(u32, n);
@@ -270,7 +241,6 @@ pub const Index = struct {
             line[k] = try a.dupe(u8, x.line);
             cost[k] = x.cost;
         }
-        if (n_cur != try uint(counts, "current") or n_hist != try uint(counts, "history")) return error.BadSnapshot;
         const by = try gpa.alloc(u32, n);
         defer gpa.free(by);
         for (by, 0..) |*x, k| x.* = @intCast(k);
@@ -303,41 +273,56 @@ pub const Index = struct {
     }
 
     /// O.ent_cur, O.ent_keys and O.by_key, as note places.
-    fn readGroups(self: *Index, entities: []const Value, pairs: []const Value) LoadError!void {
+    fn groupsOf(self: *Index, m: *const Model) LoadError!void {
         const a = self.arena.allocator();
-        const ent_cur = try a.alloc([]const u32, entities.len);
-        const ent_keys = try a.alloc([]const u32, entities.len);
-        for (entities, 0..) |e, k| {
-            ent_cur[k] = try self.places(try arr(e, "cur"));
-            const keys = try u32s(a, try arr(e, "keys"));
-            for (keys) |p| if (p >= pairs.len) return error.BadSnapshot;
-            ent_keys[k] = keys;
+        const ne = m.entities.items.len;
+        const counts = try a.alloc(u32, ne);
+        @memset(counts, 0);
+        const kcounts = try a.alloc(u32, ne);
+        @memset(kcounts, 0);
+        for (self.state, self.entity) |st, e| if (st == .current) {
+            counts[e] += 1;
+        };
+        for (m.pairs.items) |p| kcounts[p.entity] += 1;
+        const ent_cur = try a.alloc([]const u32, ne);
+        const ent_keys = try a.alloc([]const u32, ne);
+        for (0..ne) |e| {
+            const cur = try a.alloc(u32, counts[e]);
+            var w: usize = 0;
+            for (self.state, self.entity, 0..) |st, x, k| if (st == .current and x == e) {
+                cur[w] = @intCast(k);
+                w += 1;
+            };
+            ent_cur[e] = cur;
+            const keys = try a.alloc(u32, kcounts[e]);
+            w = 0;
+            for (m.pairs.items, 0..) |p, k| if (p.entity == e) {
+                keys[w] = @intCast(k);
+                w += 1;
+            };
+            ent_keys[e] = keys;
         }
-        const pair_notes = try a.alloc([]const u32, pairs.len);
-        for (pairs, 0..) |p, k| pair_notes[k] = try self.places(try arr(p, "ids"));
+        const pair_notes = try a.alloc([]const u32, m.pairs.items.len);
+        for (m.pairs.items, pair_notes) |p, *slot| {
+            const out = try a.alloc(u32, p.ids.items.len);
+            for (p.ids.items, out) |id, *place| place.* = self.placeOfId(id) orelse return error.BadSnapshot;
+            slot.* = out;
+        }
+        for (self.pair) |p| if (p >= pair_notes.len) return error.BadSnapshot;
+        for (self.entity) |e| if (e >= ne) return error.BadSnapshot;
         self.ent_cur = ent_cur;
         self.ent_keys = ent_keys;
         self.pair_notes = pair_notes;
     }
 
-    fn places(self: *Index, ids: []const Value) LoadError![]const u32 {
-        const out = try self.arena.allocator().alloc(u32, ids.len);
-        for (ids, out) |v, *slot| slot.* = self.placeOfId(try asU32(v)) orelse return error.BadSnapshot;
-        return out;
-    }
-
     /// Entity phrases: only 2 to 8 keys can ever match (subjects() looks at those lengths).
-    fn readPhrases(self: *Index, phrases: []const Value, n_entities: usize) LoadError!void {
+    fn phrasesOf(self: *Index, m: *const Model) LoadError!void {
         const a = self.arena.allocator();
-        var keys: [max_phrase]u32 = undefined;
-        for (phrases) |p| {
-            const entity = try uint(p, "entity");
-            if (entity >= n_entities) return error.BadSnapshot;
-            const ks = try arr(p, "keys");
-            if (ks.len < 2 or ks.len > max_phrase) continue;
-            for (ks, 0..) |k, j| keys[j] = try asU32(k);
-            try self.phrases.put(a, packPhrase(keys[0..ks.len]), entity);
-            self.phrase_max = @max(self.phrase_max, ks.len);
+        for (m.phrases.items) |p| {
+            if (p.entity >= m.entities.items.len) return error.BadSnapshot;
+            if (p.keys.len < 2 or p.keys.len > max_phrase) continue;
+            try self.phrases.put(a, packPhrase(p.keys), p.entity);
+            self.phrase_max = @max(self.phrase_max, p.keys.len);
         }
     }
 
@@ -422,72 +407,6 @@ pub const Index = struct {
         }
     }
 };
-
-/// The snapshot's notes, checked against its entity and pair counts.
-fn readNotes(a: Allocator, list: []const Value, n_entities: usize, n_pairs: usize) LoadError![]Raw {
-    const out = try a.alloc(Raw, list.len);
-    for (list, out) |x, *r| {
-        const st = try uint(x, "state");
-        const entity = try uint(x, "entity");
-        const pair = try uint(x, "pair");
-        const value_ent = try int(x, "value_ent");
-        if (entity >= n_entities or pair >= n_pairs or value_ent < -1 or value_ent >= @as(i64, @intCast(n_entities))) return error.BadSnapshot;
-        r.* = .{
-            .id = try uint(x, "id"),
-            .state = std.enums.fromInt(State, st) orelse return error.BadSnapshot,
-            .entity = entity,
-            .pair = pair,
-            .value_ent = @intCast(value_ent),
-            .told = try int(x, "told"),
-            .line = try str(x, "line"),
-            .cost = try uint(x, "cost"),
-            .tokens = try u32s(a, try arr(x, "tokens")),
-        };
-    }
-    return out;
-}
-
-fn need(v: Value, key: []const u8) LoadError!Value {
-    return v.get(key) orelse error.BadSnapshot;
-}
-
-fn int(v: Value, key: []const u8) LoadError!i64 {
-    return (try need(v, key)).int64() orelse error.BadSnapshot;
-}
-
-fn asU32(v: Value) LoadError!u32 {
-    const x = v.int64() orelse return error.BadSnapshot;
-    return std.math.cast(u32, x) orelse error.BadSnapshot;
-}
-
-fn uint(v: Value, key: []const u8) LoadError!u32 {
-    return asU32(try need(v, key));
-}
-
-fn num(v: Value, key: []const u8) LoadError!f64 {
-    const x = try need(v, key);
-    if (x == .bool) return error.BadSnapshot;
-    return x.float64() orelse error.BadSnapshot;
-}
-
-fn boolean(v: Value, key: []const u8) LoadError!bool {
-    const x = try need(v, key);
-    return if (x == .bool) x.bool else error.BadSnapshot;
-}
-
-fn str(v: Value, key: []const u8) LoadError![]const u8 {
-    return (try need(v, key)).str() orelse error.BadSnapshot;
-}
-
-fn arr(v: Value, key: []const u8) LoadError![]Value {
-    return (try need(v, key)).items() orelse error.BadSnapshot;
-}
-
-fn u32s(a: Allocator, list: []const Value) LoadError![]u32 {
-    const out = try a.alloc(u32, list.len);
-    for (list, out) |v, *slot| slot.* = try asU32(v);
-    return out;
-}
 
 /// Reads a snapshot file and loads it.
 pub fn loadFile(gpa: Allocator, io: std.Io, path: []const u8) !*Index {

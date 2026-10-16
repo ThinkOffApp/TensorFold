@@ -6,164 +6,18 @@ const messages = @import("messages.zig");
 const model_text = @import("model_text.zig");
 const log = @import("log.zig");
 const clock = @import("clock.zig");
-const index = @import("notes/index.zig");
-const lookup = @import("notes/lookup.zig");
 const past_mod = @import("notes/past.zig");
 const Value = json.Value;
 const Cx = errors.Cx;
 const Allocator = std.mem.Allocator;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
-/// How a snapshot's tokenizer was checked: the tokenizer.json SHA-256 it names, or its vocabulary size only.
-pub const Check = enum { sha256, vocabulary_only };
-
-/// The most of tokenizer.json the startup check reads (the grammar compiler reads it under the same limit).
-pub const tokenizer_limit: usize = 256 << 20;
-
-/// One owner's notes (a snapshot from LLWZ's zengine/notes_export.py), read-only, and lookup scratch for its threads.
-pub const Store = struct {
-    gpa: Allocator,
-    io: std.Io,
-    idx: *index.Index,
-    mutex: std.Io.Mutex = .init,
-    free: std.ArrayList(*lookup.Scratch) = .empty,
-    load_ms: f64 = 0,
-    check: Check = .vocabulary_only,
-
-    /// Loads the snapshot at `path` for a model whose tokenizer is `text` (its tokenizer.json lies in `model_dir`).
-    pub fn open(gpa: Allocator, io: std.Io, path: []const u8, text: model_text.Text, model_dir: []const u8, problem: *[]const u8) !*Store {
-        return openLimited(gpa, io, path, text, model_dir, tokenizer_limit, problem);
-    }
-
-    /// open() with the tokenizer.json read limit given; a named hash passes only when the model's is read and equal.
-    pub fn openLimited(gpa: Allocator, io: std.Io, path: []const u8, text: model_text.Text, model_dir: []const u8, limit: usize, problem: *[]const u8) !*Store {
-        const t0 = clock.nowNs(io);
-        const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .unlimited) catch |e| {
-            problem.* = "the snapshot file cannot be read";
-            return e;
-        };
-        defer gpa.free(bytes);
-        const s = try load(gpa, io, bytes, text, problem);
-        errdefer s.deinit();
-        if (s.idx.tokenizer_sha256.len > 0) {
-            const sha = try tokenizerSha(gpa, io, model_dir, limit, problem);
-            if (!std.mem.eql(u8, &sha, s.idx.tokenizer_sha256)) {
-                problem.* = "the snapshot names a tokenizer.json SHA-256 that is not this model's: it was exported with another tokenizer";
-                return error.TokenizerMismatch;
-            }
-            s.check = .sha256;
-        }
-        s.load_ms = clock.seconds(clock.nowNs(io) - t0) * 1e3;
-        return s;
-    }
-
-    /// The startup log line: what was loaded, and how its tokenizer was checked.
-    pub fn startupLine(s: *const Store, buf: []u8, path: []const u8) []const u8 {
-        const ix = s.idx;
-        const checked = switch (s.check) {
-            .sha256 => "tokenizer checked: the model's tokenizer.json SHA-256 equals the snapshot's",
-            .vocabulary_only => "tokenizer checked by vocabulary size only (vocabulary-only compatibility): the snapshot names no tokenizer.json SHA-256",
-        };
-        return std.fmt.bufPrint(buf, "notes: {d} notes ({d} current) from {s}, cap {d}, loaded in {d:.1} ms; {s}; a chat request sends \"notes\": true to have them looked up", .{ ix.notes(), ix.n_cur, path, ix.settings.cap, s.load_ms, checked }) catch buf;
-    }
-
-    /// A snapshot's JSON text as a store, checked against the model's vocabulary size.
-    pub fn load(gpa: Allocator, io: std.Io, bytes: []const u8, text: model_text.Text, problem: *[]const u8) !*Store {
-        const idx = index.Index.load(gpa, bytes) catch |e| {
-            problem.* = switch (e) {
-                error.Unsupported => "the snapshot needs what this lookup does not do (n_max over 4, or a stand-in tokenizer)",
-                error.OutOfMemory => "out of memory",
-                error.BadSnapshot => "the file is not a valid lw-notes-snapshot/1 snapshot",
-            };
-            return e;
-        };
-        errdefer idx.deinit();
-        if (idx.vkey.len != text.vocabSize()) {
-            problem.* = "the snapshot's vocabulary is not the model tokenizer's size";
-            return error.BadSnapshot;
-        }
-        const s = try gpa.create(Store);
-        s.* = .{ .gpa = gpa, .io = io, .idx = idx };
-        return s;
-    }
-
-    pub fn deinit(s: *Store) void {
-        for (s.free.items) |sc| {
-            sc.deinit();
-            s.gpa.destroy(sc);
-        }
-        s.free.deinit(s.gpa);
-        s.idx.deinit();
-        s.gpa.destroy(s);
-    }
-
-    fn take(s: *Store) Allocator.Error!*lookup.Scratch {
-        s.mutex.lockUncancelable(s.io);
-        const kept = s.free.pop();
-        s.mutex.unlock(s.io);
-        if (kept) |sc| return sc;
-        const sc = try s.gpa.create(lookup.Scratch);
-        errdefer s.gpa.destroy(sc);
-        sc.* = try lookup.Scratch.init(s.gpa, s.idx);
-        return sc;
-    }
-
-    fn give(s: *Store, sc: *lookup.Scratch) void {
-        s.mutex.lockUncancelable(s.io);
-        defer s.mutex.unlock(s.io);
-        s.free.append(s.gpa, sc) catch {
-            sc.deinit();
-            s.gpa.destroy(sc);
-        };
-    }
-
-    /// NoteStore.retrieve(owner, question, cap, past, exclude) from the question's ids, fit() counted by `text`.
-    pub fn retrieve(s: *Store, a: Allocator, text: model_text.Text, qids: []const u32, past: bool, cap: u32, exclude: []const u32) Failure!Found {
-        const sc = try s.take();
-        defer s.give(sc);
-        const io = s.io;
-        const t0 = clock.nowNs(io);
-        const packed_notes = try lookup.lookup(s.idx, sc, qids, past, cap, exclude);
-        const chosen = try a.dupe(u32, packed_notes.chosen);
-        var shown = try lookup.render(s.idx, sc, chosen);
-        const t1 = clock.nowNs(io);
-        // fit(): the whole block counted by the model's tokenizer; the lowest ranked note goes while it is over the cap
-        var n = chosen.len;
-        var tokens: usize = 0;
-        while (n > 0) {
-            tokens = (text.encode(a, shown.block, false) catch return error.Tokenizer).len;
-            if (tokens <= cap) break;
-            n -= 1;
-            tokens = 0;
-            shown = try lookup.render(s.idx, sc, chosen[0..n]);
-        }
-        const t2 = clock.nowNs(io);
-        return .{
-            .ids = try a.dupe(u32, shown.ids),
-            .block = try a.dupe(u8, shown.block),
-            .tokens = tokens,
-            .pack_tokens = packed_notes.tokens,
-            .dropped = chosen.len - n,
-            .candidates = packed_notes.candidates,
-            .lookup_ns = t1 - t0,
-            .fit_ns = t2 - t1,
-        };
-    }
-};
-
-pub const Failure = error{ OutOfMemory, Tokenizer };
-
-/// What retrieve() found.
-pub const Found = struct {
-    ids: []const u32,
-    block: []const u8, // "" when nothing is retrieved: then no system message goes in
-    tokens: usize, // the block's tokens by the model's tokenizer (fit()'s count)
-    pack_tokens: u32, // pack()'s sum of the parts
-    dropped: usize, // notes fit() took out
-    candidates: u32,
-    lookup_ns: i96,
-    fit_ns: i96,
-};
+const store_mod = @import("notes_store.zig");
+pub const Store = store_mod.Store;
+pub const Check = store_mod.Check;
+pub const tokenizer_limit = store_mod.tokenizer_limit;
+pub const Failure = store_mod.Failure;
+pub const Found = store_mod.Found;
 
 /// What a chat request asks of the notes: its fields "notes", "notes_exclude", "notes_past", "notes_cap", "notes_echo".
 pub const Ask = struct {
@@ -266,29 +120,6 @@ fn hexSha(a: Allocator, text: []const u8) Allocator.Error![]const u8 {
     return a.dupe(u8, &hex);
 }
 
-/// The SHA-256 of `model_dir`/tokenizer.json in hex; a file that cannot be read is an error naming why, never a pass.
-fn tokenizerSha(gpa: Allocator, io: std.Io, model_dir: []const u8, limit: usize, problem: *[]const u8) ![64]u8 {
-    if (model_dir.len == 0) {
-        problem.* = "the snapshot names a tokenizer.json SHA-256, and the server has no model folder to read tokenizer.json from";
-        return error.NoModelDir;
-    }
-    const path = try std.fs.path.join(gpa, &.{ model_dir, "tokenizer.json" });
-    defer gpa.free(path);
-    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(limit)) catch |e| {
-        problem.* = switch (e) {
-            error.FileNotFound => "the snapshot names a tokenizer.json SHA-256, and the model folder has no tokenizer.json to check it against",
-            error.StreamTooLong => "the snapshot names a tokenizer.json SHA-256, and the model's tokenizer.json is over the read limit (256 MiB), so it cannot be checked",
-            error.OutOfMemory => "out of memory reading the model's tokenizer.json",
-            else => "the snapshot names a tokenizer.json SHA-256, and the model's tokenizer.json cannot be read to check it",
-        };
-        return e;
-    };
-    defer gpa.free(bytes);
-    var out: [Sha256.digest_length]u8 = undefined;
-    Sha256.hash(bytes, &out, .{});
-    return std.fmt.bytesToHex(out, .lower);
-}
-
 /// The last user message's text in normalized messages ("" when there is none).
 pub fn lastUser(list: Value) []const u8 {
     if (list != .array) return "";
@@ -325,7 +156,7 @@ pub fn apply(store: *Store, text: model_text.Text, needs_user_after_tool: bool, 
     };
     const t1 = clock.nowNs(io);
     const past = ask.past orelse past_mod.isPast(question);
-    const cap = ask.cap orelse store.idx.settings.cap;
+    const cap = ask.cap orelse store.settings().cap;
     const found = store.retrieve(cx.a, text, qids, past, cap, ask.exclude) catch |e| return switch (e) {
         error.OutOfMemory => error.OutOfMemory,
         error.Tokenizer => cx.other("the tokenizer cannot count the notes block"),
@@ -339,7 +170,7 @@ pub fn apply(store: *Store, text: model_text.Text, needs_user_after_tool: bool, 
         .question_tokens = qids.len,
         .tokenize_ns = t1 - t0,
         .total_ns = clock.nowNs(io) - t0,
-        .in_store = store.idx.notes(),
+        .in_store = found.in_store,
         .echo = ask.echo,
     };
 }

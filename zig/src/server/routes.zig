@@ -12,12 +12,14 @@ const decisions = @import("decisions.zig");
 const status = @import("status_routes.zig");
 const memory = @import("memory_routes.zig");
 const slide = @import("slide.zig");
+const notes_http = @import("notes_http.zig");
 const Server = @import("server.zig").Server;
 const Conn = http_conn.Conn;
 const Allocator = std.mem.Allocator;
 
 pub fn dispatch(srv: *Server, conn: *Conn, a: Allocator) void {
     const m = conn.method;
+    if (notes_http.route(auth.routePath(conn.path))) |r| return notes_http.handle(srv, conn, a, r);
     if (std.mem.eql(u8, m, "GET")) return get(srv, conn, a);
     if (std.mem.eql(u8, m, "POST")) return post(srv, conn, a);
     if (std.mem.eql(u8, m, "DELETE")) {

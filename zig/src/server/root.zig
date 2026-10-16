@@ -72,4 +72,18 @@ test {
     _ = @import("notes_route.zig");
     _ = @import("notes_test.zig");
     _ = @import("notes_startup_test.zig");
+    _ = @import("notes/line.zig");
+    _ = @import("notes/intake.zig");
+    _ = @import("notes/model.zig");
+    _ = @import("notes/write.zig");
+    _ = @import("notes/journal.zig");
+    _ = @import("notes/zero_alloc.zig");
+    _ = @import("notes_store.zig");
+    _ = @import("notes_records.zig");
+    _ = @import("notes_ops.zig");
+    _ = @import("notes_http.zig");
+    _ = @import("notes_rig_test.zig");
+    _ = @import("notes_live_test.zig");
+    _ = @import("notes_http_test.zig");
+    _ = @import("notes_erase_test.zig");
 }
