@@ -499,17 +499,17 @@ test "notes_decode false: one request, the same first prompt, the reply as the e
     try testing.expectEqualStrings("2", decodeOf(dry).get("check_list").?.array[0].get("ids").?.array[0].int);
 }
 
-test "a thinking reply is checked in its answer only: the reasoning's sentences put nothing in" {
+test "a thinking reply is read whole: a name in its reasoning brings the note in before the answer" {
     var r: Rig = .{};
-    try r.init(&.{ "Anna is the sister. Anna drives.</think>I am not sure.", "Hmm.</think>Your sister is Anna. She drives a car.", " She drives a Volvo." });
+    try r.init(&.{ "Her name is Anna. What does she drive?</think>A red car.", " What does she drive? Anna drives a red Volvo.</think>A red Volvo." });
     defer r.deinit();
-    const think = ",\"chat_template_kwargs\":{\"enable_thinking\":true}";
-    const quiet = (try r.ask(&.{"Anna is the sister. Anna drives.</think>I am not sure."}, think)).value;
-    try testing.expectEqual(@as(usize, 0), injected(quiet).len);
-    try testing.expectEqual(@as(usize, 1), r.script.prompts.items.len);
-    const named = (try r.ask(&.{ "Hmm.</think>Your sister is Anna. She drives a car.", " She drives a Volvo." }, think)).value;
-    try testing.expectEqual(@as(usize, 1), injected(named).len);
-    try testing.expectEqualStrings("Your sister is Anna. She drives a Volvo.", content(named));
+    const got = (try r.ask(&.{ "Her name is Anna. What does she drive?</think>A red car.", " What does she drive? Anna drives a red Volvo.</think>A red Volvo." }, ",\"chat_template_kwargs\":{\"enable_thinking\":true}")).value;
+    const inj = injected(got);
+    try testing.expectEqual(@as(usize, 1), inj.len);
+    try testing.expectEqual(@as(i64, @intCast((try r.ids("Her name is Anna.")).len)), inj[0].get("at_token").?.int64().?);
+    try testing.expectEqualStrings("A red Volvo.", content(got));
+    const reasoning = got.get("choices").?.array[0].get("message").?.strField("reasoning_content").?;
+    try testing.expectEqualStrings("Her name is Anna. What does she drive? Anna drives a red Volvo.", reasoning);
 }
 
 test "the request fields: wrong types and the decode fields without notes are refused" {

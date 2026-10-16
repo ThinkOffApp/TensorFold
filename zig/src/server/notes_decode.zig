@@ -114,7 +114,6 @@ pub const Live = struct {
     echo: bool,
     dry: bool = false,
     markers: reply_text.Markers = reply_text.think_markers,
-    thinking: bool = false, // the reply thinks first: only its answer, after the think block, is read
     held: std.ArrayList(u32) = .empty, // every note the model sees: the first block's, then the injected
     late: std.ArrayList(u32) = .empty, // (b): the late block's notes
     block: []const u8, // the first block as the prompt has it now
@@ -155,7 +154,6 @@ pub const Live = struct {
         l.base = base;
         l.first = box;
         l.markers = srv.markers;
-        l.thinking = prepared.thinking or reply_text.isChannel(srv.markers);
         const why: ?[]const u8 = if (base.structure != null) "structured output" else if (base.call != null) "a required tool call" else if (base.logprobs != null or base.prompt_logprobs != null) "logprobs" else if (base.think_budget > 0) "a thinking budget" else if (prepared.input.prompt != null) "not a chat" else null;
         if (why) |w| {
             l.stop(w);
@@ -179,11 +177,8 @@ pub const Live = struct {
         if (!l.due(try srv.text.decode(a, collected[collected.len - 1 ..]))) return null;
         const t0 = clock.nowNs(srv.io);
         defer l.check_ns += clock.nowNs(srv.io) - t0;
-        // the reasoning re-reads the notes block, so its words match the notes it quotes: only the answer counts
-        const text = try srv.text.decode(a, collected);
-        const answer = if (l.thinking) (try reply_text.splitThinking(a, text, false, l.markers)).answer else text;
-        if (std.mem.trim(u8, answer, " \t\r\n").len == 0) return null;
-        const hit = (try l.check(srv.text, a, answer, collected.len)) orelse return null;
+        // a thinking reply is read whole: its reasoning is where it names who the question is about (measured)
+        const hit = (try l.check(srv.text, a, try srv.text.decode(a, collected), collected.len)) orelse return null;
         const t1 = clock.nowNs(srv.io);
         const next = (try l.continuation(srv, a, collected, hit)) orelse return null;
         try l.took(hit, collected.len, next.prompt.len, clock.nowNs(srv.io) - t1);
