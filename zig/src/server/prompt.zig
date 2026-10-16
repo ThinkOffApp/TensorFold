@@ -38,21 +38,51 @@ pub fn renderIds(srv: *Server, cx: *Cx, messages: Value, tools: []const Value, t
         .enable_thinking = thinking,
         .reasoning_effort = if (thinking) effort else null,
     };
-    var ids = render(srv, cx.a, normalized, options, &problem) catch |e| switch (e) {
+    const ids = render(srv, cx.a, normalized, options, &problem) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
         error.Template => return cx.fail(.server, "{s}", .{problem}),
     };
-    if (!thinking and generation and ids.len > 0) {
-        const last = try srv.text.decode(cx.a, ids[ids.len - 1 ..]);
-        if (std.mem.eql(u8, @import("reply_text.zig").pyStrip(last), "<think>")) {
-            const close = srv.text.encode(cx.a, "</think>", false) catch |e| switch (e) {
-                error.OutOfMemory => return error.OutOfMemory,
-                error.Template => &[_]u32{},
-            };
-            if (close.len == 1) ids = try std.mem.concat(cx.a, u32, &.{ ids, close });
-        }
+    return if (!thinking and generation) closeThink(srv, cx, ids) else ids;
+}
+
+/// A generation prompt that ends in ``<think>`` with thinking off gets its ``</think>``.
+fn closeThink(srv: *Server, cx: *Cx, ids: []const u32) errors.Refused![]const u32 {
+    if (ids.len == 0) return ids;
+    const last = try srv.text.decode(cx.a, ids[ids.len - 1 ..]);
+    if (!std.mem.eql(u8, @import("reply_text.zig").pyStrip(last), "<think>")) return ids;
+    const close = srv.text.encode(cx.a, "</think>", false) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.Template => &[_]u32{},
+    };
+    return if (close.len == 1) try std.mem.concat(cx.a, u32, &.{ ids, close }) else ids;
+}
+
+/// The mark an interrupted reply's probe holds: what the template renders after it closes the reply's turn.
+const interrupted = "\u{2063}interrupted";
+
+/// Messages injected into a running reply, as its template writes them: its turn closed, theirs, its turn reopened.
+pub fn injectIds(srv: *Server, cx: *Cx, messages: Value, thinking: bool) errors.Refused![]const u32 {
+    if (messages != .array or messages.array.len == 0) return cx.refuse("messages must be a non-empty list");
+    const list = try cx.a.alloc(Value, messages.array.len + 2);
+    for (list[0..2], [_][]const u8{ "user", "assistant" }, [_][]const u8{ "x", interrupted }) |*m, role, content| {
+        const o = try json.newObject(cx.a);
+        try o.put(cx.a, "role", .{ .string = role });
+        try o.put(cx.a, "content", .{ .string = content });
+        m.* = .{ .object = o };
     }
-    return ids;
+    @memcpy(list[2..], messages.array);
+    const normalized = try messages_mod.toolArguments(cx, try messages_mod.normalizeWith(cx, .{ .array = list }, srv.late_system, srv.needs_user_after_tool, .{}));
+    var problem: []const u8 = "";
+    const text = srv.text.render(cx.a, normalized, .{ .enable_thinking = thinking }, &problem) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.Template => return cx.fail(.server, "{s}", .{problem}),
+    };
+    const at = std.mem.lastIndexOf(u8, text, interrupted) orelse return cx.refuse("this chat template does not render an interrupted reply");
+    const ids = srv.text.encode(cx.a, text[at + interrupted.len ..], false) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.Template => return cx.fail(.server, "the tokenizer cannot encode the injected messages", .{}),
+    };
+    return if (thinking) ids else closeThink(srv, cx, ids);
 }
 
 /// The template's ids for `messages`; with image input, a marker the text spells is ordinary text (images.zig).

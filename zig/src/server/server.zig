@@ -113,6 +113,8 @@ pub const Server = struct {
     cortheon: ?*cortheon.State = null,
     /// Recall's record (--recall), which GET and DELETE /v1/recall read and empty; main opens and closes it.
     recall: ?*api.recall_store.Store = null,
+    /// Running replies that take injected context, by reply id (POST /v1/chat/completions/{id}/inject).
+    injects: @import("inject_routes.zig").Table = .{},
 
     /// Reads what the template and tokenizer decide once: late system role, think markers, efforts, the forced close.
     pub fn init(gpa: Allocator, io: std.Io, engine: api.Engine, text: model_text.Text, config: Config, keys: ?*auth.Store) !*Server {
@@ -153,6 +155,7 @@ pub const Server = struct {
         if (srv.keepalive) |k| k.stop(); // before the engine's queue goes away
         if (srv.grammars) |g| g.close();
         srv.metrics.deinit();
+        srv.injects.deinit(srv.gpa);
         srv.arena.deinit();
         srv.store.deinit();
         srv.slide.deinit();
