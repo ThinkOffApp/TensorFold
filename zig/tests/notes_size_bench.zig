@@ -201,11 +201,10 @@ fn walkIndex(r: *Report, idx: *const index.Index, m: *const model_mod.Model) !vo
     const ne = m.entities.items.len;
     const u = arenaUse(idx.arena);
     const cols = n * (@sizeOf(u32) * 5 + @sizeOf(index.State) + @sizeOf(i64) + @sizeOf(i32));
-    var lines: usize = n * @sizeOf([]const u8);
-    for (idx.line) |l| lines += l.len;
+    const lines: usize = n * @sizeOf([]const u8); // slices of the model's lines: the bytes are counted there
     const id_place = idx.id_place.len * 4;
     try r.add("notes", "index: per-note columns (id, state, told, rank, entity, pair, value, cost)", cols, "measured");
-    try r.add("notes", "index: rendered lines (a second copy)", lines, "measured");
+    try r.add("notes", "index: rendered lines (slices of the model's)", lines, "measured");
     try r.add("notes", "index: note id -> place", id_place, "measured");
     const grams = try mapBytes(@TypeOf(idx.grams), idx.grams.capacity());
     const post = idx.post.len * 4;

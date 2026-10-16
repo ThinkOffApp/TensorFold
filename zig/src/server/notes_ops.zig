@@ -96,6 +96,7 @@ pub fn perform(s: *Store, a: Allocator, ask: Ask, why: *Refusal) Error!Written {
     };
     const shown: ?u32 = if (out.note != 0) out.note else if (out.same_as.len > 0) out.same_as[0] else null;
     const reply: Written = .{ .verdict = out.verdict, .source = source, .told = r.told, .note = if (shown) |id| try view(m, a, m.placeOf(id).?) else null, .retired = out.retired, .same_as = out.same_as };
+    try s.current.garbage.ensureUnusedCapacity(s.gpa, undo.gone.items.len); // the replaced lines, kept by the version it retires
     var entry = try s.log.prepare(r, out, m);
     errdefer records_mod.freeEntry(s.gpa, &entry);
     s.journal.?.append(a, r) catch |e| return switch (e) {
@@ -104,7 +105,7 @@ pub fn perform(s: *Store, a: Allocator, ask: Ask, why: *Refusal) Error!Written {
     };
     // stored: from here the write stands, and nothing below can fail
     applied = false;
-    write.commit(m, &undo);
+    write.commitKeeping(m, &undo, &s.current.garbage);
     s.log.push(entry);
     if (v) |x| {
         s.swap(x, false);

@@ -230,9 +230,18 @@ pub fn revert(m: *Model, undo: *Undo) void {
     undo.pair = null;
 }
 
-/// Frees what apply() replaced: the retired notes' old lines.
+/// Frees what apply() replaced: the retired notes' old lines (no index reads them: at startup, or a model not yet shown).
 pub fn commit(m: *Model, undo: *Undo) void {
     for (undo.gone.items) |s| m.gpa.free(s.line);
+    undo.gone.clearRetainingCapacity();
+    undo.pair = null;
+}
+
+/// commit() for a model an index reads: the old lines go to `keep` (its room reserved), freed with the last version
+/// that can read them.
+pub fn commitKeeping(m: *Model, undo: *Undo, keep: *std.ArrayList([]u8)) void {
+    _ = m;
+    for (undo.gone.items) |s| keep.appendAssumeCapacity(s.line);
     undo.gone.clearRetainingCapacity();
     undo.pair = null;
 }

@@ -24,7 +24,9 @@ pub const Check = enum { sha256, vocabulary_only };
 pub const tokenizer_limit: usize = 256 << 20;
 
 /// One build of the index. A lookup holds it while it reads; the writer frees it once no lookup does.
-pub const Version = struct { idx: *index.Index, readers: std.atomic.Value(u32) = .init(0) };
+/// The index reads the model's lines; a write's replaced lines are kept by the version it retired (`garbage`), and
+/// versions are freed oldest first, so a line is freed only once no version that could read it is left.
+pub const Version = struct { idx: *index.Index, readers: std.atomic.Value(u32) = .init(0), garbage: std.ArrayList([]u8) = .empty };
 
 /// A lookup's scratch in the pool, with the erase epoch it was made in (an older one is freed, not reused).
 const Kept = struct { sc: lookup.Scratch, epoch: u64 };
@@ -205,6 +207,8 @@ pub const Store = struct {
 
     fn freeVersion(g: Allocator, v: *Version) void {
         v.idx.deinit();
+        for (v.garbage.items) |l| g.free(l);
+        v.garbage.deinit(g);
         g.destroy(v);
     }
 
@@ -291,15 +295,13 @@ pub const Store = struct {
         };
     }
 
-    /// Frees the retired versions no lookup holds; with `all`, waits until none holds any (an erase). Never allocates.
+    /// Frees the retired versions no lookup holds, oldest first (a version's garbage may be read by older ones);
+    /// with `all`, waits until none holds any (an erase). Never allocates.
     pub fn reclaim(s: *Store, all: bool) void {
         while (true) {
             s.lock.lockUncancelable(s.io);
             var found: ?*Version = null;
-            for (s.retired.items, 0..) |v, k| if (v.readers.load(.acquire) == 0) {
-                found = s.retired.swapRemove(k);
-                break;
-            };
+            if (s.retired.items.len > 0 and s.retired.items[0].readers.load(.acquire) == 0) found = s.retired.orderedRemove(0);
             const left = s.retired.items.len;
             s.lock.unlock(s.io);
             if (found) |v| {

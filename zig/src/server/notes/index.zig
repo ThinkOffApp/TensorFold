@@ -248,7 +248,7 @@ pub const Index = struct {
             entity[k] = x.entity;
             pair[k] = x.pair;
             value_ent[k] = x.value_ent;
-            line[k] = try a.dupe(u8, x.line);
+            line[k] = x.line; // the model's own: a write frees a replaced line only once no version can read it
             cost[k] = x.cost;
         }
         const by = try gpa.alloc(u32, n);
