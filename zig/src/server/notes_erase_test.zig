@@ -81,7 +81,7 @@ fn look(t: *Tracking, r: *rig.Rig, a: Allocator, own: []const u32, own_keys: []c
     // the ids: in no note's tokens, and their keys in no n-gram and no phrase of the index lookups read now
     const s = r.store();
     const m = s.model;
-    for (m.notes.items) |n| for (n.tokens) |id| if (std.mem.indexOfScalar(u32, own, id) != null) {
+    for (m.notes.items) |*n| for (n.tokens()) |id| if (std.mem.indexOfScalar(u32, own, id) != null) {
         w.ids += 1;
     };
     const v = s.acquire();
@@ -120,10 +120,10 @@ test "an erase leaves the note's text in no live allocation, file or journal, an
     for (qs) |q| _ = try r.store().retrieve(a, text, try text.encode(a, q, false), true, 512, &.{});
     // its own ids: in the secret texts and in nothing that stays (the other notes, the framing, the questions)
     var keep: [256]bool = @splat(false);
-    for (r.store().model.notes.items) |n| if (std.mem.indexOf(u8, n.text, "anzibar") == null) for (n.text) |b| {
+    for (r.store().model.notes.items) |*n| if (std.mem.indexOf(u8, n.text(), "anzibar") == null) for (n.text()) |b| {
         keep[b] = true;
     };
-    for (r.store().model.notes.items) |n| for (n.line) |b| if (std.mem.indexOf(u8, n.text, "anzibar") == null) {
+    for (r.store().model.notes.items) |*n| for (n.line()) |b| if (std.mem.indexOf(u8, n.text(), "anzibar") == null) {
         keep[b] = true;
     };
     for ([_][]const u8{ r.store().model.head, r.store().model.cur_title, r.store().model.hist_title, " my zebra", "[0123456789] ()\"" } ++ qs) |s| for (s) |b| {

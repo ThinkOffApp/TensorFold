@@ -22,7 +22,7 @@ fn ask(r: *rig.Rig, a: std.mem.Allocator, msgs: []const [2][]const u8, extra: []
 
 /// Whether any note, or the journal, holds `text`.
 fn stored(r: *rig.Rig, a: std.mem.Allocator, text: []const u8) !bool {
-    for (r.store().model.notes.items) |n| if (std.mem.indexOf(u8, n.text, text) != null) return true;
+    for (r.store().model.notes.items) |*n| if (std.mem.indexOf(u8, n.text(), text) != null) return true;
     const j = r.journal(a) catch return false;
     return std.mem.indexOf(u8, j, text) != null;
 }

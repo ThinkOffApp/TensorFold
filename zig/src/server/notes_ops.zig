@@ -36,7 +36,7 @@ pub const View = struct {
 
 pub fn view(m: *const Model, a: Allocator, place: u32) Allocator.Error!View {
     const n = m.notes.items[place];
-    return .{ .id = n.id, .version = n.version, .state = n.state, .kind = n.kind, .subject = try a.dupe(u8, m.entities.items[n.entity]), .text = try a.dupe(u8, n.text), .line = try a.dupe(u8, n.line), .source = if (n.source) |s| try a.dupe(u8, s) else null, .told = n.told, .by = n.by };
+    return .{ .id = n.id, .version = n.version, .state = n.state, .kind = n.kind, .subject = try a.dupe(u8, m.entities.items[n.entity]), .text = try a.dupe(u8, n.text()), .line = try a.dupe(u8, n.line()), .source = if (n.source()) |s| try a.dupe(u8, s) else null, .told = n.told, .by = n.by };
 }
 
 /// What a write did: its verdict, its source, the note it wrote (or is the same as), and the notes it retired.
@@ -77,7 +77,7 @@ pub fn perform(s: *Store, a: Allocator, ask: Ask, why: *Refusal) Error!Written {
         if (ask.subject) |sub| if (!std.mem.eql(u8, sub, m.entities.items[t.entity])) return refuse(why, 400, "a change keeps the subject of the note it changes");
         r.subject = m.entities.items[t.entity];
         r.attribute = m.attributes.items[t.attribute];
-        r.target = if (p < m.base_notes) .{ .note = t.id } else .{ .source = t.source.? };
+        r.target = if (p < m.base_notes) .{ .note = t.id } else .{ .source = t.source().? };
     }
     try s.retired.ensureUnusedCapacity(s.gpa, 1);
     var out: write.Outcome = undefined;
@@ -129,7 +129,7 @@ pub fn erase(s: *Store, a: Allocator, id: u32, why: *Refusal) Error!Erased {
     const old = s.model;
     const p = old.placeOf(id) orelse return refuse(why, 404, "no note has this id");
     if (p < old.base_notes) return refuse(why, 409, "this note comes from the snapshot: erase it in LLWZ (NoteStore.delete) and export again");
-    const x: write.Target = .{ .source = old.notes.items[p].source.? };
+    const x: write.Target = .{ .source = old.notes.items[p].source().? };
     var gone: std.ArrayList(usize) = .empty;
     try records_mod.erased(&s.log, x, &gone, a);
     const bytes = snapshotBytes(s, a) catch |e| return switch (e) {
@@ -173,7 +173,7 @@ pub fn erase(s: *Store, a: Allocator, id: u32, why: *Refusal) Error!Erased {
     idx.ver = s.next_ver;
     try s.retired.ensureUnusedCapacity(s.gpa, 1);
     var moved: std.ArrayList([2]u32) = .empty;
-    for (old.notes.items[old.base_notes..]) |n| if (fresh.placeOfSource(n.source.?)) |q| {
+    for (old.notes.items[old.base_notes..]) |*n| if (fresh.placeOfSource(n.source().?)) |q| {
         if (fresh.notes.items[q].id != n.id) try moved.append(a, .{ n.id, fresh.notes.items[q].id });
     };
     s.journal.?.rewrite(a, kept.items, log.next_source) catch |e| return switch (e) {

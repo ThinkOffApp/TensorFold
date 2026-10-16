@@ -70,7 +70,7 @@ pub const Log = struct {
 pub fn targetOf(g: Allocator, m: *const Model, id: u32) Allocator.Error!write.Target {
     const p = m.placeOf(id) orelse return .{ .note = id };
     if (p < m.base_notes) return .{ .note = id };
-    return .{ .source = try g.dupe(u8, m.notes.items[p].source.?) };
+    return .{ .source = try g.dupe(u8, m.notes.items[p].source().?) };
 }
 
 pub fn sameTarget(x: write.Target, y: write.Target) bool {

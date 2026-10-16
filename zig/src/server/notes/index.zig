@@ -225,7 +225,7 @@ pub const Index = struct {
         self.vwordy = m.vwordy;
         const raw = try gpa.alloc(Raw, m.notes.items.len); // the build's own: freed when it returns
         defer gpa.free(raw);
-        for (m.notes.items, raw) |n, *r| r.* = .{ .id = n.id, .state = n.state, .entity = n.entity, .pair = n.pair, .value_ent = n.value_ent, .told = n.told, .line = n.line, .cost = n.cost, .tokens = n.tokens };
+        for (m.notes.items, raw) |n, *r| r.* = .{ .id = n.id, .state = n.state, .entity = n.entity, .pair = n.pair, .value_ent = n.value_ent, .told = n.told, .line = n.line(), .cost = n.cost, .tokens = n.tokens() };
         try self.placeNotes(gpa, raw);
         try self.groupsOf(m);
         self.phrases = .empty;

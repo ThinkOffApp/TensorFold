@@ -163,10 +163,10 @@ fn walkModel(r: *Report, m: *const model_mod.Model) !usize {
     var ids: usize = 0;
     var source: usize = 0;
     for (m.notes.items) |n| {
-        text += n.text.len;
-        line += n.line.len;
-        ids += n.tokens.len;
-        if (n.source) |s| source += s.len;
+        text += n.text_len;
+        line += n.line_len;
+        ids += n.n_tokens;
+        source += n.source_len;
     }
     const recs = m.notes.items.len * @sizeOf(Note);
     const spare = (m.notes.capacity - m.notes.items.len) * @sizeOf(Note);
@@ -343,15 +343,15 @@ pub fn main(init: std.process.Init) !u8 {
         var non_ascii: usize = 0;
         var token_ids: usize = 0;
         var line_bytes: usize = 0;
-        for (store.model.notes.items) |n| {
+        for (store.model.notes.items) |*n| {
             var ea = std.heap.ArenaAllocator.init(std.heap.c_allocator);
             defer ea.deinit();
-            const enc = try text.encode(ea.allocator(), n.text, false);
-            if (std.mem.eql(u32, enc, n.tokens)) ids_equal += 1;
-            text_bytes += n.text.len;
-            for (n.text) |ch| non_ascii += @intFromBool(ch >= 0x80);
-            token_ids += n.tokens.len;
-            line_bytes += n.line.len;
+            const enc = try text.encode(ea.allocator(), n.text(), false);
+            if (std.mem.eql(u32, enc, n.tokens())) ids_equal += 1;
+            text_bytes += n.text_len;
+            for (n.text()) |ch| non_ascii += @intFromBool(ch >= 0x80);
+            token_ids += n.n_tokens;
+            line_bytes += n.line_len;
         }
         const notes = store.model.notes.items.len;
         const ix = store.current.idx;
