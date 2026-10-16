@@ -57,32 +57,59 @@ fn closeThink(srv: *Server, cx: *Cx, ids: []const u32) errors.Refused![]const u3
     return if (close.len == 1) try std.mem.concat(cx.a, u32, &.{ ids, close }) else ids;
 }
 
-/// The mark an interrupted reply's probe holds: what the template renders after it closes the reply's turn.
-const interrupted = "\u{2063}interrupted";
+/// A try's mark: an invisible separator and 32 hex digits of fresh randomness, which no caller has seen.
+pub const mark_len = 3 + 32;
+const mark_tries = 4;
+
+const FreshMarks = struct {
+    io: std.Io,
+
+    pub fn next(f: *FreshMarks) [mark_len]u8 {
+        var bytes: [16]u8 = undefined;
+        f.io.random(&bytes);
+        var out: [mark_len]u8 = undefined;
+        @memcpy(out[0..3], "\u{2063}");
+        out[3..].* = std.fmt.bytesToHex(bytes, .lower);
+        return out;
+    }
+};
 
 /// Messages injected into a running reply, as its template writes them: its turn closed, theirs, its turn reopened.
 pub fn injectIds(srv: *Server, cx: *Cx, messages: Value, thinking: bool) errors.Refused![]const u32 {
+    var fresh: FreshMarks = .{ .io = srv.io };
+    return injectIdsMarked(srv, cx, messages, thinking, &fresh);
+}
+
+/// `injectIds` with each try's mark from `marks.next()`: only a mark the probe's render holds exactly once is cut at.
+pub fn injectIdsMarked(srv: *Server, cx: *Cx, messages: Value, thinking: bool, marks: anytype) errors.Refused![]const u32 {
     if (messages != .array or messages.array.len == 0) return cx.refuse("messages must be a non-empty list");
     const list = try cx.a.alloc(Value, messages.array.len + 2);
-    for (list[0..2], [_][]const u8{ "user", "assistant" }, [_][]const u8{ "x", interrupted }) |*m, role, content| {
-        const o = try json.newObject(cx.a);
-        try o.put(cx.a, "role", .{ .string = role });
-        try o.put(cx.a, "content", .{ .string = content });
-        m.* = .{ .object = o };
-    }
     @memcpy(list[2..], messages.array);
-    const normalized = try messages_mod.toolArguments(cx, try messages_mod.normalizeWith(cx, .{ .array = list }, srv.late_system, srv.needs_user_after_tool, .{}));
-    var problem: []const u8 = "";
-    const text = srv.text.render(cx.a, normalized, .{ .enable_thinking = thinking }, &problem) catch |e| switch (e) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.Template => return cx.fail(.server, "{s}", .{problem}),
-    };
-    const at = std.mem.lastIndexOf(u8, text, interrupted) orelse return cx.refuse("this chat template does not render an interrupted reply");
-    const ids = srv.text.encode(cx.a, text[at + interrupted.len ..], false) catch |e| switch (e) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.Template => return cx.fail(.server, "the tokenizer cannot encode the injected messages", .{}),
-    };
-    return if (thinking) ids else closeThink(srv, cx, ids);
+    for (0..mark_tries) |_| {
+        // a user turn, the interrupted reply holding the mark, then the injected messages and the generation prompt
+        const fresh = marks.next();
+        const mark = try cx.a.dupe(u8, &fresh);
+        for (list[0..2], [_][]const u8{ "user", "assistant" }, [_][]const u8{ "x", mark }) |*m, role, content| {
+            const o = try json.newObject(cx.a);
+            try o.put(cx.a, "role", .{ .string = role });
+            try o.put(cx.a, "content", .{ .string = content });
+            m.* = .{ .object = o };
+        }
+        const normalized = try messages_mod.toolArguments(cx, try messages_mod.normalizeWith(cx, .{ .array = list }, srv.late_system, srv.needs_user_after_tool, .{}));
+        var problem: []const u8 = "";
+        const text = srv.text.render(cx.a, normalized, .{ .enable_thinking = thinking }, &problem) catch |e| switch (e) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Template => return cx.fail(.server, "{s}", .{problem}),
+        };
+        const at = std.mem.indexOf(u8, text, mark) orelse return cx.refuse("this chat template does not render an interrupted reply");
+        if (std.mem.indexOfPos(u8, text, at + mark.len, mark) != null) continue; // not the reply's alone: a fresh mark
+        const ids = srv.text.encode(cx.a, text[at + mark.len ..], false) catch |e| switch (e) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Template => return cx.fail(.server, "the tokenizer cannot encode the injected messages", .{}),
+        };
+        return if (thinking) ids else closeThink(srv, cx, ids);
+    }
+    return cx.fail(.request, "the rendered injection held its mark more than once in {d} tries; it is refused rather than guessed", .{mark_tries});
 }
 
 /// The template's ids for `messages`; with image input, a marker the text spells is ordinary text (images.zig).
