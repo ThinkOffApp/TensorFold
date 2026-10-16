@@ -12,6 +12,8 @@ pub const server = @import("server.zig");
 pub const serve = @import("serve.zig");
 pub const hub = @import("hub.zig");
 pub const tool_specs = @import("tool_specs.zig");
+pub const notes_store = @import("notes_store.zig");
+pub const notes_ops = @import("notes_ops.zig");
 pub const Server = server.Server;
 pub const Config = server.Config;
 

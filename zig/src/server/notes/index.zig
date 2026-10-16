@@ -272,35 +272,42 @@ pub const Index = struct {
         self.n_hist = n_hist;
     }
 
-    /// O.ent_cur, O.ent_keys and O.by_key, as note places.
+    /// O.ent_cur, O.ent_keys and O.by_key, as note places: one pass to count, one to fill (by place, by pair order).
     fn groupsOf(self: *Index, m: *const Model) LoadError!void {
         const a = self.arena.allocator();
         const ne = m.entities.items.len;
-        const counts = try a.alloc(u32, ne);
-        @memset(counts, 0);
-        const kcounts = try a.alloc(u32, ne);
-        @memset(kcounts, 0);
+        for (self.pair) |p| if (p >= m.pairs.items.len) return error.BadSnapshot;
+        for (self.entity) |e| if (e >= ne) return error.BadSnapshot;
+        for (m.pairs.items) |p| if (p.entity >= ne) return error.BadSnapshot;
+        const cur_n = try a.alloc(u32, ne);
+        @memset(cur_n, 0);
+        const key_n = try a.alloc(u32, ne);
+        @memset(key_n, 0);
         for (self.state, self.entity) |st, e| if (st == .current) {
-            counts[e] += 1;
+            cur_n[e] += 1;
         };
-        for (m.pairs.items) |p| kcounts[p.entity] += 1;
+        for (m.pairs.items) |p| key_n[p.entity] += 1;
         const ent_cur = try a.alloc([]const u32, ne);
         const ent_keys = try a.alloc([]const u32, ne);
+        const cur_buf = try a.alloc([]u32, ne);
+        const key_buf = try a.alloc([]u32, ne);
         for (0..ne) |e| {
-            const cur = try a.alloc(u32, counts[e]);
-            var w: usize = 0;
-            for (self.state, self.entity, 0..) |st, x, k| if (st == .current and x == e) {
-                cur[w] = @intCast(k);
-                w += 1;
-            };
-            ent_cur[e] = cur;
-            const keys = try a.alloc(u32, kcounts[e]);
-            w = 0;
-            for (m.pairs.items, 0..) |p, k| if (p.entity == e) {
-                keys[w] = @intCast(k);
-                w += 1;
-            };
-            ent_keys[e] = keys;
+            cur_buf[e] = try a.alloc(u32, cur_n[e]);
+            key_buf[e] = try a.alloc(u32, key_n[e]);
+            cur_n[e] = 0;
+            key_n[e] = 0;
+        }
+        for (self.state, self.entity, 0..) |st, e, k| if (st == .current) {
+            cur_buf[e][cur_n[e]] = @intCast(k);
+            cur_n[e] += 1;
+        };
+        for (m.pairs.items, 0..) |p, k| {
+            key_buf[p.entity][key_n[p.entity]] = @intCast(k);
+            key_n[p.entity] += 1;
+        }
+        for (0..ne) |e| {
+            ent_cur[e] = cur_buf[e];
+            ent_keys[e] = key_buf[e];
         }
         const pair_notes = try a.alloc([]const u32, m.pairs.items.len);
         for (m.pairs.items, pair_notes) |p, *slot| {
@@ -308,8 +315,6 @@ pub const Index = struct {
             for (p.ids.items, out) |id, *place| place.* = self.placeOfId(id) orelse return error.BadSnapshot;
             slot.* = out;
         }
-        for (self.pair) |p| if (p >= pair_notes.len) return error.BadSnapshot;
-        for (self.entity) |e| if (e >= ne) return error.BadSnapshot;
         self.ent_cur = ent_cur;
         self.ent_keys = ent_keys;
         self.pair_notes = pair_notes;
