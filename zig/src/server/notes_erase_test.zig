@@ -81,7 +81,7 @@ fn look(t: *Tracking, r: *rig.Rig, a: Allocator, own: []const u32, own_keys: []c
     // the ids: in no note's tokens, and their keys in no n-gram and no phrase of the index lookups read now
     const s = r.store();
     const m = s.model;
-    for (m.notes.items) |n| for (n.tokens) |id| if (std.mem.indexOfScalar(u32, own, id) != null) {
+    for (m.notes.items) |*n| for (n.tokens()) |id| if (std.mem.indexOfScalar(u32, own, id) != null) {
         w.ids += 1;
     };
     const v = s.acquire();
@@ -96,14 +96,30 @@ fn look(t: *Tracking, r: *rig.Rig, a: Allocator, own: []const u32, own_keys: []c
     while (pi.next()) |p| for (p.*) |key| if (std.mem.indexOfScalar(u32, keys, key) != null) {
         w.ids += 1;
     };
+    // sa: the keys every base still alive holds (the current one, retired versions', none other)
+    var bases: std.ArrayList(*const @import("notes/sa.zig").Base) = .empty;
+    if (v.idx.base) |b| try bases.append(a, b);
+    for (s.retired.items) |old| if (old.idx.base) |b| try bases.append(a, b);
+    for (bases.items) |b| for (b.dict) |key| if (std.mem.indexOfScalar(u32, keys, key) != null) {
+        w.ids += 1;
+    };
+    // and the token ids of models an erase left for later (the negative control's)
+    for (s.parked.items) |pm| for (pm.notes.items) |*n| for (n.tokens()) |id| if (std.mem.indexOfScalar(u32, own, id) != null) {
+        w.ids += 1;
+    };
     return w;
 }
 
-test "an erase leaves the note's text in no live allocation, file or journal, and its ids in no structure" {
+/// What the search finds before the erase, right after it, and after a restart (or, deferred, after a merge).
+const Found = struct { before: Where, after: Where, again: Where };
+
+/// The erase script on a rig with the index of `kind`; `deferred`: the erase leaves its merge for later.
+fn eraseRun(kind: @import("notes_store.zig").IndexKind, deferred: bool) !Found {
     var tracking: Tracking = .{ .child = testing.allocator };
     defer tracking.deinit();
-    const r = try rig.Rig.init(tracking.allocator());
+    const r = try rig.Rig.initKind(tracking.allocator(), kind, 1024);
     defer r.deinit();
+    r.store().defer_erase_merge = deferred;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -120,10 +136,10 @@ test "an erase leaves the note's text in no live allocation, file or journal, an
     for (qs) |q| _ = try r.store().retrieve(a, text, try text.encode(a, q, false), true, 512, &.{});
     // its own ids: in the secret texts and in nothing that stays (the other notes, the framing, the questions)
     var keep: [256]bool = @splat(false);
-    for (r.store().model.notes.items) |n| if (std.mem.indexOf(u8, n.text, "anzibar") == null) for (n.text) |b| {
+    for (r.store().model.notes.items) |*n| if (std.mem.indexOf(u8, n.text(), "anzibar") == null) for (n.text()) |b| {
         keep[b] = true;
     };
-    for (r.store().model.notes.items) |n| for (n.line) |b| if (std.mem.indexOf(u8, n.text, "anzibar") == null) {
+    for (r.store().model.notes.items) |*n| for (n.line()) |b| if (std.mem.indexOf(u8, n.text(), "anzibar") == null) {
         keep[b] = true;
     };
     for ([_][]const u8{ r.store().model.head, r.store().model.cur_title, r.store().model.hist_title, " my zebra", "[0123456789] ()\"" } ++ qs) |s| for (s) |b| {
@@ -140,19 +156,47 @@ test "an erase leaves the note's text in no live allocation, file or journal, an
         if (!shared and std.mem.indexOfScalar(u32, own_keys.items, key) == null) try own_keys.append(a, key);
     }
     try testing.expect(own.items.len > 0 and own_keys.items.len > 0); // so the id checks can fail
+    if (kind == .sa) { // the notes it wrote are in the side buffer, not yet in a base
+        const ix = r.store().current.idx;
+        try testing.expect(ix.notes() > ix.base.?.notes);
+    }
     const before = try look(&tracking, r, a, own.items, own_keys.items);
     try testing.expect(before.memory > 0 and before.journal and before.files > 0 and before.ids > 0); // the search finds it
     const erased = try rig.request(r.srv, a, "DELETE", try std.fmt.allocPrint(a, "/v1/notes/{d}?erase=true", .{id}), null);
     try testing.expectEqual(@as(u16, 200), erased.status);
     try testing.expectEqual(@as(usize, 3), erased.value.get("removed").?.array.len); // its write, the same-as, the take-back
-    try testing.expectEqual(@as(u32, 1), r.text.forgot); // the tokenizer dropped its kept encodes (a block quoted it)
+    // right after the call returns: nothing is searched for until this look
     const after = try look(&tracking, r, a, own.items, own_keys.items);
-    try testing.expectEqual(Where{ .memory = 0, .journal = false, .files = 0, .ids = 0 }, after);
+    if (deferred) {
+        try r.store().merge(); // the later merge the deferred erase waited for
+        return .{ .before = before, .after = after, .again = try look(&tracking, r, a, own.items, own_keys.items) };
+    }
+    try testing.expectEqual(@as(u32, 1), r.text.forgot); // the tokenizer dropped its kept encodes (a block quoted it)
     // what stays is what never teaching it gives: the other zebra note, current, and the questions still answer
     const left = try r.store().retrieve(a, text, try text.encode(a, qs[2], false), false, 512, &.{});
     try testing.expect(std.mem.indexOf(u8, left.block, "My zebra likes apples.") != null);
     try testing.expect(r.store().free.items.len <= 1); // the pool was swept; this lookup made the one it holds
     try r.restart();
-    const again = try look(&tracking, r, a, own.items, own_keys.items);
-    try testing.expectEqual(Where{ .memory = 0, .journal = false, .files = 0, .ids = 0 }, again);
+    return .{ .before = before, .after = after, .again = try look(&tracking, r, a, own.items, own_keys.items) };
+}
+
+const none: Where = .{ .memory = 0, .journal = false, .files = 0, .ids = 0 };
+
+test "an erase leaves the note's text in no live allocation, file or journal, and its ids in no structure" {
+    const got = try eraseRun(.postings, false);
+    try testing.expectEqual(none, got.after);
+    try testing.expectEqual(none, got.again);
+}
+
+test "the suffix-array index: right after an erase returns, its text is in no allocation and its ids in no base" {
+    const got = try eraseRun(.sa, false);
+    try testing.expectEqual(none, got.after);
+    try testing.expectEqual(none, got.again);
+}
+
+test "negative control: an erase that leaves the merge for later is found right after it, and gone after the merge" {
+    const got = try eraseRun(.sa, true);
+    try testing.expect(got.after.memory > 0 and got.after.ids > 0);
+    try testing.expect(!got.after.journal and got.after.files == 0); // the files are rewritten either way
+    try testing.expectEqual(none, got.again);
 }

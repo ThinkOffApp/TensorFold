@@ -109,7 +109,7 @@ test "(d) a torn trailing record on disk: the restart cuts it and replays to the
     try testing.expectEqual(@as(usize, 2), r.store().replayed);
     try testing.expect(r.store().truncated == torn.len - whole.len);
     try testing.expectEqualStrings(whole, try r.journal(a));
-    for (r.store().model.notes.items) |n| try testing.expect(std.mem.indexOf(u8, n.text, "purple") == null);
+    for (r.store().model.notes.items) |*n| try testing.expect(std.mem.indexOf(u8, n.text(), "purple") == null);
     try testing.expect(!r.store().journal.?.poisoned);
     _ = try add(r, a, "My favourite colour is purple.", &why); // and writes go on
     try r.restart();
@@ -148,7 +148,7 @@ test "(e) a whole write whose sync fails and whose rollback truncate fails is ne
     try testing.expect(got.left[got.left.len - 1] == '\n' and std.mem.indexOf(u8, got.left[got.whole.len..], "commit") == null);
     try testing.expectEqual(@as(usize, 2), got.r.store().replayed);
     try testing.expectEqual(@as(u64, got.left.len - got.whole.len), got.r.store().truncated);
-    for (got.r.store().model.notes.items) |n| try testing.expect(std.mem.indexOf(u8, n.text, "purple") == null);
+    for (got.r.store().model.notes.items) |*n| try testing.expect(std.mem.indexOf(u8, n.text(), "purple") == null);
     try testing.expectEqualStrings(got.whole, try got.r.journal(a));
 }
 
@@ -260,12 +260,12 @@ test "(h) the folder cannot be opened for its sync at the create: the same" {
 }
 
 fn idOf(r: *rig.Rig, source: []const u8) u32 {
-    for (r.store().model.notes.items) |n| if (n.source) |s| if (std.mem.eql(u8, s, source)) return n.id;
+    for (r.store().model.notes.items) |*n| if (n.source()) |s| if (std.mem.eql(u8, s, source)) return n.id;
     unreachable;
 }
 
 fn holds(r: *rig.Rig, text: []const u8) bool {
-    for (r.store().model.notes.items) |n| if (std.mem.indexOf(u8, n.text, text) != null) return true;
+    for (r.store().model.notes.items) |*n| if (std.mem.indexOf(u8, n.text(), text) != null) return true;
     return false;
 }
 

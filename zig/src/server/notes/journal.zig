@@ -357,7 +357,9 @@ pub fn decode(v: Value) ?Record {
         } else target = .{ .source = t.strField("source") orelse return null };
     }
     if ((op == .add) != (target == .none)) return null;
-    return .{ .op = op, .source = v.strField("source") orelse return null, .told = told, .subject = v.strField("subject") orelse return null, .attribute = v.strField("attribute") orelse return null, .target = target, .text = v.strField("text") orelse return null };
+    const source = v.strField("source") orelse return null;
+    if (source.len == 0 or source.len > std.math.maxInt(u16)) return null; // a note keeps its source's length in 16 bits; none is 0
+    return .{ .op = op, .source = source, .told = told, .subject = v.strField("subject") orelse return null, .attribute = v.strField("attribute") orelse return null, .target = target, .text = v.strField("text") orelse return null };
 }
 
 fn readAll(gpa: Allocator, fd: c_int, problem: *[]const u8) OpenError![]u8 {

@@ -75,8 +75,68 @@ fn joined(lists: []std.ArrayList(u64), a: Allocator) ![]u64 {
     return out.items;
 }
 
+/// One write of the script: k % 4 picks an add, a change, a same-as add or a take-back; every hundredth an erase too.
+fn writeStep(r: *rig.Rig, w: Allocator, k: usize, why: *ops.Refusal, erased: *usize, table: ?*std.AutoHashMapUnmanaged(u64, [questions.len]u64)) !void {
+    const s = r.store();
+    const item = try std.fmt.allocPrint(w, "my item {d}", .{k / 4});
+    const last = s.model.notes.items[s.model.notes.items.len - 1];
+    const done = switch (k % 4) {
+        0 => ops.perform(s, w, .{ .op = .add, .text = try std.fmt.allocPrint(w, "My item {d} is red.", .{k / 4}), .subject = item }, why),
+        1 => ops.perform(s, w, .{ .op = .change, .text = try std.fmt.allocPrint(w, "My item {d} is blue now.", .{k / 4}), .target = last.id }, why),
+        2 => ops.perform(s, w, .{ .op = .add, .text = try std.fmt.allocPrint(w, "my item {d} is blue now", .{k / 4}), .subject = item }, why),
+        else => if (k % 100 == 99) blk: {
+            _ = try ops.erase(s, w, last.id, why);
+            erased.* += 1;
+            if (table) |t| try expect(r, w, t); // the erase's own version, which lookups read until the next write
+            break :blk ops.perform(s, w, .{ .op = .add, .text = "I like long walks.", .subject = item }, why);
+        } else ops.perform(s, w, .{ .op = .take_back, .text = "I take that back.", .target = last.id }, why),
+    };
+    _ = done catch |e| {
+        std.debug.print("write {d}: {s} {s}\n", .{ k, @errorName(e), why.message });
+        return e;
+    };
+}
+
 test "8 lookup threads during 1,000 writes and erases: no crash, every block its version's, lookups not slowed" {
-    const r = try rig.Rig.init(testing.allocator);
+    try concurrent(.postings, 1024);
+}
+
+test "the suffix-array index: 8 lookup threads during 1,000 writes, erases and merges, every block its version's" {
+    try concurrent(.sa, 64);
+}
+
+test "the suffix-array index answers as the postings do after each of 1,000 writes, erases and merges" {
+    const p = try rig.Rig.initKind(testing.allocator, .postings, 1024);
+    defer p.deinit();
+    const x = try rig.Rig.initKind(testing.allocator, .sa, 64);
+    defer x.deinit();
+    var why: ops.Refusal = .{};
+    var erased: usize = 0;
+    var differ: usize = 0;
+    var with_side: usize = 0;
+    for (0..1000) |k| {
+        var wa = std.heap.ArenaAllocator.init(testing.allocator);
+        defer wa.deinit();
+        const w = wa.allocator();
+        try writeStep(p, w, k, &why, &erased, null);
+        try writeStep(x, w, k, &why, &erased, null);
+        const ix = x.store().current.idx;
+        if (ix.notes() > ix.base.?.notes) with_side += 1;
+        for (questions, 0..) |q, i| for ([_]bool{ i == 4, true }) |past| {
+            const text = p.text.text();
+            const ids = try text.encode(w, q, false);
+            const a = try p.store().retrieve(w, text, ids, past, 512, &.{});
+            const b = try x.store().retrieve(w, text, ids, past, 512, &.{});
+            if (!std.mem.eql(u8, a.block, b.block) or !std.mem.eql(u32, a.ids, b.ids) or a.candidates != b.candidates) differ += 1;
+        };
+    }
+    try testing.expectEqual(@as(usize, 0), differ);
+    try testing.expectEqual(@as(usize, 20), erased); // 10 on each store
+    try testing.expect(x.store().merges > 5 and with_side > 500); // merges happened, and most lookups read a side buffer
+}
+
+fn concurrent(kind: @import("notes_store.zig").IndexKind, side_max: u32) !void {
+    const r = try rig.Rig.initKind(testing.allocator, kind, side_max);
     defer r.deinit();
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -104,24 +164,7 @@ test "8 lookup threads during 1,000 writes and erases: no crash, every block its
         var wa = std.heap.ArenaAllocator.init(testing.allocator);
         defer wa.deinit();
         const w = wa.allocator();
-        const s = r.store();
-        const item = try std.fmt.allocPrint(w, "my item {d}", .{k / 4});
-        const last = s.model.notes.items[s.model.notes.items.len - 1];
-        const done = switch (k % 4) {
-            0 => ops.perform(s, w, .{ .op = .add, .text = try std.fmt.allocPrint(w, "My item {d} is red.", .{k / 4}), .subject = item }, &why),
-            1 => ops.perform(s, w, .{ .op = .change, .text = try std.fmt.allocPrint(w, "My item {d} is blue now.", .{k / 4}), .target = last.id }, &why),
-            2 => ops.perform(s, w, .{ .op = .add, .text = try std.fmt.allocPrint(w, "my item {d} is blue now", .{k / 4}), .subject = item }, &why),
-            else => if (k % 100 == 99) blk: {
-                _ = try ops.erase(s, w, last.id, &why);
-                erased += 1;
-                try expect(r, w, &table); // the erase's own version, which lookups read until the next write
-                break :blk ops.perform(s, w, .{ .op = .add, .text = "I like long walks.", .subject = item }, &why);
-            } else ops.perform(s, w, .{ .op = .take_back, .text = "I take that back.", .target = last.id }, &why),
-        };
-        _ = done catch |e| {
-            std.debug.print("write {d}: {s} {s}\n", .{ k, @errorName(e), why.message });
-            return e;
-        };
+        try writeStep(r, w, k, &why, &erased, &table);
         written += 1;
         try expect(r, w, &table);
     }

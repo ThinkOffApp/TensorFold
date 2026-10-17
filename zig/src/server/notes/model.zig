@@ -8,24 +8,69 @@ const Allocator = std.mem.Allocator;
 
 pub const Kind = enum(u8) { fact = 0, tombstone = 1 };
 
-/// One note: the fields NoteStore keeps that a lookup, a later write or a listing reads.
+/// One note as NoteStore keeps it: ids, text and source in one block (`body`); the line (replaced on retire) its own.
 pub const Note = struct {
+    told: i64,
+    body: [*]align(4) u8 = undefined, // the token ids (u32), then the text, then the source
+    line_ptr: [*]u8 = undefined,
     id: u32,
-    state: index.State,
-    kind: Kind,
     entity: u32,
     attribute: u32,
     pair: u32,
     value_ent: i32,
-    told: i64,
-    text: []u8,
-    line: []u8,
     cost: u32,
-    tokens: []u32,
     version: u32,
     by: u32 = 0, // the note that superseded or withdrew this one (0: none yet)
+    n_tokens: u32 = 0,
+    text_len: u32 = 0,
+    line_len: u32 = 0,
+    source_len: u16 = 0, // the write that made it; 0 for a snapshot's note (a write's source is never empty)
+    state: index.State,
+    kind: Kind,
     multi: bool = false, // its attribute holds several values (a take-back's label says so under "explicit")
-    source: ?[]u8 = null, // the write that made it; null for a snapshot's note
+
+    pub fn tokens(n: *const Note) []const u32 {
+        return @as([*]const u32, @ptrCast(n.body))[0..n.n_tokens];
+    }
+
+    pub fn text(n: *const Note) []const u8 {
+        return n.body[4 * @as(usize, n.n_tokens) ..][0..n.text_len];
+    }
+
+    pub fn source(n: *const Note) ?[]const u8 {
+        if (n.source_len == 0) return null;
+        return n.body[4 * @as(usize, n.n_tokens) + n.text_len ..][0..n.source_len];
+    }
+
+    pub fn line(n: *const Note) []u8 {
+        return n.line_ptr[0..n.line_len];
+    }
+
+    pub fn setLine(n: *Note, l: []u8) void {
+        n.line_ptr = l.ptr;
+        n.line_len = @intCast(l.len);
+    }
+
+    fn bodyBlock(n: *const Note) []align(4) u8 {
+        return n.body[0 .. 4 * @as(usize, n.n_tokens) + n.text_len + n.source_len];
+    }
+
+    /// The body made: room for `n_tokens` ids (filled by the caller through tokensMut), the text and the source.
+    pub fn makeBody(n: *Note, g: Allocator, n_tokens: usize, txt: []const u8, src: ?[]const u8) Allocator.Error!void {
+        const s = src orelse "";
+        if (s.len > std.math.maxInt(u16) or txt.len > std.math.maxInt(u32) or n_tokens > std.math.maxInt(u32)) return error.OutOfMemory;
+        const block = try g.alignedAlloc(u8, .@"4", 4 * n_tokens + txt.len + s.len);
+        @memcpy(block[4 * n_tokens ..][0..txt.len], txt);
+        @memcpy(block[4 * n_tokens + txt.len ..][0..s.len], s);
+        n.body = block.ptr;
+        n.n_tokens = @intCast(n_tokens);
+        n.text_len = @intCast(txt.len);
+        n.source_len = @intCast(s.len);
+    }
+
+    pub fn tokensMut(n: *Note) []u32 {
+        return @as([*]u32, @ptrCast(n.body))[0..n.n_tokens];
+    }
 };
 
 /// An (entity, attribute) pair and its notes' ids, every state, oldest first (NoteStore's by_key).
@@ -67,10 +112,8 @@ pub const Model = struct {
     }
 
     pub fn freeNote(g: Allocator, n: *Note) void {
-        g.free(n.text);
-        g.free(n.line);
-        g.free(n.tokens);
-        if (n.source) |s| g.free(s);
+        g.free(n.bodyBlock());
+        g.free(n.line());
     }
 
     /// A note id's place, or null.
@@ -107,12 +150,23 @@ pub const Model = struct {
 
     /// The place of the note a write made, by its source.
     pub fn placeOfSource(m: *const Model, source: []const u8) ?u32 {
-        for (m.notes.items[m.base_notes..], m.base_notes..) |n, k| if (n.source) |s| if (std.mem.eql(u8, s, source)) return @intCast(k);
+        for (m.notes.items[m.base_notes..], m.base_notes..) |*n, k| if (n.source()) |s| if (std.mem.eql(u8, s, source)) return @intCast(k);
         return null;
     }
 
     pub fn keyOf(m: *const Model, t: u32) u32 {
         return if (t < m.vkey.len) m.vkey[t] else index.none_key;
+    }
+
+    /// Every list copied to an exact block (a shrink in place would leave the allocator's block its old size).
+    pub fn trim(m: *Model) Allocator.Error!void {
+        const g = m.gpa;
+        try trimList(model_note, g, &m.notes);
+        try trimList([]u8, g, &m.entities);
+        try trimList([]u8, g, &m.attributes);
+        for (m.pairs.items) |*p| try trimList(u32, g, &p.ids);
+        try trimList(Pair, g, &m.pairs);
+        try trimList(Phrase, g, &m.phrases);
     }
 
     /// Notes counted by view: current, and the rest.
@@ -122,6 +176,16 @@ pub const Model = struct {
         return c;
     }
 };
+
+const model_note = Note;
+
+fn trimList(comptime T: type, g: Allocator, list: *std.ArrayList(T)) Allocator.Error!void {
+    if (list.capacity == list.items.len) return;
+    const exact = try g.alloc(T, list.items.len);
+    @memcpy(exact, list.items);
+    g.free(list.allocatedSlice());
+    list.* = .fromOwnedSlice(exact);
+}
 
 /// Reads a snapshot (zengine/notes_export.py's JSON): its settings, vocabulary, notes, pairs and phrases.
 pub fn parse(gpa: Allocator, text: []const u8) LoadError!*Model {
@@ -169,6 +233,7 @@ pub fn parse(gpa: Allocator, text: []const u8) LoadError!*Model {
     m.grams_current = try uint(grams, "current");
     m.grams_history = try uint(grams, "history");
     m.base_notes = m.notes.items.len;
+    try m.trim(); // the entity and attribute names grew one at a time
     return m;
 }
 
@@ -222,7 +287,7 @@ fn readSettings(m: *Model, js: Value) LoadError!void {
 /// The notes, by ascending id; each line must be one line() gives for its state and kind.
 fn readNotes(m: *Model, list: []const Value) LoadError!void {
     const g = m.gpa;
-    try m.notes.ensureTotalCapacity(g, list.len);
+    try m.notes.ensureTotalCapacityPrecise(g, list.len);
     for (list) |x| {
         const id = try uint(x, "id");
         if (m.notes.items.len > 0 and id <= m.notes.items[m.notes.items.len - 1].id) return error.BadSnapshot;
@@ -239,8 +304,8 @@ fn readNotes(m: *Model, list: []const Value) LoadError!void {
             error.OutOfMemory => error.OutOfMemory,
             error.BadLine => error.BadSnapshot,
         };
-        var note: Note = .{ .id = id, .state = state, .kind = kind, .entity = entity, .attribute = attribute, .pair = pair, .value_ent = @intCast(value_ent), .told = try int(x, "told"), .text = read.text, .line = &.{}, .cost = 0, .tokens = &.{}, .version = 0, .by = read.by, .multi = read.multi };
-        errdefer g.free(note.text);
+        defer g.free(read.text);
+        var note: Note = .{ .id = id, .state = state, .kind = kind, .entity = entity, .attribute = attribute, .pair = pair, .value_ent = @intCast(value_ent), .told = try int(x, "told"), .cost = 0, .version = 0, .by = read.by, .multi = read.multi };
         const agrees = switch (read.kind) {
             .none => state == .current and kind == .fact,
             .takeback => state == .current and kind == .tombstone,
@@ -248,13 +313,12 @@ fn readNotes(m: *Model, list: []const Value) LoadError!void {
             .withdrawn => state == .tombstoned,
         };
         if (!agrees) return error.BadSnapshot;
-        note.line = try g.dupe(u8, line);
-        errdefer g.free(note.line);
         note.cost = try uint(x, "cost");
         const toks = try arr(x, "tokens");
-        note.tokens = try g.alloc(u32, toks.len);
-        errdefer g.free(note.tokens);
-        for (toks, note.tokens) |v, *slot| slot.* = try asU32(v);
+        try note.makeBody(g, toks.len, read.text, null);
+        errdefer g.free(note.bodyBlock());
+        for (toks, note.tokensMut()) |v, *slot| slot.* = try asU32(v);
+        note.setLine(try g.dupe(u8, line));
         m.told_last = @max(m.told_last, note.told);
         m.notes.appendAssumeCapacity(note);
     }
@@ -263,7 +327,7 @@ fn readNotes(m: *Model, list: []const Value) LoadError!void {
 /// by_key: each pair's notes oldest first; a note's version is its place in its pair, from 1.
 fn readPairs(m: *Model, list: []const Value) LoadError!void {
     const g = m.gpa;
-    try m.pairs.ensureTotalCapacity(g, list.len);
+    try m.pairs.ensureTotalCapacityPrecise(g, list.len);
     const seen = try g.alloc(bool, m.notes.items.len);
     defer g.free(seen);
     @memset(seen, false);
@@ -274,7 +338,7 @@ fn readPairs(m: *Model, list: []const Value) LoadError!void {
         m.pairs.appendAssumeCapacity(.{ .entity = entity, .attribute = attribute });
         const pr = &m.pairs.items[m.pairs.items.len - 1];
         const ids = try arr(p, "ids");
-        try pr.ids.ensureTotalCapacity(g, ids.len);
+        try pr.ids.ensureTotalCapacityPrecise(g, ids.len);
         for (ids, 1..) |v, version| {
             const place = m.placeOf(try asU32(v)) orelse return error.BadSnapshot;
             const n = &m.notes.items[place];
@@ -289,7 +353,7 @@ fn readPairs(m: *Model, list: []const Value) LoadError!void {
 
 fn readPhrases(m: *Model, list: []const Value) LoadError!void {
     const g = m.gpa;
-    try m.phrases.ensureTotalCapacity(g, list.len);
+    try m.phrases.ensureTotalCapacityPrecise(g, list.len);
     for (list) |p| {
         const entity = try uint(p, "entity");
         if (entity >= m.entities.items.len) return error.BadSnapshot;

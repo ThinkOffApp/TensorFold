@@ -5,6 +5,7 @@ const server = @import("root.zig");
 const json = server.json;
 const routes = @import("routes.zig");
 const notes_route = @import("notes_route.zig");
+const notes_store = @import("notes_store.zig");
 const line_mod = @import("notes/line.zig");
 const Bytes = @import("notes_test.zig").Bytes;
 const Conn = @import("http_conn.zig").Conn;
@@ -46,11 +47,18 @@ pub const Rig = struct {
     engine: Echo = .{},
     srv: *server.Server,
     gpa: std.mem.Allocator,
+    kind: notes_store.IndexKind = .postings,
+    side_max: u32 = 1024,
 
     pub fn init(gpa: std.mem.Allocator) !*Rig {
+        return initKind(gpa, .postings, 1024);
+    }
+
+    /// The rig with the n-gram index of `kind` (sa: a new base once the side buffer passes `side_max` notes).
+    pub fn initKind(gpa: std.mem.Allocator, kind: notes_store.IndexKind, side_max: u32) !*Rig {
         const r = try testing.allocator.create(Rig);
         errdefer testing.allocator.destroy(r);
-        r.* = .{ .tmp = testing.tmpDir(.{}), .snap = undefined, .srv = undefined, .gpa = gpa };
+        r.* = .{ .tmp = testing.tmpDir(.{}), .snap = undefined, .srv = undefined, .gpa = gpa, .kind = kind, .side_max = side_max };
         errdefer r.tmp.cleanup();
         try r.tmp.dir.writeFile(testing.io, .{ .sub_path = "snap.json", .data = snapshot });
         r.snap = try std.fmt.allocPrint(testing.allocator, ".zig-cache/tmp/{s}/snap.json", .{r.tmp.sub_path});
@@ -64,11 +72,12 @@ pub const Rig = struct {
     /// The store opened from the snapshot and its journal, as a server start does.
     pub fn open(r: *Rig) !void {
         var problem: []const u8 = "";
-        const s = notes_route.Store.open(r.gpa, testing.io, r.snap, r.text.text(), "", &problem) catch |e| {
+        const s = notes_route.Store.openIndexed(r.gpa, testing.io, r.snap, r.text.text(), "", r.kind, &problem) catch |e| {
             std.debug.print("open: {s}\n", .{problem});
             return e;
         };
         s.today = today;
+        s.side_max = r.side_max;
         r.srv.notes = s;
     }
 

@@ -8,7 +8,7 @@ const Allocator = std.mem.Allocator;
 /// The store as a reader sees it: every note's id, version, state and line, the journal's bytes, the writes kept.
 fn digest(r: *rig.Rig, a: Allocator) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
-    for (r.store().model.notes.items) |n| try out.print(a, "{d}|{d}|{s}|{s}\n", .{ n.id, n.version, @tagName(n.state), n.line });
+    for (r.store().model.notes.items) |n| try out.print(a, "{d}|{d}|{s}|{s}\n", .{ n.id, n.version, @tagName(n.state), n.line() });
     try out.print(a, "log {d} next {d} ver {d}\n", .{ r.store().log.items.items.len, r.store().log.next_source, r.store().current.idx.ver });
     const j = r.journal(a) catch "";
     try out.appendSlice(a, j);

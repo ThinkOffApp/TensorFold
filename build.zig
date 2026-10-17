@@ -222,6 +222,11 @@ fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
         .imports = &.{ .{ .name = "engine_api", .module = api }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "template", .module = template } },
     });
     test_step.?.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests })).step);
+    // the server's tests alone, or those whose names hold -Dtest-server-filter=TEXT (a new test run in isolation)
+    const server_filter = b.option([]const u8, "test-server-filter", "Run only the server tests whose names hold this text");
+    const server_run = b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = if (server_filter) |f| &.{f} else &.{} }));
+    server_run.has_side_effects = true; // run every time, so its count is printed
+    b.step("test-server", "The server module's unit tests (filter: -Dtest-server-filter=TEXT)").dependOn(&server_run.step);
     @import("zig/build/cortheon_fuzz.zig").add(b, target, api, tokenizer, template);
     // the parse half's tests, as their own test binary (zig/src/server/tool_parse_test.zig)
     const tool_parse_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/server/tool_parse_test.zig"), .target = target, .optimize = .Debug, .link_libc = true, .imports = &.{ .{ .name = "engine_api", .module = api }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "template", .module = template } } }) });
@@ -236,6 +241,18 @@ fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     const server_safe = b.createModule(.{ .root_source_file = b.path("zig/src/server/root.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{ .{ .name = "engine_api", .module = api }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "template", .module = template } } });
     const notes_bench = b.addExecutable(.{ .name = "notes-live-bench", .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/notes_live_bench.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{.{ .name = "server", .module = server_safe }} }) });
     b.step("notes-live-bench", "Note lookups by 8 threads alone, during writes and after (MODEL_DIR SNAPSHOT REF.json OUT_DIR WRITES)").dependOn(&b.addInstallArtifact(notes_bench, .{}).step);
+    // the bytes a loaded notes store holds, counted per allocation and walked field by field (no server, no model load)
+    const notes_size = b.addExecutable(.{ .name = "notes-size-bench", .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/notes_size_bench.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{.{ .name = "server", .module = server_safe }} }) });
+    b.step("notes-size-bench", "The bytes a loaded notes store holds, per part (MODEL_DIR REF_DIR SNAPSHOT...)").dependOn(&b.addInstallArtifact(notes_size, .{}).step);
+    // the golden questions asked in-process as the server asks them (the tokenizer only), against Python's references
+    const notes_golden = b.addExecutable(.{ .name = "notes-golden", .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/notes_golden_bench.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{.{ .name = "server", .module = server_safe }} }) });
+    b.step("notes-golden", "LLWZ Python's blocks against Store.retrieve, question by question (MODEL_DIR [--index postings|sa] SNAPSHOT REF.json ...)").dependOn(&b.addInstallArtifact(notes_golden, .{}).step);
+    // the postings and the suffix-array index side by side: build, lookups, writes with the side buffer, merges, erases
+    const notes_sa_bench = b.addExecutable(.{ .name = "notes-sa-bench", .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/notes_sa_bench.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{.{ .name = "server", .module = server_safe }} }) });
+    b.step("notes-sa-bench", "Postings against the suffix-array index: build, lookup, write, merge and erase times (MODEL_DIR SNAPSHOT REF.json OUT_DIR WRITES [SIDE_MAX])").dependOn(&b.addInstallArtifact(notes_sa_bench, .{}).step);
+    // recall at the cap on the paper's sets, the suffix array's longer matches off or on
+    const notes_recall = b.addExecutable(.{ .name = "notes-recall", .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/notes_recall_bench.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{.{ .name = "server", .module = server_safe }} }) });
+    b.step("notes-recall", "Recall at the cap on tools/notes/recall_export.py's sets (MODEL_DIR DIR off|all:MAX|longest)").dependOn(&b.addInstallArtifact(notes_recall, .{}).step);
     b.step("test-native", "The Metal engines module's host-side tests").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = engines })).step);
     const reuse = b.addExecutable(.{ .name = "tf-flashnext-reuse", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/flashnext_reuse.zig"),

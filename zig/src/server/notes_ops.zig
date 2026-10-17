@@ -36,7 +36,7 @@ pub const View = struct {
 
 pub fn view(m: *const Model, a: Allocator, place: u32) Allocator.Error!View {
     const n = m.notes.items[place];
-    return .{ .id = n.id, .version = n.version, .state = n.state, .kind = n.kind, .subject = try a.dupe(u8, m.entities.items[n.entity]), .text = try a.dupe(u8, n.text), .line = try a.dupe(u8, n.line), .source = if (n.source) |s| try a.dupe(u8, s) else null, .told = n.told, .by = n.by };
+    return .{ .id = n.id, .version = n.version, .state = n.state, .kind = n.kind, .subject = try a.dupe(u8, m.entities.items[n.entity]), .text = try a.dupe(u8, n.text()), .line = try a.dupe(u8, n.line()), .source = if (n.source()) |s| try a.dupe(u8, s) else null, .told = n.told, .by = n.by };
 }
 
 /// What a write did: its verdict, its source, the note it wrote (or is the same as), and the notes it retired.
@@ -94,7 +94,7 @@ pub fn perform(s: *Store, a: Allocator, ask: Ask, why: *Refusal) Error!Written {
         if (ask.subject) |sub| if (!std.mem.eql(u8, sub, m.entities.items[t.entity])) return refuse(why, 400, "a change keeps the subject of the note it changes");
         r.subject = m.entities.items[t.entity];
         r.attribute = m.attributes.items[t.attribute];
-        r.target = if (p < m.base_notes) .{ .note = t.id } else .{ .source = t.source.? };
+        r.target = if (p < m.base_notes) .{ .note = t.id } else .{ .source = t.source().? };
     }
     try s.retired.ensureUnusedCapacity(s.gpa, 1);
     var out: write.Outcome = undefined;
@@ -113,6 +113,7 @@ pub fn perform(s: *Store, a: Allocator, ask: Ask, why: *Refusal) Error!Written {
     };
     const shown: ?u32 = if (out.note != 0) out.note else if (out.same_as.len > 0) out.same_as[0] else null;
     const reply: Written = .{ .verdict = out.verdict, .source = source, .told = r.told, .note = if (shown) |id| try view(m, a, m.placeOf(id).?) else null, .retired = out.retired, .same_as = out.same_as };
+    try s.current.garbage.ensureUnusedCapacity(s.gpa, undo.gone.items.len); // the replaced lines, kept by the version it retires
     var entry = try s.log.prepare(r, out, m);
     errdefer records_mod.freeEntry(s.gpa, &entry);
     s.journal.?.append(a, r) catch |e| return switch (e) {
@@ -122,7 +123,7 @@ pub fn perform(s: *Store, a: Allocator, ask: Ask, why: *Refusal) Error!Written {
     };
     // stored: from here the write stands, and nothing below can fail
     applied = false;
-    write.commit(m, &undo);
+    write.commitKeeping(m, &undo, &s.current.garbage);
     s.log.push(entry);
     if (v) |x| {
         s.swap(x, false);
@@ -147,7 +148,7 @@ pub fn erase(s: *Store, a: Allocator, id: u32, why: *Refusal) Error!Erased {
     const old = s.model;
     const p = old.placeOf(id) orelse return refuse(why, 404, "no note has this id");
     if (p < old.base_notes) return refuse(why, 409, "this note comes from the snapshot: erase it in LLWZ (NoteStore.delete) and export again");
-    const x: write.Target = .{ .source = old.notes.items[p].source.? };
+    const x: write.Target = .{ .source = old.notes.items[p].source().? };
     var gone: std.ArrayList(usize) = .empty;
     try records_mod.erased(&s.log, x, &gone, a);
     const bytes = snapshotBytes(s, a) catch |e| return switch (e) {
@@ -181,7 +182,8 @@ pub fn erase(s: *Store, a: Allocator, id: u32, why: *Refusal) Error!Erased {
         write.commit(fresh, &undo);
         try log.add(e.r, out, fresh);
     }
-    const idx = index.Index.build(s.gpa, fresh) catch return error.OutOfMemory;
+    try fresh.trim(); // as at startup: the lists the kept writes grew, at their lengths
+    const idx = index.Index.buildKind(s.gpa, fresh, s.kind) catch return error.OutOfMemory;
     var idx_owned = true;
     defer if (idx_owned) idx.deinit();
     const v = try s.gpa.create(store_mod.Version);
@@ -191,7 +193,7 @@ pub fn erase(s: *Store, a: Allocator, id: u32, why: *Refusal) Error!Erased {
     idx.ver = s.next_ver;
     try s.retired.ensureUnusedCapacity(s.gpa, 1);
     var moved: std.ArrayList([2]u32) = .empty;
-    for (old.notes.items[old.base_notes..]) |n| if (fresh.placeOfSource(n.source.?)) |q| {
+    for (old.notes.items[old.base_notes..]) |*n| if (fresh.placeOfSource(n.source().?)) |q| {
         if (fresh.notes.items[q].id != n.id) try moved.append(a, .{ n.id, fresh.notes.items[q].id });
     };
     var unsynced = false;
@@ -210,8 +212,13 @@ pub fn erase(s: *Store, a: Allocator, id: u32, why: *Refusal) Error!Erased {
     s.model = fresh;
     var old_log = s.log;
     s.log = log;
-    s.reclaim(true);
     old_log.deinit();
+    if (s.defer_erase_merge) {
+        // the negative control of the erase tests: the note hidden now, its bytes left to a later merge
+        s.parked.append(s.gpa, old) catch old.deinit();
+        return .{ .removed = removed.items, .moved = moved.items };
+    }
+    s.reclaim(true);
     old.deinit();
     s.sweep();
     s.text.forget(); // the tokenizer's kept encodes: a block or a prompt that quoted it

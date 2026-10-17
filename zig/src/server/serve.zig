@@ -134,7 +134,8 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
     defer srv.deinit();
     if (args.notes) |path| {
         var why: []const u8 = "";
-        srv.notes = notes_route.Store.open(gpa, io, path, s.text, s.model_dir, &why) catch |e| {
+        const kind = std.meta.stringToEnum(notes_route.IndexKind, args.notes_index) orelse .postings; // argparse checked it
+        srv.notes = notes_route.Store.openIndexed(gpa, io, path, s.text, s.model_dir, kind, &why) catch |e| {
             std.debug.print("tensorfold: --notes {s}: {s} ({s})\n", .{ path, why, @errorName(e) });
             return 2;
         };

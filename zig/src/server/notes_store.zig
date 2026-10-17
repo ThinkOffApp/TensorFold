@@ -3,6 +3,7 @@ const std = @import("std");
 const model_text = @import("model_text.zig");
 const clock = @import("clock.zig");
 const index = @import("notes/index.zig");
+const sa = @import("notes/sa.zig");
 const lookup = @import("notes/lookup.zig");
 const model_mod = @import("notes/model.zig");
 const write = @import("notes/write.zig");
@@ -14,14 +15,17 @@ const Model = model_mod.Model;
 const Allocator = std.mem.Allocator;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
+/// The n-gram index a store builds: LLWZ's posting lists (the default), or a suffix array (--notes-index sa).
+pub const IndexKind = index.Kind;
+
 /// How a snapshot's tokenizer was checked: the tokenizer.json SHA-256 it names, or its vocabulary size only.
 pub const Check = enum { sha256, vocabulary_only };
 
 /// The most of tokenizer.json the startup check reads (the grammar compiler reads it under the same limit).
 pub const tokenizer_limit: usize = 256 << 20;
 
-/// One build of the index. A lookup holds it while it reads; the writer frees it once no lookup does.
-pub const Version = struct { idx: *index.Index, readers: std.atomic.Value(u32) = .init(0) };
+/// One build of the index, held by lookups; `garbage`: lines a write replaced, freed with it (oldest first).
+pub const Version = struct { idx: *index.Index, readers: std.atomic.Value(u32) = .init(0), garbage: std.ArrayList([]u8) = .empty };
 
 /// A lookup's scratch in the pool, with the erase epoch it was made in (an older one is freed, not reused).
 const Kept = struct { sc: lookup.Scratch, epoch: u64 };
@@ -52,14 +56,29 @@ pub const Store = struct {
     replayed: usize = 0,
     truncated: u64 = 0,
     auto_write: bool = true, // a "notes": true chat request's last user message is written (--no-notes-write: not)
+    kind: IndexKind = .postings, // the n-gram index each version builds
+    long: index.Long = .{}, // sa: matches longer than n_max (off: the lookup LLWZ's tests check)
+    side_max: u32 = 1024, // sa: a write's version keeps its base while at most this many notes are past it
+    merges: u64 = 0, // sa: bases built by writes and merges since startup (the load's not counted)
+    defer_erase_merge: bool = false, // tests only: an erase that leaves the old base and model to a later merge
+    parked: std.ArrayList(*Model) = .empty, // the models such an erase left
 
     /// Loads the snapshot at `path` for a model whose tokenizer is `text` (its tokenizer.json lies in `model_dir`).
     pub fn open(gpa: Allocator, io: std.Io, path: []const u8, text: model_text.Text, model_dir: []const u8, problem: *[]const u8) !*Store {
         return openLimited(gpa, io, path, text, model_dir, tokenizer_limit, problem);
     }
 
+    /// open() building the n-gram index of `kind`.
+    pub fn openIndexed(gpa: Allocator, io: std.Io, path: []const u8, text: model_text.Text, model_dir: []const u8, kind: IndexKind, problem: *[]const u8) !*Store {
+        return openWith(gpa, io, path, text, model_dir, tokenizer_limit, kind, problem);
+    }
+
     /// open() with the tokenizer.json read limit given; a named hash passes only when the model's is read and equal.
     pub fn openLimited(gpa: Allocator, io: std.Io, path: []const u8, text: model_text.Text, model_dir: []const u8, limit: usize, problem: *[]const u8) !*Store {
+        return openWith(gpa, io, path, text, model_dir, limit, .postings, problem);
+    }
+
+    fn openWith(gpa: Allocator, io: std.Io, path: []const u8, text: model_text.Text, model_dir: []const u8, limit: usize, kind: IndexKind, problem: *[]const u8) !*Store {
         const t0 = clock.nowNs(io);
         const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .unlimited) catch |e| {
             problem.* = "the snapshot file cannot be read";
@@ -68,7 +87,7 @@ pub const Store = struct {
         defer gpa.free(bytes);
         const journal_path = try std.mem.concat(gpa, u8, &.{ path, ".journal" });
         defer gpa.free(journal_path);
-        const s = try loadJournaled(gpa, io, bytes, text, journal_path, problem);
+        const s = try loadWith(gpa, io, bytes, text, journal_path, kind, problem);
         errdefer s.deinit();
         s.snapshot_path = try s.gpa.dupe(u8, path);
         if (s.snapshot_bytes) |b| s.gpa.free(b);
@@ -94,7 +113,9 @@ pub const Store = struct {
         };
         var w: [240]u8 = undefined;
         const writes = if (s.read_only.len > 0) std.fmt.bufPrint(&w, "writes off ({s})", .{s.read_only}) catch "writes off" else std.fmt.bufPrint(&w, "{d} writes replayed from the journal; a chat request's user statements {s}", .{ s.replayed, if (s.auto_write) "are written through the intake (--no-notes-write: not)" else "are not written (--no-notes-write)" }) catch "";
-        return std.fmt.bufPrint(buf, "notes: {d} notes ({d} current) from {s}, cap {d}, loaded in {d:.1} ms; {s}; {s}; a chat request sends \"notes\": true to have them looked up", .{ ix.notes(), ix.n_cur, path, ix.settings.cap, s.load_ms, checked, writes }) catch buf;
+        var k: [96]u8 = undefined;
+        const kind = if (s.kind == .sa) std.fmt.bufPrint(&k, "; suffix-array index (--notes-index sa, a merge past {d} written notes)", .{s.side_max}) catch "" else "";
+        return std.fmt.bufPrint(buf, "notes: {d} notes ({d} current) from {s}, cap {d}, loaded in {d:.1} ms{s}; {s}; {s}; a chat request sends \"notes\": true to have them looked up", .{ ix.notes(), ix.n_cur, path, ix.settings.cap, s.load_ms, kind, checked, writes }) catch buf;
     }
 
     /// A snapshot's JSON text as a store, checked against the model's vocabulary size; writes are off (no journal).
@@ -104,6 +125,15 @@ pub const Store = struct {
 
     /// load() with the journal at `journal_path` replayed over the snapshot; null keeps writes off.
     pub fn loadJournaled(parent: Allocator, io: std.Io, bytes: []const u8, text: model_text.Text, journal_path: ?[]const u8, problem: *[]const u8) !*Store {
+        return loadWith(parent, io, bytes, text, journal_path, .postings, problem);
+    }
+
+    /// load() building the n-gram index of `kind`.
+    pub fn loadIndexed(gpa: Allocator, io: std.Io, bytes: []const u8, text: model_text.Text, kind: IndexKind, problem: *[]const u8) !*Store {
+        return loadWith(gpa, io, bytes, text, null, kind, problem);
+    }
+
+    fn loadWith(parent: Allocator, io: std.Io, bytes: []const u8, text: model_text.Text, journal_path: ?[]const u8, kind: IndexKind, problem: *[]const u8) !*Store {
         const s = try parent.create(Store);
         errdefer parent.destroy(s);
         s.zeroing = .{ .child = parent };
@@ -123,7 +153,7 @@ pub const Store = struct {
             problem.* = "the snapshot's vocabulary is not the model tokenizer's size";
             return error.BadSnapshot;
         }
-        s.* = .{ .zeroing = s.zeroing, .gpa = gpa, .io = io, .text = text, .model = m, .fixed_settings = m.settings, .current = undefined, .log = .{ .gpa = gpa }, .snapshot_sha = std.fmt.bytesToHex(sha, .lower) };
+        s.* = .{ .zeroing = s.zeroing, .gpa = gpa, .io = io, .text = text, .model = m, .fixed_settings = m.settings, .current = undefined, .log = .{ .gpa = gpa }, .snapshot_sha = std.fmt.bytesToHex(sha, .lower), .kind = kind };
         errdefer s.log.deinit();
         if (journal_path) |jp| {
             var arena = std.heap.ArenaAllocator.init(gpa);
@@ -134,11 +164,15 @@ pub const Store = struct {
             s.truncated = s.journal.?.truncated;
             for (recs.items) |r| try s.replay(r, problem);
             s.replayed = recs.items.len;
+            try m.trim(); // the lists the writes grew, at their lengths
             s.log.next_source = @max(s.log.next_source, s.journal.?.next_source);
             s.snapshot_bytes = try gpa.dupe(u8, bytes);
         } else s.read_only = "the store has no journal";
         errdefer if (s.snapshot_bytes) |b| gpa.free(b);
-        const idx = try index.Index.build(gpa, m);
+        const idx = index.Index.buildKind(gpa, m, kind) catch |e| {
+            if (e == error.Unsupported) problem.* = "the suffix-array index needs a vocabulary whose keys are all real and whose ids of one key agree on being a word";
+            return e;
+        };
         errdefer idx.deinit();
         const v = try gpa.create(Version);
         v.* = .{ .idx = idx };
@@ -171,6 +205,8 @@ pub const Store = struct {
         for (s.retired.items) |v| freeVersion(s.gpa, v);
         s.retired.deinit(s.gpa);
         freeVersion(s.gpa, s.current);
+        for (s.parked.items) |m| m.deinit();
+        s.parked.deinit(s.gpa);
         s.log.deinit();
         if (s.journal) |*j| j.deinit();
         if (s.snapshot_path) |p| s.gpa.free(p);
@@ -181,6 +217,8 @@ pub const Store = struct {
 
     fn freeVersion(g: Allocator, v: *Version) void {
         v.idx.deinit();
+        for (v.garbage.items) |l| g.free(l);
+        v.garbage.deinit(g);
         g.destroy(v);
     }
 
@@ -208,7 +246,7 @@ pub const Store = struct {
         const epoch = s.epoch;
         s.lock.unlock(s.io);
         if (kept) |k| {
-            if (k.epoch == epoch and k.sc.slot.len >= idx.notes()) return k;
+            if (k.epoch == epoch and k.sc.slot.len >= idx.notes() and (idx.kind != .sa or k.sc.seen.len >= idx.notes())) return k;
             k.sc.deinit(); // made before an erase, or for fewer notes
             s.gpa.destroy(k);
         }
@@ -238,7 +276,7 @@ pub const Store = struct {
         const sc = &k.sc;
         const io = s.io;
         const t0 = clock.nowNs(io);
-        const packed_notes = try lookup.lookup(idx, sc, qids, past, cap, exclude);
+        const packed_notes = try lookup.lookup(idx, sc, qids, past, cap, exclude, s.long);
         const chosen = try a.dupe(u32, packed_notes.chosen);
         var shown = try lookup.render(idx, sc, chosen);
         const t1 = clock.nowNs(io);
@@ -260,6 +298,7 @@ pub const Store = struct {
             .pack_tokens = packed_notes.tokens,
             .dropped = chosen.len - n,
             .candidates = packed_notes.candidates,
+            .long = packed_notes.long,
             .lookup_ns = t1 - t0,
             .fit_ns = t2 - t1,
             .in_store = idx.notes(),
@@ -267,15 +306,12 @@ pub const Store = struct {
         };
     }
 
-    /// Frees the retired versions no lookup holds; with `all`, waits until none holds any (an erase). Never allocates.
+    /// Frees retired versions no lookup holds, oldest first; with `all`, waits until none holds any. Never allocates.
     pub fn reclaim(s: *Store, all: bool) void {
         while (true) {
             s.lock.lockUncancelable(s.io);
             var found: ?*Version = null;
-            for (s.retired.items, 0..) |v, k| if (v.readers.load(.acquire) == 0) {
-                found = s.retired.swapRemove(k);
-                break;
-            };
+            if (s.retired.items.len > 0 and s.retired.items[0].readers.load(.acquire) == 0) found = s.retired.orderedRemove(0);
             const left = s.retired.items.len;
             s.lock.unlock(s.io);
             if (found) |v| {
@@ -312,14 +348,41 @@ pub const Store = struct {
         }
     }
 
-    /// A new version of the index from the model, numbered.
+    /// A new numbered version; sa: on the current base while side_max or fewer notes follow it, else a merge.
     pub fn build(s: *Store) !*Version {
-        const idx = try index.Index.build(s.gpa, s.model);
+        var reuse: ?*sa.Base = null;
+        if (s.kind == .sa) if (s.current.idx.base) |b| {
+            if (s.model.notes.items.len - b.notes <= s.side_max) reuse = b;
+        };
+        return s.buildOn(reuse);
+    }
+
+    fn buildOn(s: *Store, reuse: ?*sa.Base) !*Version {
+        const idx = try index.Index.buildWith(s.gpa, s.model, s.kind, reuse);
         errdefer idx.deinit();
         const v = try s.gpa.create(Version);
         v.* = .{ .idx = idx };
         idx.ver = s.next_ver;
+        if (s.kind == .sa and reuse == null) s.merges += 1;
         return v;
+    }
+
+    /// sa: the side buffer merged now, and what a deferred erase left freed; postings: the index built again.
+    pub fn merge(s: *Store) !void {
+        s.writer.lockUncancelable(s.io);
+        defer s.writer.unlock(s.io);
+        try s.retired.ensureUnusedCapacity(s.gpa, 1);
+        const v = try s.buildOn(null);
+        s.swap(v, false);
+        s.next_ver += 1;
+        if (s.parked.items.len > 0) { // what a deferred erase left: freed as an erase frees it
+            s.reclaim(true);
+            for (s.parked.items) |m| m.deinit();
+            s.parked.clearRetainingCapacity();
+            s.sweep();
+            s.text.forget();
+        }
+        s.reclaim(false);
     }
 
     /// The tick a write made now is told at: after every write so far, and inside today (NoteStore._apply).
@@ -351,6 +414,7 @@ pub const Found = struct {
     pack_tokens: u32, // pack()'s sum of the parts
     dropped: usize, // notes fit() took out
     candidates: u32,
+    long: u32 = 0, // sa with longer matches on: the n-grams over n_max weighted
     lookup_ns: i96,
     fit_ns: i96,
     in_store: usize = 0, // notes in the version it read

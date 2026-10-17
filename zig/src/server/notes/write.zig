@@ -72,7 +72,7 @@ fn duplicates(m: *const Model, a: Allocator, entity: ?u32, pair: ?u32, text: []c
     for (m.notes.items) |n| {
         if (n.state != .current or n.kind != .fact or n.entity != e) continue;
         if (pair) |p| if (n.pair != p) continue;
-        if (try sameText(a, n.text, want)) try out.append(a, n.id);
+        if (try sameText(a, n.text(), want)) try out.append(a, n.id);
     }
     return out.toOwnedSlice(a);
 }
@@ -135,13 +135,14 @@ pub fn apply(m: *Model, text: model_text.Text, a: Allocator, r: Record, out: *Ou
     }
     const id = m.nextId();
     const kind: model_mod.Kind = if (r.op == .take_back) .tombstone else .fact;
-    var note: Note = .{ .id = id, .state = .current, .kind = kind, .entity = entity orelse @intCast(m.entities.items.len), .attribute = attribute orelse @intCast(m.attributes.items.len), .pair = pair orelse @intCast(m.pairs.items.len), .value_ent = -1, .told = r.told, .text = &.{}, .line = &.{}, .cost = 0, .tokens = &.{}, .version = 1 + if (pair) |p| @as(u32, @intCast(m.pairs.items[p].ids.items.len)) else 0 };
+    const ids = try encode(g, text, r.text);
+    defer g.free(ids);
+    var note: Note = .{ .id = id, .state = .current, .kind = kind, .entity = entity orelse @intCast(m.entities.items.len), .attribute = attribute orelse @intCast(m.attributes.items.len), .pair = pair orelse @intCast(m.pairs.items.len), .value_ent = -1, .told = r.told, .cost = 0, .version = 1 + if (pair) |p| @as(u32, @intCast(m.pairs.items[p].ids.items.len)) else 0 };
     errdefer Model.freeNote(g, &note);
-    note.text = try g.dupe(u8, r.text);
-    note.source = try g.dupe(u8, r.source);
-    note.tokens = try encode(g, text, r.text);
-    note.line = try line_mod.render(g, id, r.text, if (kind == .tombstone) .{ .takeback = false } else .none, m.takeback);
-    note.cost = try cost(g, text, note.line);
+    try note.makeBody(g, ids.len, r.text, r.source);
+    @memcpy(note.tokensMut(), ids);
+    note.setLine(try line_mod.render(g, id, r.text, if (kind == .tombstone) .{ .takeback = false } else .none, m.takeback));
+    note.cost = try cost(g, text, note.line());
     // the retired notes' new lines, made before anything changes
     try undo.gone.ensureTotalCapacity(g, gone.items.len);
     const lines = try a.alloc([]u8, gone.items.len);
@@ -151,7 +152,7 @@ pub fn apply(m: *Model, text: model_text.Text, a: Allocator, r: Record, out: *Ou
     for (gone.items, 0..) |p, k| {
         const old = m.notes.items[p];
         const ret: line_mod.Retired = .{ .by = id, .told = r.told };
-        lines[k] = try line_mod.render(g, old.id, old.text, if (kind == .tombstone) .{ .withdrawn = ret } else .{ .superseded = ret }, m.takeback);
+        lines[k] = try line_mod.render(g, old.id, old.text(), if (kind == .tombstone) .{ .withdrawn = ret } else .{ .superseded = ret }, m.takeback);
         made += 1;
         costs[k] = try cost(g, text, lines[k]);
     }
@@ -187,10 +188,10 @@ pub fn apply(m: *Model, text: model_text.Text, a: Allocator, r: Record, out: *Ou
     }
     for (gone.items, lines, costs, retired) |p, l, c, *rid| {
         const n = &m.notes.items[p];
-        undo.gone.appendAssumeCapacity(.{ .place = p, .state = n.state, .by = n.by, .line = n.line, .cost = n.cost });
+        undo.gone.appendAssumeCapacity(.{ .place = p, .state = n.state, .by = n.by, .line = n.line(), .cost = n.cost });
         n.state = if (kind == .tombstone) .tombstoned else .superseded;
         n.by = id;
-        n.line = l;
+        n.setLine(l);
         n.cost = c;
         rid.* = n.id;
     }
@@ -207,8 +208,8 @@ pub fn revert(m: *Model, undo: *Undo) void {
         k -= 1;
         const s = undo.gone.items[k];
         const n = &m.notes.items[s.place];
-        g.free(n.line);
-        n.line = s.line;
+        g.free(n.line());
+        n.setLine(s.line);
         n.state = s.state;
         n.by = s.by;
         n.cost = s.cost;
@@ -230,9 +231,17 @@ pub fn revert(m: *Model, undo: *Undo) void {
     undo.pair = null;
 }
 
-/// Frees what apply() replaced: the retired notes' old lines.
+/// Frees what apply() replaced: the retired notes' old lines (for a model no index reads yet).
 pub fn commit(m: *Model, undo: *Undo) void {
     for (undo.gone.items) |s| m.gpa.free(s.line);
+    undo.gone.clearRetainingCapacity();
+    undo.pair = null;
+}
+
+/// commit() for a model an index reads: the old lines go to `keep` (room reserved), freed with the last reader.
+pub fn commitKeeping(m: *Model, undo: *Undo, keep: *std.ArrayList([]u8)) void {
+    _ = m;
+    for (undo.gone.items) |s| keep.appendAssumeCapacity(s.line);
     undo.gone.clearRetainingCapacity();
     undo.pair = null;
 }

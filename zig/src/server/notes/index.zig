@@ -2,6 +2,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const model_mod = @import("model.zig");
+const exact = @import("exact_alloc.zig");
+const sa = @import("sa.zig");
 const Model = model_mod.Model;
 const Allocator = std.mem.Allocator;
 
@@ -35,6 +37,11 @@ pub const max_phrase = 8;
 pub const no_note: u32 = 0xFFFF_FFFF;
 
 pub const State = enum(u8) { current = 0, superseded = 1, tombstoned = 2 };
+/// The n-gram index: LLWZ's posting lists, or a suffix array over the notes' folded keys.
+pub const Kind = enum { postings, sa };
+
+/// Matches over n_max keys, sa only, off by default: all n-grams up to `max`, or each position's longest (lookup.zig).
+pub const Long = struct { mode: enum { off, all, longest } = .off, max: u8 = 8 };
 pub const Hop = enum { subject, subject_value, none };
 
 pub const Settings = struct {
@@ -97,11 +104,25 @@ pub fn packPhrase(keys: []const u32) Phrase {
 /// Postings of one n-gram: note places in the current view, then in the history view.
 pub const Post = struct { cur_off: u32, cur_len: u32, hist_off: u32, hist_len: u32 };
 
+/// Groups of note places (or pairs) by a number, flat: group k is items[off[k]..off[k+1]].
+pub const Groups = struct {
+    off: []const u32 = &.{},
+    items: []const u32 = &.{},
+
+    pub inline fn of(g: Groups, k: usize) []const u32 {
+        return g.items[g.off[k]..g.off[k + 1]];
+    }
+
+    pub fn len(g: Groups) usize {
+        return g.off.len -| 1;
+    }
+};
+
 /// One note as the snapshot gives it.
 const Raw = struct { id: u32, state: State, entity: u32, pair: u32, value_ent: i32, told: i64, line: []const u8, cost: u32, tokens: []const u32 };
 
 pub const Index = struct {
-    arena: std.heap.ArenaAllocator,
+    arena: exact.Exact, // every array at its exact size: no arena node grown 1.5 times past the postings
     log: LogFn,
     settings: Settings,
     head: []const u8,
@@ -127,9 +148,15 @@ pub const Index = struct {
     cost: []const u32,
     min_line: i64, // the least any line can add in pack(): its cost and a line break
     id_place: []const u32, // a note id -> its place, or no_note
-    ent_cur: []const []const u32, // entity -> places of its current notes (O.ent_cur)
-    ent_keys: []const []const u32, // entity -> its pairs (O.ent_keys)
-    pair_notes: []const []const u32, // pair -> places of its notes, every state, oldest first (O.by_key)
+    ent_cur: Groups, // entity -> places of its current notes (O.ent_cur)
+    ent_keys: Groups, // entity -> its pairs (O.ent_keys)
+    pair_notes: Groups, // pair -> places of its notes, every state, oldest first (O.by_key)
+    kind: Kind = .postings,
+    /// sa: the suffix arrays of places 0..base.notes-1, shared by the versions built on it (null: postings only)
+    base: ?*sa.Base = null,
+    /// sa: the side buffer's notes' keys (place base.notes + k is group k), for matches longer than n_max
+    side_keys: Groups = .{},
+    /// postings: every note's; sa: the side buffer's, the notes written since the base (places base.notes..)
     grams: std.HashMapUnmanaged(Gram, Post, GramCtx, 80),
     post: []const u32,
     phrases: std.HashMapUnmanaged(Phrase, u32, PhraseCtx, 80),
@@ -150,7 +177,8 @@ pub const Index = struct {
     }
 
     pub fn deinit(self: *Index) void {
-        const gpa = self.arena.child_allocator;
+        const gpa = self.arena.child;
+        if (self.base) |b| b.release();
         self.arena.deinit();
         if (self.owned) |m| m.deinit();
         gpa.destroy(self);
@@ -177,16 +205,28 @@ pub const Index = struct {
         return self;
     }
 
+    /// build() with the n-gram index of `kind` (sa: a new base over every note, nothing in the side buffer).
+    pub fn buildKind(gpa: Allocator, m: *const Model, kind: Kind) LoadError!*Index {
+        return buildWith(gpa, m, kind, null);
+    }
+
     /// The index of a model's notes, as a snapshot of them would load; the model must outlive it (it reads its vocab).
     pub fn build(gpa: Allocator, m: *const Model) LoadError!*Index {
+        return buildWith(gpa, m, .postings, null);
+    }
+
+    /// The index of `kind`; sa: on `reuse` (a base over the first notes) with the rest as side postings, or a new base.
+    pub fn buildWith(gpa: Allocator, m: *const Model, kind: Kind, reuse: ?*sa.Base) LoadError!*Index {
         const self = try gpa.create(Index);
         errdefer gpa.destroy(self);
         self.* = undefined;
-        self.arena = std.heap.ArenaAllocator.init(gpa);
+        self.arena = exact.Exact.init(gpa);
         errdefer self.arena.deinit();
         self.owned = null;
         self.ver = 0;
-        const a = self.arena.allocator();
+        self.kind = kind;
+        self.base = null;
+        errdefer if (self.base) |b| b.release();
         self.log = libmLog();
         self.settings = m.settings;
         self.head = m.head;
@@ -199,15 +239,77 @@ pub const Index = struct {
         self.tokenizer_sha256 = m.tokenizer_sha256;
         self.vkey = m.vkey;
         self.vwordy = m.vwordy;
-        const raw = try a.alloc(Raw, m.notes.items.len);
-        for (m.notes.items, raw) |n, *r| r.* = .{ .id = n.id, .state = n.state, .entity = n.entity, .pair = n.pair, .value_ent = n.value_ent, .told = n.told, .line = n.line, .cost = n.cost, .tokens = n.tokens };
+        const raw = try gpa.alloc(Raw, m.notes.items.len); // the build's own: freed when it returns
+        defer gpa.free(raw);
+        for (m.notes.items, raw) |n, *r| r.* = .{ .id = n.id, .state = n.state, .entity = n.entity, .pair = n.pair, .value_ent = n.value_ent, .told = n.told, .line = n.line(), .cost = n.cost, .tokens = n.tokens() };
         try self.placeNotes(gpa, raw);
         try self.groupsOf(m);
         self.phrases = .empty;
         self.phrase_max = 0;
         try self.phrasesOf(m);
-        try self.buildPostings(gpa, raw);
+        var first: usize = 0;
+        self.side_keys = .{};
+        if (kind == .sa) {
+            self.base = if (reuse) |b| b.retain() else try baseOf(gpa, m, raw);
+            first = self.base.?.notes;
+            try self.sideKeys(m, raw[first..]);
+        }
+        try self.buildPostings(gpa, raw, first);
         return self;
+    }
+
+    /// The side buffer's notes' keys, flat.
+    fn sideKeys(self: *Index, m: *const Model, side: []const Raw) LoadError!void {
+        const a = self.arena.allocator();
+        const off = try a.alloc(u32, side.len + 1);
+        var total: u32 = 0;
+        for (side, 0..) |x, k| {
+            off[k] = total;
+            total += @intCast(x.tokens.len);
+        }
+        off[side.len] = total;
+        const items = try a.alloc(u32, total);
+        var at: usize = 0;
+        for (side) |x| for (x.tokens) |t| {
+            items[at] = m.keyOf(t);
+            at += 1;
+        };
+        self.side_keys = .{ .off = off, .items = items };
+    }
+
+    /// A suffix-array base over every note: their folded keys, each view's suffixes sorted (the build's memory freed).
+    fn baseOf(gpa: Allocator, m: *const Model, raw: []const Raw) LoadError!*sa.Base {
+        try saVocab(gpa, m);
+        var total: usize = 0;
+        for (raw) |x| total += x.tokens.len;
+        const keys = try gpa.alloc(u32, total);
+        defer gpa.free(keys);
+        const src = try gpa.alloc(sa.Source, raw.len);
+        defer gpa.free(src);
+        var at: usize = 0;
+        for (raw, src) |x, *o| {
+            for (x.tokens, keys[at..][0..x.tokens.len]) |t, *k| k.* = m.keyOf(t);
+            o.* = .{ .keys = keys[at..][0..x.tokens.len], .ids = x.tokens, .cur = x.state == .current };
+            at += x.tokens.len;
+        }
+        return sa.build(gpa, src, m.vwordy);
+    }
+
+    /// Key sequences match as packed n-grams do only with no none_key key and one wordiness per key: else Unsupported.
+    fn saVocab(gpa: Allocator, m: *const Model) LoadError!void {
+        var max: u32 = 0;
+        for (m.vkey) |k| {
+            if (k == none_key) return error.Unsupported;
+            max = @max(max, k & ~key_id);
+        }
+        const seen = try gpa.alloc(u8, 2 * (@as(usize, max) + 1)); // by key: 0 unseen, 1 a word, 2 not
+        defer gpa.free(seen);
+        @memset(seen, 0);
+        for (m.vkey, 0..) |k, t| {
+            const at = 2 * @as(usize, k & ~key_id) + @intFromBool(k & key_id != 0);
+            const w: u8 = if (t < m.vwordy.len and m.vwordy[t]) 1 else 2;
+            if (seen[at] == 0) seen[at] = w else if (seen[at] != w) return error.Unsupported;
+        }
     }
 
     /// The notes by place, with Python's tie order (-told, id) and the least a line can add.
@@ -238,7 +340,7 @@ pub const Index = struct {
             entity[k] = x.entity;
             pair[k] = x.pair;
             value_ent[k] = x.value_ent;
-            line[k] = try a.dupe(u8, x.line);
+            line[k] = x.line; // the model's own: a write frees a replaced line only once no version can read it
             cost[k] = x.cost;
         }
         const by = try gpa.alloc(u32, n);
@@ -272,67 +374,79 @@ pub const Index = struct {
         self.n_hist = n_hist;
     }
 
-    /// O.ent_cur, O.ent_keys and O.by_key, as note places: one pass to count, one to fill (by place, by pair order).
+    /// O.ent_cur, O.ent_keys and O.by_key as note places, flat: one pass to count, one to fill (place, pair order).
     fn groupsOf(self: *Index, m: *const Model) LoadError!void {
         const a = self.arena.allocator();
         const ne = m.entities.items.len;
-        for (self.pair) |p| if (p >= m.pairs.items.len) return error.BadSnapshot;
+        const np = m.pairs.items.len;
+        for (self.pair) |p| if (p >= np) return error.BadSnapshot;
         for (self.entity) |e| if (e >= ne) return error.BadSnapshot;
         for (m.pairs.items) |p| if (p.entity >= ne) return error.BadSnapshot;
-        const cur_n = try a.alloc(u32, ne);
-        @memset(cur_n, 0);
-        const key_n = try a.alloc(u32, ne);
-        @memset(key_n, 0);
+        const cur_off = try a.alloc(u32, ne + 1);
+        const key_off = try a.alloc(u32, ne + 1);
+        @memset(cur_off, 0);
+        @memset(key_off, 0);
         for (self.state, self.entity) |st, e| if (st == .current) {
-            cur_n[e] += 1;
+            cur_off[e + 1] += 1;
         };
-        for (m.pairs.items) |p| key_n[p.entity] += 1;
-        const ent_cur = try a.alloc([]const u32, ne);
-        const ent_keys = try a.alloc([]const u32, ne);
-        const cur_buf = try a.alloc([]u32, ne);
-        const key_buf = try a.alloc([]u32, ne);
-        for (0..ne) |e| {
-            cur_buf[e] = try a.alloc(u32, cur_n[e]);
-            key_buf[e] = try a.alloc(u32, key_n[e]);
-            cur_n[e] = 0;
-            key_n[e] = 0;
+        for (m.pairs.items) |p| key_off[p.entity + 1] += 1;
+        for (1..ne + 1) |e| {
+            cur_off[e] += cur_off[e - 1];
+            key_off[e] += key_off[e - 1];
         }
+        const cur_items = try a.alloc(u32, cur_off[ne]);
+        const key_items = try a.alloc(u32, key_off[ne]);
+        // each group fills from its start: off[e] is moved along it, then back
         for (self.state, self.entity, 0..) |st, e, k| if (st == .current) {
-            cur_buf[e][cur_n[e]] = @intCast(k);
-            cur_n[e] += 1;
+            cur_items[cur_off[e]] = @intCast(k);
+            cur_off[e] += 1;
         };
         for (m.pairs.items, 0..) |p, k| {
-            key_buf[p.entity][key_n[p.entity]] = @intCast(k);
-            key_n[p.entity] += 1;
+            key_items[key_off[p.entity]] = @intCast(k);
+            key_off[p.entity] += 1;
         }
-        for (0..ne) |e| {
-            ent_cur[e] = cur_buf[e];
-            ent_keys[e] = key_buf[e];
+        var e = ne;
+        while (e > 0) : (e -= 1) {
+            cur_off[e] = cur_off[e - 1];
+            key_off[e] = key_off[e - 1];
         }
-        const pair_notes = try a.alloc([]const u32, m.pairs.items.len);
-        for (m.pairs.items, pair_notes) |p, *slot| {
-            const out = try a.alloc(u32, p.ids.items.len);
-            for (p.ids.items, out) |id, *place| place.* = self.placeOfId(id) orelse return error.BadSnapshot;
-            slot.* = out;
+        cur_off[0] = 0;
+        key_off[0] = 0;
+        var total: usize = 0;
+        for (m.pairs.items) |p| total += p.ids.items.len;
+        const pair_off = try a.alloc(u32, np + 1);
+        const pair_items = try a.alloc(u32, total);
+        var at: u32 = 0;
+        for (m.pairs.items, 0..) |p, k| {
+            pair_off[k] = at;
+            for (p.ids.items) |id| {
+                pair_items[at] = self.placeOfId(id) orelse return error.BadSnapshot;
+                at += 1;
+            }
         }
-        self.ent_cur = ent_cur;
-        self.ent_keys = ent_keys;
-        self.pair_notes = pair_notes;
+        pair_off[np] = at;
+        self.ent_cur = .{ .off = cur_off, .items = cur_items };
+        self.ent_keys = .{ .off = key_off, .items = key_items };
+        self.pair_notes = .{ .off = pair_off, .items = pair_items };
     }
 
     /// Entity phrases: only 2 to 8 keys can ever match (subjects() looks at those lengths).
     fn phrasesOf(self: *Index, m: *const Model) LoadError!void {
         const a = self.arena.allocator();
+        var count: u32 = 0;
+        for (m.phrases.items) |p| count += @intFromBool(p.keys.len >= 2 and p.keys.len <= max_phrase);
+        try self.phrases.ensureTotalCapacity(a, count); // once: no outgrown table left behind
         for (m.phrases.items) |p| {
             if (p.entity >= m.entities.items.len) return error.BadSnapshot;
             if (p.keys.len < 2 or p.keys.len > max_phrase) continue;
-            try self.phrases.put(a, packPhrase(p.keys), p.entity);
+            self.phrases.putAssumeCapacity(packPhrase(p.keys), p.entity);
             self.phrase_max = @max(self.phrase_max, p.keys.len);
         }
     }
 
     /// The postings of both views, from each note's token ids by the same grams() as a question's.
-    fn buildPostings(self: *Index, gpa: Allocator, raw: []const Raw) LoadError!void {
+    fn buildPostings(self: *Index, gpa: Allocator, all: []const Raw, first: usize) LoadError!void {
+        const raw = all[first..]; // the notes from place `first` on (sa: the side buffer's)
         const a = self.arena.allocator();
         const Hit = struct { entry: u32, note: u32 };
         var hits: std.ArrayList(Hit) = .empty;
@@ -357,8 +471,8 @@ pub const Index = struct {
                     try entries.append(gpa, .{ .cur_off = 0, .cur_len = 0, .hist_off = 0, .hist_len = 0 });
                 }
                 const e = &entries.items[r.value_ptr.*];
-                if (self.state[k] == .current) e.cur_len += 1 else e.hist_len += 1;
-                try hits.append(gpa, .{ .entry = r.value_ptr.*, .note = @intCast(k) });
+                if (self.state[first + k] == .current) e.cur_len += 1 else e.hist_len += 1;
+                try hits.append(gpa, .{ .entry = r.value_ptr.*, .note = @intCast(first + k) });
             }
         }
         var off: u32 = 0;
@@ -384,7 +498,7 @@ pub const Index = struct {
         }
         self.post = post;
         self.grams = .empty;
-        try self.grams.ensureTotalCapacity(a, @intCast(entries.items.len));
+        try self.grams.ensureTotalCapacity(a, @intCast(entries.items.len)); // counted first: one table, no regrowth
         var it = map.iterator();
         while (it.next()) |kv| self.grams.putAssumeCapacity(kv.key_ptr.*, entries.items[kv.value_ptr.*]);
     }

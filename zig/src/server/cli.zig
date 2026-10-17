@@ -115,6 +115,7 @@ pub const flags = [_]Flag{
     .{ .name = "--cortheon", .kind = .store_true, .native = true },
     .{ .name = "--notes", .native = true },
     .{ .name = "--no-notes-write", .kind = .store_true, .native = true },
+    .{ .name = "--notes-index", .choices = &.{ "postings", "sa" }, .native = true },
 };
 
 /// The variables this binary honours as the Python engine does, then the CUDA build's.
@@ -173,6 +174,7 @@ pub const Args = struct {
     policy: []const u8 = "", // every --policy joined by commas
     notes: ?[]const u8 = null, // an LLWZ note snapshot for "notes": true requests; no named tokenizer hash: vocabulary-only check
     notes_write: bool = true, // a "notes": true request's last user message goes through the intake into the notes
+    notes_index: []const u8 = "postings", // the notes' n-gram index: LLWZ's posting lists, or a suffix array ("sa")
     cortheon: bool = false, // Cortheon's program, research before building, and cortheon_search/cortheon_fetch run by the server
 };
 
@@ -279,7 +281,7 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         const n = try int(u, a, name, v);
         if (n < 0) return fail(u, a, "argument --compact-keep: expected a token count from 0: '{s}'", .{v});
         out.compact_keep = @intCast(n);
-    } else if (is(name, "--compact-memory")) out.compact_memory = v else if (is(name, "--slide")) out.slide = true else if (is(name, "--slide-graph")) out.slide_graph = v else if (is(name, "--parallel")) out.parallel = v else if (is(name, "--backend")) out.backend = v else if (is(name, "--cortheon")) out.cortheon = true else if (is(name, "--notes")) out.notes = v else if (is(name, "--no-notes-write")) out.notes_write = false;
+    } else if (is(name, "--compact-memory")) out.compact_memory = v else if (is(name, "--slide")) out.slide = true else if (is(name, "--slide-graph")) out.slide_graph = v else if (is(name, "--parallel")) out.parallel = v else if (is(name, "--backend")) out.backend = v else if (is(name, "--cortheon")) out.cortheon = true else if (is(name, "--notes")) out.notes = v else if (is(name, "--no-notes-write")) out.notes_write = false else if (is(name, "--notes-index")) out.notes_index = v;
 }
 
 /// The CUDA build's --device and --segments; false for any other flag.
@@ -455,6 +457,17 @@ test "parse and capabilities share the table" {
     try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--compact-at", "0" }, &u));
     try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--compact-at", "2" }, &u));
     try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--compact-keep", "-1" }, &u));
+}
+
+test "--notes-index: postings by default, sa on request, nothing else" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var u: Usage = .{};
+    try std.testing.expectEqualStrings("postings", (try parse(a, &.{ "m", "--notes", "s.json" }, &u)).notes_index);
+    try std.testing.expectEqualStrings("sa", (try parse(a, &.{ "m", "--notes", "s.json", "--notes-index", "sa" }, &u)).notes_index);
+    try std.testing.expectEqualStrings("postings", (try parse(a, &.{ "m", "--notes-index=postings" }, &u)).notes_index);
+    try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--notes-index", "suffix" }, &u));
 }
 
 test "--device and --segments: CUDA builds serve them, values checked; --speed-up is the Mac build's" {
