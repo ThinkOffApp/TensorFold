@@ -23,6 +23,11 @@ test "version metadata accessors keep a held reader unchanged across a replaceme
     const line = try testing.allocator.dupe(u8, held.idx.lineAt(place));
     defer testing.allocator.free(line);
     const cost = held.idx.costAt(place);
+    const rank = held.idx.rankAt(place);
+    const told = held.idx.toldAt(place);
+    const entity = held.idx.entityAt(place);
+    const pair = held.idx.pairAt(place);
+    const value_entity = held.idx.valueEntityAt(place);
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -32,6 +37,11 @@ test "version metadata accessors keep a held reader unchanged across a replaceme
     try testing.expectEqual(index.State.current, held.idx.stateAt(place));
     try testing.expectEqualStrings(line, held.idx.lineAt(place));
     try testing.expectEqual(cost, held.idx.costAt(place));
+    try testing.expectEqual(rank, held.idx.rankAt(place));
+    try testing.expectEqual(told, held.idx.toldAt(place));
+    try testing.expectEqual(entity, held.idx.entityAt(place));
+    try testing.expectEqual(pair, held.idx.pairAt(place));
+    try testing.expectEqual(value_entity, held.idx.valueEntityAt(place));
     try testing.expectEqual(index.State.superseded, store.current.idx.stateAt(place));
 }
 
