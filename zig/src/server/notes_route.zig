@@ -190,18 +190,40 @@ pub fn lastUser(list: Value) []const u8 {
 
 /// The client's messages with the block as the first system message, normalized as the client's own would be.
 pub fn withBlock(cx: *Cx, raw: Value, block: []const u8, needs_user_after_tool: bool) errors.Refused!Value {
+    return withBlockAt(cx, raw, block, needs_user_after_tool, false);
+}
+
+/// withBlock(), or with `before_user` the block as a system message right before the last user message.
+pub fn withBlockAt(cx: *Cx, raw: Value, block: []const u8, needs_user_after_tool: bool, before_user: bool) errors.Refused!Value {
     const list = raw.items() orelse return cx.refuse("messages must be a non-empty list");
+    var at: usize = 0;
+    if (before_user) {
+        var k = list.len;
+        while (k > 0) : (k -= 1) if (std.mem.eql(u8, list[k - 1].strField("role") orelse "", "user")) {
+            at = k - 1;
+            break;
+        };
+    }
     const out = try cx.a.alloc(Value, list.len + 1);
     const first = try json.newObject(cx.a);
     try first.put(cx.a, "role", .{ .string = "system" });
     try first.put(cx.a, "content", .{ .string = block });
-    out[0] = .{ .object = first };
-    @memcpy(out[1..], list);
+    @memcpy(out[0..at], list[0..at]);
+    out[at] = .{ .object = first };
+    @memcpy(out[at + 1 ..], list[at..]);
     return messages.normalize(cx, .{ .array = out }, "system", needs_user_after_tool);
 }
 
+/// How the block is looked up and placed: the hop (null: the snapshot's), and before the last user message or first.
+pub const Shape = struct { hop: ?@import("notes/index.zig").Hop = null, before_user: bool = false };
+
 /// For a chat request that asks: the lookup on its last user message, and `normalized` with the block put first.
 pub fn apply(store: *Store, text: model_text.Text, needs_user_after_tool: bool, cx: *Cx, body: Value, normalized: *Value) errors.Refused!?Used {
+    return applyShaped(store, text, needs_user_after_tool, cx, body, normalized, .{});
+}
+
+/// apply() with the lookup's hop and the block's place as `shape` says.
+pub fn applyShaped(store: *Store, text: model_text.Text, needs_user_after_tool: bool, cx: *Cx, body: Value, normalized: *Value, shape: Shape) errors.Refused!?Used {
     const ask = try asked(cx, body) orelse return null;
     const io = store.io;
     const t0 = clock.nowNs(io);
@@ -213,11 +235,11 @@ pub fn apply(store: *Store, text: model_text.Text, needs_user_after_tool: bool, 
     const t1 = clock.nowNs(io);
     const past = ask.past orelse past_mod.isPast(question);
     const cap = ask.cap orelse store.settings().cap;
-    const found = store.retrieve(cx.a, text, qids, past, cap, ask.exclude) catch |e| return switch (e) {
+    const found = store.retrieveWith(cx.a, text, qids, past, cap, ask.exclude, shape.hop) catch |e| return switch (e) {
         error.OutOfMemory => error.OutOfMemory,
         error.Tokenizer => cx.other("the tokenizer cannot count the notes block"),
     };
-    if (found.block.len > 0) normalized.* = try withBlock(cx, body.get("messages").?, found.block, needs_user_after_tool);
+    if (found.block.len > 0) normalized.* = try withBlockAt(cx, body.get("messages").?, found.block, needs_user_after_tool, shape.before_user);
     const t_done = clock.nowNs(io);
     // after the lookup, before the reply: the next request's lookup reads it
     const wrote = try autoWrite(store, cx.a, ask, body, normalized.*);

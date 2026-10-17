@@ -102,4 +102,7 @@ test {
     _ = @import("notes_concurrency_test.zig");
     _ = @import("notes_journal_tmp_test.zig");
     _ = @import("notes_journal_fault_test.zig");
+    _ = @import("notes_decode.zig");
+    _ = @import("notes_decode_test.zig");
+    _ = @import("notes_decode_more_test.zig");
 }

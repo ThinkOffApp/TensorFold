@@ -161,6 +161,7 @@ pub const Index = struct {
     post: []const u32,
     phrases: std.HashMapUnmanaged(Phrase, u32, PhraseCtx, 80),
     phrase_max: usize,
+    names: std.AutoHashMapUnmanaged(u32, u32), // one-key entity phrases: key -> entity (the decode check's, not subjects())
     n_cur: u32,
     n_hist: u32,
     owned: ?*Model = null, // the model a loaded snapshot made, freed with the index
@@ -246,7 +247,11 @@ pub const Index = struct {
         try self.groupsOf(m);
         self.phrases = .empty;
         self.phrase_max = 0;
+        self.names = .empty;
         try self.phrasesOf(m);
+        const ve = try @import("value.zig").ofWrites(self.arena.allocator(), self, m);
+        if (ve.ptr != self.value_ent.ptr) self.arena.allocator().free(self.value_ent); // one array, as placed
+        self.value_ent = ve;
         var first: usize = 0;
         self.side_keys = .{};
         if (kind == .sa) {
@@ -438,6 +443,7 @@ pub const Index = struct {
         try self.phrases.ensureTotalCapacity(a, count); // once: no outgrown table left behind
         for (m.phrases.items) |p| {
             if (p.entity >= m.entities.items.len) return error.BadSnapshot;
+            if (p.keys.len == 1) try self.names.put(a, p.keys[0], p.entity);
             if (p.keys.len < 2 or p.keys.len > max_phrase) continue;
             self.phrases.putAssumeCapacity(packPhrase(p.keys), p.entity);
             self.phrase_max = @max(self.phrase_max, p.keys.len);

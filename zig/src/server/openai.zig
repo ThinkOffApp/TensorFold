@@ -19,6 +19,7 @@ const routes = @import("routes.zig");
 const warm = @import("warm.zig");
 const cortheon = @import("cortheon/cortheon.zig");
 const notes_route = @import("notes_route.zig");
+const notes_decode = @import("notes_decode.zig");
 const Server = @import("server.zig").Server;
 const Conn = @import("http_conn.zig").Conn;
 const Value = json.Value;
@@ -131,7 +132,9 @@ fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value) errors.Refused!Plan {
     var notes: ?notes_route.Used = null;
     if (is_chat) {
         input.messages = try messages.normalize(cx, body.get("messages"), "system", srv.needs_user_after_tool);
-        if (srv.notes) |store| notes = try notes_route.apply(store, srv.text, srv.needs_user_after_tool, cx, body, &input.messages);
+        const shape = if (srv.notes != null) try notes_decode.shapeAsked(cx, body) else notes_route.Shape{};
+        if (srv.notes) |store| notes = try notes_route.applyShaped(store, srv.text, srv.needs_user_after_tool, cx, body, &input.messages, shape);
+        input.notes_live = try notes_decode.setup(srv, cx, body, if (notes) |*u| u else null, input.messages, shape);
         input.tools = try tool_specs.active(cx, body.get("tools"), body.get("tool_choice"));
     } else if (body.get("messages")) |m| if (m == .array and m.array.len > 0) {
         input.messages = try messages.normalize(cx, m, "system", srv.needs_user_after_tool);
@@ -241,6 +244,7 @@ pub fn run(srv: *Server, a: Allocator, out: Out, gone: Gone, is_chat: bool, raw:
     p.input.id = id;
     if (p.notes) |*u| u.logLine(id);
     const turn = cortheon.begin(srv, a, raw, id, is_chat, &p.input);
+    if (turn != null) if (p.input.notes_live) |l| l.off("--cortheon runs the reply"); // its turns render their own prompts
     var r: Run = .{ .srv = srv, .a = a, .out = out, .is_chat = is_chat, .plan = p, .id = id, .created = std.Io.Clock.real.now(srv.io).toSeconds(), .turn = turn };
     if (p.stream) r.stream(gone, field) else r.whole(gone, field);
 }
@@ -324,7 +328,11 @@ const Run = struct {
         try o.put(r.a, "tensorfold", reply.runtime);
         try o.put(r.a, "speculative", reply.speculative);
         if (r.turn) |t| try o.put(r.a, "cortheon", try t.summary(r.a));
-        if (r.plan.notes) |*u| try o.put(r.a, "notes", try u.value(r.a));
+        if (r.plan.notes) |*u| {
+            const v = try u.value(r.a);
+            if (r.plan.input.notes_live) |l| try v.object.put(r.a, "decode", try l.value(r.a));
+            try o.put(r.a, "notes", v);
+        }
     }
 
     /// ``ToolCallPolicy.finish``: the reply's calls parsed out of its content.
