@@ -16,15 +16,23 @@ pub const OpenError = error{ OutOfMemory, JournalIo, BadJournal, OtherSnapshot, 
 pub const IoError = error{ OutOfMemory, JournalIo };
 /// JournalPoisoned: an append failed and so did putting the file back; it may hold part of a record until a restart.
 pub const AppendError = IoError || error{JournalPoisoned};
+/// RenamedUnsynced: the new file is renamed in but its folder's sync failed; a power cut may leave either file, whole.
+pub const RewriteError = IoError || error{RenamedUnsynced};
 
-/// Tests only: an append's Nth write, truncate or sync fails (from 0); a failing write puts down half its bytes.
+/// Tests only: the Nth (from 0) write, truncate, file sync, folder sync or F_FULLFSYNC call fails, counted apart.
 pub const Faults = struct {
-    write: ?u32 = null,
+    write: ?u32 = null, // a failing write puts down half its bytes
     truncate: ?u32 = null,
     sync: ?u32 = null,
+    dir: ?u32 = null,
+    full: ?u32 = null, // this F_FULLFSYNC returns `full_errno`, and fullSync's fallback rule decides
+    full_errno: std.c.E = .IO,
     writes: u32 = 0,
     truncates: u32 = 0,
     syncs: u32 = 0,
+    dirs: u32 = 0,
+    fulls: u32 = 0,
+    fallbacks: u32 = 0, // plain fsyncs made because F_FULLFSYNC was unsupported
 
     fn hit(at: ?u32, count: *u32) bool {
         const n = count.*;
@@ -32,6 +40,9 @@ pub const Faults = struct {
         return at != null and at.? == n;
     }
 };
+
+/// Tests only: the faults every journal opened from now on starts with (its cut and its format-1 rewrite at open).
+pub var faults_at_open: ?*Faults = null;
 
 /// One snapshot's journal: its path, the open file (after the first write or a replay), and its size.
 pub const Journal = struct {
@@ -44,8 +55,8 @@ pub const Journal = struct {
     next_source: u64 = 1, // the header's: an erase rewrites it, so an erased write's source is never used again
     stale: usize = 0, // temporary files of a rewrite that died before its rename, removed at open (lock held)
     hook: ?*const fn (ctx: *anyopaque, tmp: [:0]const u8) void = null, // tests: between a rewrite's sync and rename
-    faults: ?*Faults = null, // tests: an append's write, truncate or sync made to fail
-    poisoned: bool = false, // an append and its rollback both failed: no more appends until a restart cuts the tail
+    faults: ?*Faults = null, // tests: a write, truncate, sync, folder sync or F_FULLFSYNC made to fail
+    poisoned: bool = false, // the disk's state is not known (a failed rollback, an unsynced rename): writes stop
     doubt: bool = false, // with poisoned: the failed append's commit line was written, so a restart may apply it
     upgraded: bool = false, // the journal was format 1 and was rewritten as format 2 at open
     hook_ctx: *anyopaque = undefined,
@@ -57,7 +68,7 @@ pub const Journal = struct {
 
     /// The journal at `path`, read when it exists: its records (strings owned by `a`), checked against the snapshot.
     pub fn open(gpa: Allocator, a: Allocator, path: []const u8, snapshot_sha: [64]u8, records: *std.ArrayList(Record), problem: *[]const u8) OpenError!Journal {
-        var j: Journal = .{ .gpa = gpa, .path = try gpa.dupeSentinel(u8, path, 0), .snapshot_sha = snapshot_sha };
+        var j: Journal = .{ .gpa = gpa, .path = try gpa.dupeSentinel(u8, path, 0), .snapshot_sha = snapshot_sha, .faults = faults_at_open };
         errdefer j.deinit();
         const fd = std.c.open(j.path, .{ .ACCMODE = .RDWR, .NOFOLLOW = true, .CLOEXEC = true }, @as(std.c.mode_t, 0o600));
         if (fd < 0) {
@@ -102,7 +113,7 @@ pub const Journal = struct {
         }
         if (good < text.len) {
             j.truncated = text.len - good;
-            if (std.c.ftruncate(fd, @intCast(good)) != 0 or !fullSync(fd)) {
+            if (!j.cut(good) or !j.sync()) {
                 problem.* = "the notes journal ends in a write without its commit line that cannot be cut";
                 return error.JournalIo;
             }
@@ -110,8 +121,12 @@ pub const Journal = struct {
         j.size = good;
         if (v.version == 1) {
             // format 1 had no commit lines: written anew, under the lock, by the temporary-file rules
-            j.rewrite(a, records.items, j.next_source) catch {
-                problem.* = "the notes journal (format 1) could not be rewritten as format 2";
+            j.rewrite(a, records.items, j.next_source) catch |e| {
+                problem.* = switch (e) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.JournalIo => "the notes journal (format 1) could not be rewritten as format 2; nothing changed",
+                    error.RenamedUnsynced => upgrade_unsynced, // the start stops either way
+                };
                 return error.JournalIo;
             };
             j.upgraded = true;
@@ -119,7 +134,7 @@ pub const Journal = struct {
         return j;
     }
 
-    /// Appends one record and syncs it to the drive; on any failure the file is cut back to what it was.
+    /// Appends one record, then its commit line, each synced by fullSync; on any failure the file is cut back.
     pub fn append(j: *Journal, a: Allocator, r: Record) AppendError!void {
         if (j.poisoned) return error.JournalPoisoned;
         if (j.fd < 0) try j.create(a);
@@ -159,12 +174,30 @@ pub const Journal = struct {
     }
 
     fn sync(j: *Journal) bool {
-        if (j.faults) |f| if (Faults.hit(f.sync, &f.syncs)) return false;
-        return fullSync(j.fd);
+        return j.syncFile(j.fd);
     }
 
-    /// The journal as `records` alone (an erase): written whole to a new file of our own, synced, renamed over it.
-    pub fn rewrite(j: *Journal, a: Allocator, records: []const Record, next_source: u64) IoError!void {
+    fn syncFile(j: *Journal, fd: c_int) bool {
+        if (j.faults) |f| if (Faults.hit(f.sync, &f.syncs)) return false;
+        return fullSync(fd, j.faults);
+    }
+
+    /// The folder's entry for the journal (a create or a rename) synced as its file is; false when it cannot be.
+    fn syncDir(j: *Journal) bool {
+        if (j.faults) |f| if (Faults.hit(f.dir, &f.dirs)) return false;
+        var buf: [std.fs.max_path_bytes + 1]u8 = undefined;
+        const dir = std.fs.path.dirname(j.path) orelse ".";
+        if (dir.len >= buf.len) return false;
+        @memcpy(buf[0..dir.len], dir);
+        buf[dir.len] = 0;
+        const fd = std.c.open(@ptrCast(&buf), .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true });
+        if (fd < 0) return false;
+        defer _ = std.c.close(fd);
+        return fullSync(fd, j.faults);
+    }
+
+    /// The journal as `records` alone: a new file of our own, synced, renamed over it, the folder synced.
+    pub fn rewrite(j: *Journal, a: Allocator, records: []const Record, next_source: u64) RewriteError!void {
         const t = try tmp_file.create(a, j.path);
         defer a.free(t.path);
         var ok = false;
@@ -183,16 +216,21 @@ pub const Journal = struct {
             if (!writeAll(fd, line, size) or !writeAll(fd, mark, size + line.len)) return error.JournalIo;
             size += line.len + mark.len;
         }
-        if (!fullSync(fd)) return error.JournalIo;
+        if (!j.syncFile(fd)) return error.JournalIo;
         if (std.c.flock(fd, std.c.LOCK.EX | std.c.LOCK.NB) != 0) return error.JournalIo;
         if (j.hook) |h| h(j.hook_ctx, t.path);
+        // up to here a failure leaves the old journal as it was: nothing changed (rename either happens or not)
         if (std.c.rename(t.path, j.path) != 0) return error.JournalIo;
         ok = true;
-        syncDir(j.path);
+        // the path names the new file now; until its folder is synced a power cut may bring back the old one
         if (j.fd >= 0) _ = std.c.close(j.fd);
         j.fd = fd;
         j.size = size;
         j.next_source = next_source;
+        if (!j.syncDir()) {
+            j.poisoned = true;
+            return error.RenamedUnsynced;
+        }
     }
 
     /// The file with its header, made at the first write.
@@ -205,12 +243,12 @@ pub const Journal = struct {
         }
         const head = try header(a, j.snapshot_sha, j.next_source);
         defer a.free(head);
-        if (!writeAll(fd, head, 0) or !fullSync(fd)) {
+        // the header synced and the new name in the folder synced, or no journal (it holds no write yet)
+        if (!writeAll(fd, head, 0) or !j.syncFile(fd) or !j.syncDir()) {
             _ = std.c.close(fd);
             _ = std.c.unlink(j.path);
             return error.JournalIo;
         }
-        syncDir(j.path);
         j.fd = fd;
         j.size = head.len;
     }
@@ -350,23 +388,26 @@ fn writeAll(fd: c_int, data: []const u8, at: u64) bool {
     return true;
 }
 
-/// The file's bytes on the drive itself: F_FULLFSYNC on Apple systems (plain fsync stops at the drive's cache).
-pub fn fullSync(fd: c_int) bool {
+/// The reply that stops a start whose format-1 upgrade renamed the new file in but could not sync its folder.
+const upgrade_unsynced = "the notes journal (format 1) was rewritten as format 2 and renamed in, but its folder could not be synced: after a power cut either file may be there, each whole and with the same writes; start again";
+
+/// An F_FULLFSYNC errno that means the filesystem does not do it: XNU's own test (kern_descrip.c, F_BARRIERFSYNC).
+fn unsupported(e: std.c.E) bool {
+    return e == .NOTTY or e == .OPNOTSUPP or e == .INVAL; // OPNOTSUPP is ENOTSUP (45) on Darwin
+}
+
+/// Darwin: F_FULLFSYNC (fsync, then the drive's cache flushed); plain fsync only where unsupported. Elsewhere: fsync.
+pub fn fullSync(fd: c_int, faults: ?*Faults) bool {
     if (builtin.os.tag.isDarwin()) {
-        if (std.c.fcntl(fd, std.c.F.FULLFSYNC) == 0) return true;
+        const e = if (faults) |f| (if (Faults.hit(f.full, &f.fulls)) f.full_errno else fcntlFull(fd)) else fcntlFull(fd);
+        if (e == .SUCCESS) return true;
+        if (!unsupported(e)) return false; // EIO, ENODEV, EBADF and the rest: a failed sync, no fallback
+        if (faults) |f| f.fallbacks += 1;
     }
+    // Linux fsync(2): "includes writing through or flushing a disk cache if present" (not tested on Linux here)
     return std.c.fsync(fd) == 0;
 }
 
-/// The directory entry of a created or renamed file synced too.
-fn syncDir(path: []const u8) void {
-    var buf: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const dir = std.fs.path.dirname(path) orelse ".";
-    if (dir.len >= buf.len) return;
-    @memcpy(buf[0..dir.len], dir);
-    buf[dir.len] = 0;
-    const fd = std.c.open(@ptrCast(&buf), .{ .ACCMODE = .RDONLY, .CLOEXEC = true });
-    if (fd < 0) return;
-    defer _ = std.c.close(fd);
-    _ = std.c.fsync(fd);
+fn fcntlFull(fd: c_int) std.c.E {
+    return std.c.errno(std.c.fcntl(fd, std.c.F.FULLFSYNC));
 }

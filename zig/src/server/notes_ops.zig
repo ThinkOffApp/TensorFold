@@ -63,8 +63,11 @@ const rollback_dropped = "the write could not be stored on disk, and the journal
 /// The same, once its commit line was written but not synced: the disk state is unknown.
 const rollback_doubt = "the write's commit line reached the journal but could not be synced, and the journal could not be put back as it was: nothing was applied in memory, but the disk state is unknown and a restart may apply this write. Writes are refused until the server restarts; lookups go on";
 
-/// The reply to every write after that.
-const needs_recovery = "the notes journal needs recovery, restart the server: an earlier write failed and could not be rolled back (lookups go on from the last good version)";
+/// The reply to an erase whose new journal was renamed in but whose folder could not be synced: applied, not certain.
+const erase_unsynced = "the journal was rewritten without the note and renamed in, but its folder could not be synced, so the disk state is unknown: after a power cut either the old journal (with the note) or the new one (without it) may be there, each whole. The erase was applied in memory. Writes are refused until the server restarts; after that, list the notes and erase it again if it is back";
+
+/// The reply to every write after one of those.
+const needs_recovery = "the notes journal needs recovery, restart the server: an earlier write or erase failed and the journal's state on disk is not known (lookups go on)";
 
 fn poisoned(s: *const Store) bool {
     return if (s.journal) |j| j.poisoned else false;
@@ -182,7 +185,8 @@ pub fn erase(s: *Store, a: Allocator, id: u32, why: *Refusal) Error!Erased {
     var idx_owned = true;
     defer if (idx_owned) idx.deinit();
     const v = try s.gpa.create(store_mod.Version);
-    errdefer s.gpa.destroy(v);
+    var v_owned = true; // not an errdefer: an erase applied but not certain on disk returns a refusal after the swap
+    defer if (v_owned) s.gpa.destroy(v);
     v.* = .{ .idx = idx };
     idx.ver = s.next_ver;
     try s.retired.ensureUnusedCapacity(s.gpa, 1);
@@ -190,12 +194,15 @@ pub fn erase(s: *Store, a: Allocator, id: u32, why: *Refusal) Error!Erased {
     for (old.notes.items[old.base_notes..]) |n| if (fresh.placeOfSource(n.source.?)) |q| {
         if (fresh.notes.items[q].id != n.id) try moved.append(a, .{ n.id, fresh.notes.items[q].id });
     };
-    s.journal.?.rewrite(a, kept.items, log.next_source) catch |e| return switch (e) {
-        error.OutOfMemory => error.OutOfMemory,
-        error.JournalIo => refuse(why, 500, "the journal could not be rewritten without the note; nothing was erased"),
+    var unsynced = false;
+    s.journal.?.rewrite(a, kept.items, log.next_source) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.JournalIo => return refuse(why, 500, "the journal could not be rewritten without the note; nothing was erased"),
+        error.RenamedUnsynced => unsynced = true, // the file at the journal's name lacks it now: so must the memory
     };
     // the journal no longer holds it: swap, wait for every lookup of the old versions, free them all (zeroed)
     idx_owned = false;
+    v_owned = false;
     fresh_owned = false;
     log_owned = false;
     s.swap(v, true);
@@ -208,6 +215,7 @@ pub fn erase(s: *Store, a: Allocator, id: u32, why: *Refusal) Error!Erased {
     old.deinit();
     s.sweep();
     s.text.forget(); // the tokenizer's kept encodes: a block or a prompt that quoted it
+    if (unsynced) return refuse(why, 500, erase_unsynced); // the journal is poisoned: writes stop until a restart
     return .{ .removed = removed.items, .moved = moved.items };
 }
 
