@@ -81,6 +81,97 @@ gives the lookup's ids to the promoter (retrieval counts). With promotion off ne
 does) and asks through `slide_ask.ask` side by side; the engine steps the learner only while no reply decodes (READ
 `engine_api.Learner`), so serving goes on during a night.
 
+**Erase.** `DELETE /v1/notes/ID?erase=true` of a note whose fact is in the pocket zeroes that fact's neurons through
+the learner's `retire` (the same op a learn request uses when a newer chat fact replaces an older one) and saves the
+pocket into the model's files before the reply, which says so (`promotion: {zeroed, facts, ms}`). The fact is
+recorded `freed` in the state file, so a restart keeps it out. While a night holds the learner the zeroing waits for
+the night's end (`pending: true`). Zeroing one fact's neurons removes their output exactly (READ `pocket.retire`:
+input and output weights set to zero); what it cannot undo is a later lesson's refit of an earlier neuron (question 1).
+Take-backs and changes do not zero anything at once: the note answers, and the next night rebuilds the pocket.
+
 **Crash.** The state file says a night is open, with the neurons it has placed so far, before any change to the
 weights. A start that finds an open night marks the next night a `rebuild` and zeroes every recorded promotion neuron
 first (and the neurons of a slide-graph fact with the text that was being taught).
+
+## Tests (MEASURED, this Mac, Zig 0.17.0)
+
+`zig build test-server -Dcpu=apple_m1`: 312 of 312 before (`10cb2e22`), 324 of 324 after. The 12 new tests
+(`-Dtest-server-filter=promotion`): with a scripted learner, qualification (unused, take-back and dated notes never due;
+hold 2 waits a night), teach keep and miss, the alone streak (in weights after 2 nights; one miss back, streak from
+zero), a night that changes a control rejected and its neurons zeroed (control: the same night without the breaking
+fact is kept), a change rebuilding the pocket, every rebuild worse ending at the untaught model, the state across a
+restart and a crash mid-night (rebuilt, its neurons zeroed), the state file; in a server (the notes rig), an in-weights
+note left out of the chat block exactly as a client's `notes_exclude` would, its block counted as use, the same block
+byte for byte with promotion off, an erase's renumbering followed, an erase zeroing the fact's neurons at once or after
+the running night, kept across a restart; the flags. Lean checker: 530 problems before and after, none in new files.
+
+## On a GB10 (asus3), CUDA (MEASURED, 17 October 2026)
+
+Branch built at `e094e00d` (erase hook: `b40461d0` for the gate below), sm_121, Nemotron 3.5 Lightning MLX 4-bit
+(`d9d758fb`), a copy of the folder, `--slide --notes nights-day1.snap.json --notes-promote-every 10m` (hold 1,
+alone 2), `--prompt-cache-gib 0 --context 32768`. Day 1 is the snapshot (LLWZ's day-1 store); later lessons are
+written over HTTP (`POST /v1/notes`; a change names the note it replaces; a take-back is a DELETE). Each day the 56
+questions are asked with `"notes": true`, thinking off, greedy, 160 tokens, and judged by LLWZ's judge (main
+`2083ee9` and the 7.8 run's `llwz-promo2`, which agreed on every day). The control arm is the same store each day on
+the untaught model (no promotion).
+
+| Day / after night | Right (system) | Right (control, notes only) | Python 7.8 system / control | Prompt tokens per answer | In weights | In pocket |
+| --- | ---: | ---: | --- | ---: | ---: | ---: |
+| day 1 | 40/56 | 40/56 | 40 / 40 | 166.6 | 0 | 0 |
+| day 2 (after night 1) | 30/56 | 34/56 | 34 / 34 | 262.4 | 0 | 7 |
+| day 3 (after night 2) | 38/56 | 42/56 | 45 / 43 | 320.6 | 2 | 7 |
+| day 4 (after night 3) | 39/56 | 39/56 | 40 / 40 | 345.7 | 0 | 0 |
+| day 5 (after night 4) | 44/56 | 39/56 | 40 / 40 | 345.7 | 0 | 7 |
+| after night 5 | 43/56 | 39/56 | - | 325.8 | 2 | 7 |
+| after night 6 | 43/56 | 39/56 | - | 325.8 | 2 | 7 |
+
+| Night | Due | Stale | Plan kept | Taught (kept/missed) | Regression | Alone right | Left prompt | Seconds | Model folder bytes |
+| --- | ---: | ---: | --- | --- | --- | ---: | ---: | ---: | ---: |
+| 1 | 10 | 0 | add | 10 (7/3) | 0 worse of 4 | 11/21 | 0 | 2183 | 18,548,876,048 |
+| 2 | 10 | 0 | none (add rejected, its neurons zeroed, then 0 worse) | 10 (9/1) | rejected | 9/21 | 2 | 2167 | 18,548,876,048 |
+| 3 | 8 | 0 | source (add rejected; after zeroing still 1 worse) | 8 (5/3) | rejected | - | 0 | 1172 | 18,548,876,048 |
+| 4 | 7 | 0 | add | 7 (7/0) | 0 worse of 4 | 12/24 | 0 | 1276 | 18,548,876,048 |
+| 5 | 0 | 0 | none | 0 | - | 12/24 | 2 | 3.6 | 18,548,876,048 |
+| 6 | 0 | 0 | none | 0 | - | 12/24 | 0 | 3.5 | 18,548,876,048 |
+
+Disk: the untaught folder is 18,544,234,457 bytes; the taught copy 18,548,876,048 after every night (the first save
+widens the shards; every later save rewrites the same four shards in place). No per-night copy of the weights is
+kept; the run folder grew by 1.6 MB over six nights (state, journal, logs). The whole run used 19.1 GB on asus3.
+
+Read with care: day 2 and day 3 are 4 below the control with 7 facts in the pocket and their notes still in the prompt
+(INFERRED: the pocket disturbs other answers; no regression probe caught it, because the probes are the promoted
+facts' own questions and four controls, not the 56). Day 5 is 5 above the control with a fresh pocket of 7. When the
+two in-weights notes left the prompt (after night 5) one more question went wrong (44 to 43) and prompt tokens fell
+by 19.9 per answer. Which regression probe went worse on nights 2 and 3 is not logged (a gap).
+
+## Ash's gate (MEASURED)
+
+Metal, this Mac (M5 Max), binary at `b40461d0`, a 1-note snapshot and two written facts, nights on request:
+
+| Check | Result |
+| --- | --- |
+| off by default | `/v1/promotion` 404 without the flag; with it off, the chat block equals the old one byte for byte (rig test) |
+| neurons alone vs note in prompt | "My dog is named Luna." (in weights, its note left out): 3/3 right, as with the note (3/3) |
+| unrelated prompts | 32 of 32 fixed unrelated prompts give the same reply token for token before and after promotion |
+| erase | 10 neurons zeroed and saved in 465 ms (the pocket save writes 250 MB in about 0.5 s); the dog's questions 0/3 after, 0/3 after a restart; the car, not erased, 3/3 (its note still in the prompt: it never passed alone) |
+
+CUDA, the taught GB10 folder after the run (7 facts in the pocket, 2 in weights):
+
+| Check | Result |
+| --- | --- |
+| unrelated prompts | 28 of 32 equal to the untaught model token for token; the 4 others part after 76 to 166 characters with the same answer |
+| neurons alone vs note | the 56 questions with every note 44/56; with all 7 promoted facts' notes left out 39/56 (production leaves out only the 2 in weights: 43/56) |
+| erase | "My dog's eyes are brown now." (promoted): 10 neurons zeroed and saved in 3.8 s; its questions without its note 1/3 before the erase, 0/3 after and 0/3 after a restart (the answers say grey, the note the erase brings back) |
+
+So on CUDA the gate's second point is not met for the facts that never passed the alone check (they stay in the
+prompt, which is the design), and the 2 in-weights facts cost one question when their notes left. Unrelated drift is
+0 of 32 on Metal and 4 of 32 (late, same answer) on CUDA.
+
+## Not done
+
+- No pocket checkpoint op (exact rollback) or pocket compaction (open questions 1 and 2).
+- The regression set does not log which probe went worse; the learner's degenerate wordings ("the boat's colour's
+  colour's ...") are used as probes as the learner wrote them.
+- Missed and rejected facts are never retried; only 2 of 29 facts reached in weights on the GB10 run.
+- A Metal run of the full nights set; Metal was the two-fact gate only.
+- Not pushed; no pull request.
