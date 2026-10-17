@@ -167,6 +167,7 @@ pub const Index = struct {
     phrases: std.HashMapUnmanaged(Phrase, u32, PhraseCtx, 80),
     phrase_max: usize,
     aliases: std.HashMapUnmanaged(Phrase, u32, PhraseCtx, 80),
+    alias_entities: std.HashMapUnmanaged(Phrase, std.ArrayList(u32), PhraseCtx, 80),
     alias_max: usize,
     self_entity: ?u32,
     names: std.AutoHashMapUnmanaged(u32, u32), // one-key entity phrases: key -> entity (the decode check's, not subjects())
@@ -294,6 +295,7 @@ pub const Index = struct {
         self.phrases = .empty;
         self.phrase_max = 0;
         self.aliases = .empty;
+        self.alias_entities = .empty;
         self.alias_max = 0;
         self.self_entity = m.entityOf("me");
         self.names = .empty;

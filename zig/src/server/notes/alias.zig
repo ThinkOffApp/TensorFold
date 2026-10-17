@@ -37,7 +37,8 @@ test "name alias extraction requires subject and an explicit naming clause" {
 }
 
 /// Build only from current structured name attributes. Ambiguous aliases are
-/// disabled rather than selecting whichever entity happened to be visited last.
+/// disabled in the legacy unique map rather than selecting the last entity.
+/// Retain all distinct candidates separately for the weighted resolver.
 pub fn populate(idx: anytype, model: anytype, text: anytype) !void {
     const a = idx.arena.allocator();
     if (model.entityOf("me")) |entity| {
@@ -70,6 +71,9 @@ pub fn populate(idx: anytype, model: anytype, text: anytype) !void {
         for (ids, keys[0..ids.len]) |id, *key| key.* = idx.keyOf(id);
         const found = try idx.aliases.getOrPut(a, keys);
         if (!found.found_existing) found.value_ptr.* = n.entity else if (found.value_ptr.* != n.entity) found.value_ptr.* = 0xffff_ffff;
+        const candidates = try idx.alias_entities.getOrPut(a, keys);
+        if (!candidates.found_existing) candidates.value_ptr.* = .empty;
+        if (std.mem.indexOfScalar(u32, candidates.value_ptr.items, n.entity) == null) try candidates.value_ptr.append(a, n.entity);
         idx.alias_max = @max(idx.alias_max, ids.len);
     }
 }

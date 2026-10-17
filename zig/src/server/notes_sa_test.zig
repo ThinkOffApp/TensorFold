@@ -47,11 +47,16 @@ test "subject aliases reject ambiguous names and recover after take back" {
     const reply = try rig.request(r.srv, a, "PUT", "/v1/notes/16", "{\"text\":\"My brother's name is Ana.\"}");
     try testing.expectEqual(@as(u16, 201), reply.status);
     try testing.expectEqual(index.no_note, store.current.idx.aliases.get(keys).?);
+    const candidates = store.current.idx.alias_entities.get(keys).?.items;
+    try testing.expectEqual(@as(usize, 2), candidates.len);
+    try testing.expect(std.mem.indexOfScalar(u32, candidates, sister) != null);
+    try testing.expect(std.mem.indexOfScalar(u32, candidates, store.model.entityOf("my brother").?) != null);
     const newest = store.model.notes.items[store.model.notes.items.len - 1].id;
     const path = try std.fmt.allocPrint(a, "/v1/notes/{d}", .{newest});
     const withdrawn = try rig.request(r.srv, a, "DELETE", path, "{}");
     try testing.expectEqual(@as(u16, 201), withdrawn.status);
     try testing.expectEqual(sister, store.current.idx.aliases.get(keys).?);
+    try testing.expectEqualSlices(u32, &.{sister}, store.current.idx.alias_entities.get(keys).?.items);
 }
 
 test "subject aliases are consulted only by the opt in lookup view" {
