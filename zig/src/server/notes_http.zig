@@ -75,7 +75,10 @@ fn reply(srv: *Server, conn: *Conn, a: Allocator, r: Route) Allocator.Error!void
             error.OutOfMemory => error.OutOfMemory,
             error.Refused => fail(conn, a, why.status, why.message),
         };
-        return send(conn, a, 200, try erasedValue(srv, a, r.id.?, done));
+        const val = try erasedValue(srv, a, r.id.?, done);
+        // --notes-promote-every: a promoted note's neurons go with it
+        if (srv.promote) |p| try val.object.put(a, "promotion", try p.erased(a, done.removed));
+        return send(conn, a, 200, val);
     }
     const allowed: []const []const u8 = if (delete) &.{"text"} else if (r.id != null) &.{"text"} else &.{ "text", "subject", "replaces" };
     if (v == .object) for (v.object.keys()) |k| {

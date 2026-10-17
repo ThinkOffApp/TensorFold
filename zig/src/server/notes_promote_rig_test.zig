@@ -115,3 +115,98 @@ test "promotion rig: a note written after a night is keyed by its write, and an 
     defer testing.allocator.free(k3);
     try testing.expect(std.mem.indexOfScalar(i64, k3, kite - 1) != null);
 }
+
+/// Answers "o" to every prompt and takes every learn request at once, keeping the neurons it was asked to zero.
+const Learner = struct {
+    zeroed: std.ArrayList(promote.Neuron) = .empty,
+    saves: u32 = 0,
+    const api = @import("engine_api");
+    fn engine(e: *Learner) api.Engine {
+        return .{ .ctx = e, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory, .learn = learn } };
+    }
+    fn info(_: *anyopaque) api.Info {
+        return .{};
+    }
+    fn submit(_: *anyopaque, id: api.Id, _: *const api.Request, sink: api.Sink) api.SubmitError!void {
+        sink.event(sink.ctx, id, &.{ .prefilled = 0 });
+        sink.event(sink.ctx, id, &.{ .tokens = &.{'o'} });
+        sink.event(sink.ctx, id, &.{ .finished = .{ .reason = .stop } });
+    }
+    fn cancel(_: *anyopaque, _: api.Id) void {}
+    fn status(_: *anyopaque, out: *api.Status, _: []u32) void {
+        out.* = .{};
+    }
+    fn memory(_: *anyopaque, _: bool) ?api.Memory {
+        return null;
+    }
+    fn learn(ctx: *anyopaque, req: *const api.LearnRequest, sink: api.LearnSink) api.LearnError!void {
+        const e: *Learner = @ptrCast(@alignCast(ctx));
+        e.zeroed.appendSlice(testing.allocator, req.retire) catch {};
+        e.saves += @intFromBool(req.save);
+        sink.event(sink.ctx, &.{ .done = .{} });
+    }
+};
+
+fn inWeights(a: std.mem.Allocator, r: *rig.Rig, source: []const u8, first: u16) !void {
+    var st = promote.State.init(testing.allocator, .{});
+    defer st.deinit();
+    const ns = try a.dupe(promote.Neuron, &.{ .{ .layer = 3, .neuron = first, .key = .reply }, .{ .layer = 7, .neuron = first, .key = .subject } });
+    try st.facts.append(st.alloc(), .{ .key = source, .text = "t", .status = .in_weights, .alone = 2, .neurons = ns });
+    st.pocket = ns;
+    try pjson.writeFile(a, try std.fmt.allocPrint(a, "{s}.promote", .{r.snap}), try pjson.encode(&st, a));
+}
+
+test "promotion rig: erasing a promoted note zeroes its neurons at once, or when the running night ends; a restart keeps it" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const r = try rig.Rig.init(testing.allocator);
+    defer r.deinit();
+    var learner: Learner = .{};
+    defer learner.zeroed.deinit(testing.allocator);
+    r.srv.engine = learner.engine();
+    const w = try rig.request(r.srv, a, "POST", "/v1/notes", "{\"text\": \"My kite is orange.\", \"subject\": \"my kite\"}");
+    const id = w.value.get("id").?.int64().?;
+    try inWeights(a, r, w.value.strField("source").?, 0);
+    var why: []const u8 = "";
+    var p = try notes_promote.Promoter.init(testing.allocator, testing.io, r.srv, r.store(), r.snap, .{ .every_ms = 600_000 }, &why);
+    r.srv.promote = p;
+    const er = try rig.request(r.srv, a, "DELETE", try std.fmt.allocPrint(a, "/v1/notes/{d}?erase=true", .{id}), null);
+    try testing.expectEqual(@as(u16, 200), er.status);
+    const pr = er.value.get("promotion").?;
+    try testing.expect(pr.get("pending").?.bool == false);
+    try testing.expectEqual(@as(i64, 2), pr.get("zeroed").?.int64().?);
+    try testing.expectEqual(@as(usize, 2), learner.zeroed.items.len);
+    try testing.expect(learner.saves >= 1); // the zeroed pocket written into the model's files
+    try testing.expectEqual(promote.Status.freed, p.state.facts.items[0].status);
+    try testing.expectEqual(@as(usize, 0), p.state.pocket.len);
+    // a restart reads the erase back from the state file
+    r.srv.promote = null;
+    p.deinit();
+    p = try notes_promote.Promoter.init(testing.allocator, testing.io, r.srv, r.store(), r.snap, .{ .every_ms = 600_000 }, &why);
+    try testing.expectEqual(promote.Status.freed, p.state.facts.items[0].status);
+    try testing.expectEqual(@as(usize, 0), p.state.facts.items[0].neurons.len);
+    p.deinit();
+    // a night running (the learner's lock held): the zeroing waits for its end
+    const w2 = try rig.request(r.srv, a, "POST", "/v1/notes", "{\"text\": \"My boat is green.\", \"subject\": \"my boat\"}");
+    try inWeights(a, r, w2.value.strField("source").?, 1);
+    p = try notes_promote.Promoter.init(testing.allocator, testing.io, r.srv, r.store(), r.snap, .{ .every_ms = 600_000 }, &why);
+    defer p.deinit();
+    r.srv.promote = p;
+    defer r.srv.promote = null;
+    r.srv.teacher.learning.lockUncancelable(testing.io);
+    const er2 = try rig.request(r.srv, a, "DELETE", try std.fmt.allocPrint(a, "/v1/notes/{d}?erase=true", .{w2.value.get("id").?.int64().?}), null);
+    try testing.expect(er2.value.get("promotion").?.get("pending").?.bool);
+    try testing.expectEqual(@as(usize, 2), learner.zeroed.items.len); // nothing yet
+    p.drainPending(); // the night's end, the lock still held by it
+    r.srv.teacher.learning.unlock(testing.io);
+    try testing.expectEqual(@as(usize, 4), learner.zeroed.items.len);
+    try testing.expectEqual(@as(u16, 1), learner.zeroed.items[2].neuron);
+    try testing.expectEqual(promote.Status.freed, p.state.facts.items[0].status);
+    // control: an erase on a server without promotion says nothing of neurons
+    r.srv.promote = null;
+    const w3 = try rig.request(r.srv, a, "POST", "/v1/notes", "{\"text\": \"My tent is red.\", \"subject\": \"my tent\"}");
+    const er3 = try rig.request(r.srv, a, "DELETE", try std.fmt.allocPrint(a, "/v1/notes/{d}?erase=true", .{w3.value.get("id").?.int64().?}), null);
+    try testing.expect(er3.value.get("promotion") == null);
+    try testing.expectEqual(@as(usize, 4), learner.zeroed.items.len);
+}

@@ -81,6 +81,7 @@ pub const Promoter = struct {
     running: std.atomic.Value(bool) = .init(false),
     thread: ?std.Thread = null,
     last_end_ms: i64 = 0,
+    pending: std.ArrayList([]u8) = .empty, // erased keys whose neurons wait for the night that runs now to end
 
     /// The promoter for `store`, its state read from SNAPSHOT.promote when there is one; the thread not started.
     pub fn init(gpa: Allocator, io: std.Io, srv: *Server, store: *Store, snapshot: []const u8, o: Options, problem: *[]const u8) !*Promoter {
@@ -119,6 +120,8 @@ pub const Promoter = struct {
         p.retrieved.deinit(g);
         for (p.weights.items) |k| g.free(k);
         p.weights.deinit(g);
+        for (p.pending.items) |k| g.free(k);
+        p.pending.deinit(g);
         p.clearCache();
         p.cache_keys.deinit(g);
         p.cache_excl.deinit(g);
@@ -227,6 +230,7 @@ pub const Promoter = struct {
         defer arena.deinit();
         var b: Backend = .{ .p = p };
         b.recover(arena.allocator()) catch {};
+        p.drainPending();
         log.line("notes promotion: night {d} begins", .{p.state.nights_done + 1});
         const n = promote.night(&p.state, arena.allocator(), &b) catch |e| {
             log.line("notes promotion: night {d} stopped ({s}); the state is the file's, and the next night rebuilds", .{ p.state.nights_done + 1, @errorName(e) });
@@ -236,6 +240,82 @@ pub const Promoter = struct {
         log.line("notes promotion: night {d}: {d} due, {d} stale, plan {s} ({d} tried, {d} rejected), {d} taught ({d} kept, {d} missed), {d} worse of {d} probes; alone {d} of {d} right, {d} left the prompt, {d} back; {d} in weights, {d} in the pocket; {d} asks in {d:.1} s", .{ n.night, n.due, n.stale, n.plan, n.tries, n.rejected, n.taught, n.kept, n.missed, n.worse, n.probes, n.alone_right, n.alone_asked, n.left_prompt, n.back_to_prompt, n.in_weights, n.pocket, n.asks, n.secs });
         p.compact();
         p.publish() catch {};
+        p.drainPending();
+    }
+
+    /// An erase of notes `sources` reaches the pocket: their facts' neurons zeroed now, or once the running night ends.
+    pub fn erased(p: *Promoter, a: Allocator, sources: []const []const u8) Allocator.Error!Value {
+        const o = try json.newObject(a);
+        if (!p.srv.teacher.learning.tryLock()) {
+            p.mu.lockUncancelable(p.io);
+            for (sources) |k| try p.pending.append(p.gpa, try p.gpa.dupe(u8, k));
+            p.mu.unlock(p.io);
+            try o.put(a, "pending", .{ .bool = true });
+            try o.put(a, "message", .{ .string = "a night is running: the erased note's neurons are zeroed when it ends" });
+            return .{ .object = o };
+        }
+        defer p.srv.teacher.learning.unlock(p.io);
+        const z = p.zeroKeys(a, sources);
+        try o.put(a, "pending", .{ .bool = false });
+        try o.put(a, "zeroed", try json.intValue(a, z.neurons));
+        try o.put(a, "facts", try json.intValue(a, z.facts));
+        try o.put(a, "ms", try json.intValue(a, z.ms));
+        if (z.failed) try o.put(a, "failed", .{ .string = "the learner refused to zero the neurons; the next night rebuilds the pocket" });
+        return .{ .object = o };
+    }
+
+    const Zeroed = struct { neurons: usize = 0, facts: usize = 0, ms: i64 = 0, failed: bool = false };
+
+    /// The facts of `keys` out of the pocket (the learner's lock held): neurons zeroed and saved, state written.
+    fn zeroKeys(p: *Promoter, a: Allocator, keys: []const []const u8) Zeroed {
+        var out: Zeroed = .{};
+        const t0 = clockMs(p.io);
+        const s = &p.state;
+        var gone: std.ArrayList(promote.Neuron) = .empty;
+        for (s.facts.items) |*f| for (keys) |k| if (std.mem.eql(u8, f.key, k)) {
+            if (promote.active(f.status)) gone.appendSlice(a, f.neurons) catch return .{ .failed = true };
+            out.facts += @intFromBool(promote.active(f.status));
+        };
+        if (gone.items.len > 0 and !slide.retire(p.srv, a, gone.items)) {
+            s.rebuild_next = true; // whatever the learner did, the next night zeroes every promotion neuron
+            out.failed = true;
+        }
+        for (s.facts.items) |*f| for (keys) |k| if (std.mem.eql(u8, f.key, k)) {
+            if (promote.active(f.status) or f.status == .note) {
+                f.status = .freed;
+                f.why = "erased: the note is gone and its neurons were zeroed";
+            }
+            f.neurons = &.{};
+            f.probes = &.{};
+            f.alone = 0;
+        };
+        var left: std.ArrayList(promote.Neuron) = .empty;
+        for (s.pocket) |n| if (!promote.has(gone.items, n)) left.append(s.alloc(), n) catch {};
+        s.pocket = left.items;
+        out.neurons = gone.items.len;
+        var b: Backend = .{ .p = p };
+        b.persist(s) catch {};
+        p.publish() catch {};
+        out.ms = clockMs(p.io) - t0;
+        if (out.facts > 0) log.line("notes promotion: an erase zeroed {d} neurons of {d} facts in {d} ms", .{ out.neurons, out.facts, out.ms });
+        return out;
+    }
+
+    /// Erases that came during a night, applied now (the learner's lock held).
+    pub fn drainPending(p: *Promoter) void {
+        p.mu.lockUncancelable(p.io);
+        const keys = p.pending.toOwnedSlice(p.gpa) catch return p.mu.unlock(p.io);
+        p.mu.unlock(p.io);
+        defer {
+            for (keys) |k| p.gpa.free(k);
+            p.gpa.free(keys);
+        }
+        if (keys.len == 0) return;
+        var arena: std.heap.ArenaAllocator = .init(p.gpa);
+        defer arena.deinit();
+        const ks = arena.allocator().alloc([]const u8, keys.len) catch return;
+        for (keys, ks) |k, *x| x.* = k;
+        _ = p.zeroKeys(arena.allocator(), ks);
     }
 
     /// The state read back from its own bytes: one night's allocations go, the facts stay.
