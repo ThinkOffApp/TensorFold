@@ -166,12 +166,16 @@ pub const Live = struct {
             for (collected[collected.len - n ..], keys[0..n]) |t, *k| k.* = idx.keyOf(t);
             const ordinary = if (n == 1) idx.names.get(keys[0]) else idx.phrases.get(index.packPhrase(keys[0..n]));
             const alias = if (l.shape.resolve_subjects) idx.aliases.get(index.packPhrase(keys[0..n])) else null;
-            const e = ordinary orelse alias orelse continue;
-            if (e == index.no_note) continue;
-            if (l.shape.resolve_subjects and idx.self_entity == e) continue; // the assistant's "my" is not the user's
-            for (idx.ent_cur.of(e)) |p| {
-                const id = idx.idAt(p);
-                if (std.mem.indexOfScalar(u32, l.held.items, id) == null and std.mem.indexOfScalar(u32, l.exclude, id) == null) return true;
+            const candidates = if (l.shape.resolve_subjects and ordinary == null) idx.alias_entities.get(index.packPhrase(keys[0..n])) else null;
+            const single = [1]u32{ordinary orelse alias orelse index.no_note};
+            const entities = if (candidates) |cs| cs.items else &single;
+            for (entities) |e| {
+                if (e == index.no_note) continue;
+                if (l.shape.resolve_subjects and idx.self_entity == e) continue; // the assistant's "my" is not the user's
+                for (idx.ent_cur.of(e)) |p| {
+                    const id = idx.idAt(p);
+                    if (std.mem.indexOfScalar(u32, l.held.items, id) == null and std.mem.indexOfScalar(u32, l.exclude, id) == null) return true;
+                }
             }
         }
         return false;

@@ -65,6 +65,13 @@ test "subject aliases reject ambiguous names and recover after take back" {
         try testing.expect(weight > 0 and weight < 1);
         try testing.expectApproxEqAbs(scratch.found_weights.items[0], weight, 1e-12);
     }
+    const decode = @import("notes_decode.zig");
+    var live: decode.Live = .{ .a = a, .on = true, .store = store, .ver = store.current.idx.ver, .question = "", .past = false, .cap = 512, .exclude = &.{}, .place = .first, .echo = false, .shape = .{ .resolve_subjects = true }, .block = "", .block_tokens = 0 };
+    try testing.expect(live.nameJustWritten(ids));
+    // Once all candidates' current notes are held, the same name cannot
+    // trigger another fetch. A collision never chooses an arbitrary entity.
+    for (candidates) |e| for (store.current.idx.ent_cur.of(e)) |p| try live.held.append(a, store.current.idx.idAt(p));
+    try testing.expect(!live.nameJustWritten(ids));
     const newest = store.model.notes.items[store.model.notes.items.len - 1].id;
     const path = try std.fmt.allocPrint(a, "/v1/notes/{d}", .{newest});
     const withdrawn = try rig.request(r.srv, a, "DELETE", path, "{}");
