@@ -10,7 +10,7 @@ delta, alongside the already shared SA base and side postings. Lookup must
 read note state/line/cost through version-aware accessors, not the mutable
 writer Model. A change/take-back overrides only touched places; new notes
 append. Reader-held versions must retain old lines and state until release.
-Erase must rebuild and synchronously retire all reachable old secret bytes.
+Erase must enforce the serving barrier and bounded reclamation contract below.
 
 Sequence:
 
@@ -30,6 +30,29 @@ Sequence:
    claiming bounded production write latency.
 
 No constant-time or production-ready claim follows from the present pin.
+
+## Required erase contract (not yet implemented)
+
+- DELETE must return an error on I/O or allocation failure. A successful
+  acceptance acknowledgment follows durable journal fsync, not merely an
+  in-memory change. Publication and rollback must preserve this ordering.
+- Acceptance immediately bars erased material from notes lookup, cached
+  prompts, and saved-conversation serving. It must not wait for a merge.
+- Distinguish accepted/pending reclamation from complete reclamation in the
+  response and a status query; expose failures rather than silently claiming
+  completion. Snapshot-origin notes must be supported, not rejected with 409.
+- Reclamation has an enforced deadline T, including retained reader versions:
+  readers must finish, expire, or be cancelled within that bound. Force index
+  compaction and snapshot rewrite within T; "at the next merge" is not a bound.
+- Cover journal, snapshot, index keys/lines and process-owned cached copies;
+  restart must not resurrect erased material. Separately qualify external
+  backups or exports outside the service's control, rather than promising
+  their deletion.
+- Test crash/restart, held readers, cached prompts/conversations, snapshot
+  notes, and injected allocation/I/O failures. Measure worst-case reclamation
+  and serving-barrier behavior at 1k/10k/100k/1M before advertising any T or
+  bounded-erase production guarantee.
+
 Multi-user routing is a separate isolation layer: owners must be bound to
 authenticated principals, not trusted request-body owner strings. Snapshot,
 journal, lookup scratch, decode continuation and deletion must stay isolated.
