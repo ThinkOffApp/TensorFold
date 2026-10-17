@@ -167,6 +167,9 @@ pub const Live = struct {
             const ordinary = if (n == 1) idx.names.get(keys[0]) else idx.phrases.get(index.packPhrase(keys[0..n]));
             const alias = if (l.shape.resolve_subjects) idx.aliases.get(index.packPhrase(keys[0..n])) else null;
             const candidates = if (l.shape.resolve_subjects and ordinary == null) idx.alias_entities.get(index.packPhrase(keys[0..n])) else null;
+            // An unresolved common name is not sufficient live-fetch evidence.
+            // Expanding hundreds of entities also makes fitting unbounded work.
+            if (candidates) |cs| if (cs.items.len > 1) continue;
             const single = [1]u32{ordinary orelse alias orelse index.no_note};
             const entities = if (candidates) |cs| cs.items else &single;
             for (entities) |e| {
@@ -189,6 +192,9 @@ pub const Live = struct {
         defer s.release(v);
         var view = v.idx.*;
         view.settings.resolve_subjects = l.shape.resolve_subjects;
+        // Until relation disambiguation is available, live checks consume only
+        // unique aliases. The unique map marks collisions with no_note.
+        view.alias_entities = .empty;
         if (l.shape.resolve_subjects) view.settings.resolve_self = false; // first-person aliases belong to the question-only prefetch
         const idx = &view;
         if (idx.ver != l.ver) {
@@ -259,11 +265,16 @@ pub const Live = struct {
         const kept = try placesOf(a, idx, if (l.place == .first) l.held.items else l.late.items);
         var n = fresh.len;
         while (n > 0) : (n -= 1) {
-            const shown = try lookup.render(idx, sc, try std.mem.concat(a, u32, &.{ kept, fresh[0..n] }));
+            // Failed fits must not accumulate in the request arena. This
+            // bounds temporary memory, independently of how many fits fail.
+            var fit_arena = std.heap.ArenaAllocator.init(s.gpa);
+            defer fit_arena.deinit();
+            const fit_a = fit_arena.allocator();
+            const shown = try lookup.render(idx, sc, try std.mem.concat(fit_a, u32, &.{ kept, fresh[0..n] }));
             // (b) after a first block says what notes are: its head is not said again, the titles and lines follow it
             const late = l.place != .first and l.block.len > 0 and std.mem.startsWith(u8, shown.block, idx.head) and shown.block.len > idx.head.len;
             const block = if (late) shown.block[idx.head.len + 1 ..] else shown.block;
-            const counted = text.encode(a, block, false) catch |e| switch (e) {
+            const counted = text.encode(fit_a, block, false) catch |e| switch (e) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.Template => return null,
             };

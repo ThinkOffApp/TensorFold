@@ -67,7 +67,7 @@ test "subject aliases reject ambiguous names and recover after take back" {
     }
     const decode = @import("notes_decode.zig");
     var live: decode.Live = .{ .a = a, .on = true, .store = store, .ver = store.current.idx.ver, .question = "", .past = false, .cap = 512, .exclude = &.{}, .place = .first, .echo = false, .shape = .{ .resolve_subjects = true }, .block = "", .block_tokens = 0 };
-    try testing.expect(live.nameJustWritten(ids));
+    try testing.expect(!live.nameJustWritten(ids)); // unresolved collisions must not expand live fetch
     // Once all candidates' current notes are held, the same name cannot
     // trigger another fetch. A collision never chooses an arbitrary entity.
     for (candidates) |e| for (store.current.idx.ent_cur.of(e)) |p| try live.held.append(a, store.current.idx.idAt(p));
