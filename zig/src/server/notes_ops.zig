@@ -47,6 +47,7 @@ pub const Written = struct {
     note: ?View,
     retired: []const u32,
     same_as: []const u32,
+    ver: u64 = 0, // the index version it swapped in (0: none, as for a write that learns nothing)
 };
 
 /// What a write asks: a new note, a change of note `target`, or a take-back of it.
@@ -112,7 +113,7 @@ pub fn perform(s: *Store, a: Allocator, ask: Ask, why: *Refusal) Error!Written {
         s.gpa.destroy(x);
     };
     const shown: ?u32 = if (out.note != 0) out.note else if (out.same_as.len > 0) out.same_as[0] else null;
-    const reply: Written = .{ .verdict = out.verdict, .source = source, .told = r.told, .note = if (shown) |id| try view(m, a, m.placeOf(id).?) else null, .retired = out.retired, .same_as = out.same_as };
+    var reply: Written = .{ .verdict = out.verdict, .source = source, .told = r.told, .note = if (shown) |id| try view(m, a, m.placeOf(id).?) else null, .retired = out.retired, .same_as = out.same_as };
     try s.current.garbage.ensureUnusedCapacity(s.gpa, undo.gone.items.len); // the replaced lines, kept by the version it retires
     var entry = try s.log.prepare(r, out, m);
     errdefer records_mod.freeEntry(s.gpa, &entry);
@@ -127,6 +128,7 @@ pub fn perform(s: *Store, a: Allocator, ask: Ask, why: *Refusal) Error!Written {
     s.log.push(entry);
     if (v) |x| {
         s.swap(x, false);
+        reply.ver = x.idx.ver;
         s.next_ver += 1;
     }
     s.reclaim(false);

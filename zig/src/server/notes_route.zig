@@ -74,6 +74,7 @@ pub const Wrote = struct {
     source: []const u8 = "",
     skipped: []const u8 = "",
     failed: []const u8 = "", // the store refused the write (no journal, a disk error); the reply goes on
+    ver: u64 = 0, // the index version the write made (0: none)
 
     fn value(w: Wrote, a: Allocator) Allocator.Error!Value {
         const o = try json.newObject(a);
@@ -107,7 +108,7 @@ fn autoWrite(store: *Store, a: Allocator, ask: Ask, body: Value, normalized: Val
         error.OutOfMemory => error.OutOfMemory,
         error.Refused => .{ .failed = why.message },
     };
-    return .{ .verdict = done.verdict, .id = if (done.note) |n| n.id else 0, .source = done.source };
+    return .{ .verdict = done.verdict, .id = if (done.note) |n| n.id else 0, .source = done.source, .ver = done.ver };
 }
 
 /// One request's lookup, as its reply and the server's log report it.

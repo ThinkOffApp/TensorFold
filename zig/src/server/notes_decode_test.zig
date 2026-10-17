@@ -53,7 +53,7 @@ pub const Words = struct {
             try out.append(a, w.intern(s[i..@min(j, s.len)]));
             i = j;
         }
-        return out.items;
+        return out.toOwnedSlice(a); // its own size: a caller may free it (a write's encodes do)
     }
 
     pub fn text(w: *Words) model_text.Text {
@@ -69,7 +69,7 @@ pub const Words = struct {
         const w: *Words = @ptrCast(@alignCast(ctx));
         var out: std.ArrayList(u8) = .empty;
         for (xs) |x| try out.appendSlice(a, w.list.items[x]);
-        return out.items;
+        return out.toOwnedSlice(a);
     }
 
     fn tokenId(ctx: *anyopaque, piece: []const u8) ?u32 {
@@ -244,6 +244,7 @@ pub const Rig = struct {
     script: Script = undefined,
     srv: *server.Server = undefined,
     arena: std.heap.ArenaAllocator = .init(testing.allocator),
+    journal: ?[]const u8 = null, // a journal's path: writes on, as with --notes and its journal
 
     pub fn init(r: *Rig, more: []const []const u8) !void {
         r.script = .{ .words = &r.words };
@@ -251,7 +252,7 @@ pub const Rig = struct {
         const bytes = try snapshot(a, &r.words, more, r.links);
         r.srv = try server.Server.init(testing.allocator, testing.io, r.script.engine(), r.words.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false }, null);
         var why: []const u8 = "";
-        r.srv.notes = try notes_route.Store.load(testing.allocator, testing.io, bytes, r.words.text(), &why);
+        r.srv.notes = try notes_route.Store.loadJournaled(testing.allocator, testing.io, bytes, r.words.text(), r.journal, &why);
     }
 
     pub fn deinit(r: *Rig) void {

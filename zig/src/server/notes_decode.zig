@@ -478,9 +478,14 @@ pub fn setup(srv: *const Server, cx: *Cx, body: Value, used: ?*const notes_route
     const l = try cx.a.create(Live);
     // (b) needs a template that keeps a later system message in place; a template that makes it a user turn gets (a)
     const place: Place = if (ask.place != .first and !std.mem.eql(u8, srv.late_system, "system")) .first else ask.place;
-    l.* = .{ .a = cx.a, .on = ask.on, .store = store, .ver = u.found.ver, .question = notes_route.lastUser(messages), .past = u.past, .cap = u.cap, .exclude = notes_ask.exclude, .place = place, .echo = u.echo, .dry = ask.dry, .names = ask.names, .shape = shape, .block = u.found.block, .prepared_block = u.found.block, .block_tokens = if (u.found.block.len > 0) u.found.tokens else 0 };
+    l.* = .{ .a = cx.a, .on = ask.on, .store = store, .ver = readFrom(u), .question = notes_route.lastUser(messages), .past = u.past, .cap = u.cap, .exclude = notes_ask.exclude, .place = place, .echo = u.echo, .dry = ask.dry, .names = ask.names, .shape = shape, .block = u.found.block, .prepared_block = u.found.block, .block_tokens = if (u.found.block.len > 0) u.found.tokens else 0 };
     try l.held.appendSlice(cx.a, u.found.ids);
     return l;
+}
+
+/// The version the checks read: the request's own write's, when it came right after the first block's, else that one.
+fn readFrom(u: *const notes_route.Used) u64 {
+    return if (u.wrote.ver != 0 and u.wrote.ver == u.found.ver + 1) u.wrote.ver else u.found.ver;
 }
 
 /// The entities the query names: first the `boosted` ones lookup() matched (names of 2 to 8 keys), then one-key names.

@@ -126,6 +126,21 @@ test "notes_position user: the block right before the question, (a) re-renders i
     try testing.expectEqualSlices(u32, try std.mem.concat(a, u32, &.{ try r.prompt(&.{ .{ "system", system }, .{ "user", earlier_user }, .{ "assistant", earlier_reply }, .{ "system", block }, .{ "system", late }, .{ "user", question } }), said }), r.script.prompts.items[1]);
 }
 
+test "the request's own write is no change during its reply: the checks go on, as without the write" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var r: Rig = .{};
+    r.journal = try std.fmt.allocPrint(r.arena.allocator(), ".zig-cache/tmp/{s}/snap.json.journal", .{tmp.sub_path});
+    const said = "My sister moved to Oslo.";
+    try r.init(&(more ++ [_][]const u8{said}));
+    defer r.deinit();
+    const msgs = try std.fmt.allocPrint(r.arena.allocator(), "[{{\"role\":\"user\",\"content\":\"{s}\"}}]", .{said});
+    const got = (try r.askWith(&.{ answers[0], answers[1] }, msgs, "")).value;
+    try testing.expectEqualStrings("NEW", got.get("notes").?.get("write").?.strField("verdict").?); // a new version
+    try testing.expectEqual(@as(usize, 1), injected(got).len); // Anna's note, as for a question
+    try testing.expectEqualStrings("Your sister is Anna. She drives a red Volvo.", content(got));
+}
+
 test "the defaults: the value hop, the name trigger and the notes before the question, with no field sent" {
     var r: Rig = .{ .links = true, .legacy = "" };
     try r.init(&more);
