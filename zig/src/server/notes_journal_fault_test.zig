@@ -1,4 +1,4 @@
-//! An append that fails: rolled back, it changed nothing; not rolled back, writes stop and a restart cuts the tail.
+//! A failed append: rolled back, nothing changed; else writes stop and a restart cuts the tail (each index kind).
 const std = @import("std");
 const builtin = @import("builtin");
 const rig = @import("notes_rig_test.zig");
@@ -16,9 +16,9 @@ fn blockOf(r: *rig.Rig, a: std.mem.Allocator, q: []const u8) ![]const u8 {
     return (try r.store().retrieve(a, t, try t.encode(a, q, false), false, 512, &.{})).block;
 }
 
-/// The rig after two good writes, with the journal's faults hooked in.
-fn setup(a: std.mem.Allocator, faults: *journal_mod.Faults) !*rig.Rig {
-    const r = try rig.Rig.init(testing.allocator);
+/// The rig of index kind `k` after two good writes, with the journal's faults hooked in.
+fn setup(a: std.mem.Allocator, faults: *journal_mod.Faults, k: rig.Kind) !*rig.Rig {
+    const r = try rig.Rig.initWith(testing.allocator, k);
     errdefer r.deinit();
     var why: ops.Refusal = .{};
     _ = try add(r, a, "My favourite colour is green.", &why);
@@ -27,12 +27,24 @@ fn setup(a: std.mem.Allocator, faults: *journal_mod.Faults) !*rig.Rig {
     return r;
 }
 
+/// Runs `case` once per index kind of rig.kinds, naming the kind when it fails.
+fn eachKind(comptime case: anytype, args: anytype) !void {
+    for (rig.kinds) |k| {
+        errdefer std.debug.print("index {s}, side buffer {d}\n", .{ @tagName(k.kind), k.side_max });
+        try @call(.auto, case, .{k} ++ args);
+    }
+}
+
 test "(a) a write that fails while its rollback succeeds changes nothing, and the next write is stored" {
+    try eachKind(rolledBack, .{});
+}
+
+fn rolledBack(k: rig.Kind) !void {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var faults: journal_mod.Faults = .{};
-    const r = try setup(a, &faults);
+    const r = try setup(a, &faults, k);
     defer r.deinit();
     const before = try r.journal(a);
     const notes = r.store().model.notes.items.len;
@@ -50,12 +62,12 @@ test "(a) a write that fails while its rollback succeeds changes nothing, and th
 }
 
 /// (b) and (c): the write fails and so does its rollback's truncate, or its rollback's sync.
-fn poisonedBy(rollback_truncate_fails: bool) !void {
+fn poisonedBy(k: rig.Kind, rollback_truncate_fails: bool) !void {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var faults: journal_mod.Faults = .{};
-    const r = try setup(a, &faults);
+    const r = try setup(a, &faults, k);
     defer r.deinit();
     const q = "What is my favourite colour?";
     const block = try blockOf(r, a, q);
@@ -83,19 +95,23 @@ fn poisonedBy(rollback_truncate_fails: bool) !void {
 }
 
 test "(b) a write that fails and whose rollback truncate fails: poisoned, writes refused, lookups served" {
-    try poisonedBy(true);
+    try eachKind(poisonedBy, .{true});
 }
 
 test "(c) a write that fails and whose rollback sync fails: the same" {
-    try poisonedBy(false);
+    try eachKind(poisonedBy, .{false});
 }
 
 test "(d) a torn trailing record on disk: the restart cuts it and replays to the last whole record" {
+    try eachKind(tornTail, .{});
+}
+
+fn tornTail(k: rig.Kind) !void {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var faults: journal_mod.Faults = .{};
-    const r = try setup(a, &faults);
+    const r = try setup(a, &faults, k);
     defer r.deinit();
     const whole = try r.journal(a);
     faults.write = faults.writes;
@@ -117,9 +133,9 @@ test "(d) a torn trailing record on disk: the restart cuts it and replays to the
 }
 
 /// The rig after two good writes, a third whose append fails as `set` arranges, then a restart.
-fn failThenRestart(a: std.mem.Allocator, set: *const fn (*journal_mod.Faults) void) !struct { r: *rig.Rig, reply: []const u8, whole: []const u8, left: []const u8 } {
+fn failThenRestart(a: std.mem.Allocator, k: rig.Kind, set: *const fn (*journal_mod.Faults) void) !struct { r: *rig.Rig, reply: []const u8, whole: []const u8, left: []const u8 } {
     var faults: journal_mod.Faults = .{};
-    const r = try setup(a, &faults);
+    const r = try setup(a, &faults, k);
     errdefer r.deinit();
     const whole = try r.journal(a);
     set(&faults);
@@ -137,10 +153,14 @@ fn syncFailsThenTruncate(f: *journal_mod.Faults) void {
 }
 
 test "(e) a whole write whose sync fails and whose rollback truncate fails is never applied by the restart" {
+    try eachKind(neverApplied, .{});
+}
+
+fn neverApplied(k: rig.Kind) !void {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const got = try failThenRestart(a, syncFailsThenTruncate);
+    const got = try failThenRestart(a, k, syncFailsThenTruncate);
     defer got.r.deinit();
     try testing.expect(std.mem.indexOf(u8, got.reply, "so a restart drops it") != null);
     // on disk: the whole write line, newline and all, but no commit line after it
@@ -158,10 +178,14 @@ fn commitSyncFailsThenTruncate(f: *journal_mod.Faults) void {
 }
 
 test "(f) a commit line written whose sync fails and whose rollback fails: the reply says a restart may apply it" {
+    try eachKind(mayApply, .{});
+}
+
+fn mayApply(k: rig.Kind) !void {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const got = try failThenRestart(a, commitSyncFailsThenTruncate);
+    const got = try failThenRestart(a, k, commitSyncFailsThenTruncate);
     defer got.r.deinit();
     try testing.expect(std.mem.indexOf(u8, got.reply, "the disk state is unknown and a restart may apply this write") != null);
     // here the page cache kept the commit line, so the restart applies the write (the documented case)
@@ -169,11 +193,15 @@ test "(f) a commit line written whose sync fails and whose rollback fails: the r
 }
 
 test "(g) a format-1 journal (no commit lines) is replayed whole and rewritten as format 2 under the lock" {
+    try eachKind(formatOneUpgraded, .{});
+}
+
+fn formatOneUpgraded(k: rig.Kind) !void {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var faults: journal_mod.Faults = .{};
-    const r = try setup(a, &faults);
+    const r = try setup(a, &faults, k);
     defer r.deinit();
     const v2 = try r.journal(a);
     r.srv.notes.?.deinit();
@@ -223,12 +251,12 @@ fn failFolder(r: *rig.Rig, a: std.mem.Allocator, faults: *journal_mod.Faults, ho
 }
 
 /// (h): the first write, whose new journal's folder cannot be synced: refused, no journal left, nothing changed.
-fn createFolderFails(how: FolderFault) !void {
+fn createFolderFails(k: rig.Kind, how: FolderFault) !void {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var faults: journal_mod.Faults = .{};
-    const r = try rig.Rig.init(testing.allocator);
+    const r = try rig.Rig.initWith(testing.allocator, k);
     defer r.deinit();
     defer folderMode(r, a, 0o700) catch {};
     r.store().journal.?.faults = &faults;
@@ -248,15 +276,15 @@ fn createFolderFails(how: FolderFault) !void {
 }
 
 test "(h) the journal's folder sync fails at its create (by the hook): the first write refused, nothing changed" {
-    try createFolderFails(.hook);
+    try eachKind(createFolderFails, .{FolderFault.hook});
 }
 
 test "(h) the folder's F_FULLFSYNC fails with EIO at the create: the same" {
-    try createFolderFails(.fullfsync_eio);
+    try eachKind(createFolderFails, .{FolderFault.fullfsync_eio});
 }
 
 test "(h) the folder cannot be opened for its sync at the create: the same" {
-    try createFolderFails(.unopenable);
+    try eachKind(createFolderFails, .{FolderFault.unopenable});
 }
 
 fn idOf(r: *rig.Rig, source: []const u8) u32 {
@@ -270,17 +298,23 @@ fn holds(r: *rig.Rig, text: []const u8) bool {
 }
 
 /// (i): an erase whose new journal is renamed in but whose folder cannot be synced: applied, the disk state unknown.
-fn eraseFolderFails(how: FolderFault) !void {
+fn eraseFolderFails(k: rig.Kind, how: FolderFault) !void {
+    return eraseFolderFailsAs(k, how, false);
+}
+
+/// eraseFolderFails(); `deferred`: the old model and base left to a later merge (the erase tests' control).
+fn eraseFolderFailsAs(k: rig.Kind, how: FolderFault, deferred: bool) !void {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var faults: journal_mod.Faults = .{};
-    const r = try setup(a, &faults);
+    const r = try setup(a, &faults, k);
     defer r.deinit();
     defer folderMode(r, a, 0o700) catch {};
     const before = try r.journal(a);
     try testing.expect(std.mem.indexOf(u8, before, "Oslo") != null and holds(r, "Oslo"));
     const path = try std.fmt.allocPrint(a, "/v1/notes/{d}?erase=true", .{idOf(r, "w2")});
+    r.store().defer_erase_merge = deferred;
     if (!try failFolder(r, a, &faults, how)) return error.SkipZigTest;
     const got = try rig.request(r.srv, a, "DELETE", path, null);
     try folderMode(r, a, 0o700);
@@ -307,15 +341,19 @@ fn eraseFolderFails(how: FolderFault) !void {
 }
 
 test "(i) an erase's folder sync fails after its rename (by the hook): applied, poisoned, the disk state unknown" {
-    try eraseFolderFails(.hook);
+    try eachKind(eraseFolderFails, .{FolderFault.hook});
 }
 
 test "(i) an erase's folder F_FULLFSYNC fails with EIO after the rename: the same" {
-    try eraseFolderFails(.fullfsync_eio);
+    try eachKind(eraseFolderFails, .{FolderFault.fullfsync_eio});
 }
 
 test "(i) an erase's folder cannot be opened for its sync after the rename: the same" {
-    try eraseFolderFails(.unopenable);
+    try eachKind(eraseFolderFails, .{FolderFault.unopenable});
+}
+
+test "(i) an erase left to a later merge whose folder sync fails after the rename: the same reply" {
+    try eraseFolderFailsAs(.{ .kind = .sa }, .hook, true);
 }
 
 /// A format-1 journal of the rig's two writes: the header's format, and no commit lines.
@@ -335,7 +373,7 @@ fn openFails(r: *rig.Rig, faults: *journal_mod.Faults) ![]const u8 {
     journal_mod.faults_at_open = faults;
     defer journal_mod.faults_at_open = null;
     var problem: []const u8 = "";
-    const s = notes_route.Store.open(r.gpa, testing.io, r.snap, r.text.text(), "", &problem) catch |e| {
+    const s = notes_route.Store.openIndexed(r.gpa, testing.io, r.snap, r.text.text(), "", r.kind, &problem) catch |e| {
         try testing.expectEqual(error.JournalIo, e);
         return problem;
     };
@@ -344,11 +382,15 @@ fn openFails(r: *rig.Rig, faults: *journal_mod.Faults) ![]const u8 {
 }
 
 test "(i) the format-1 upgrade at startup: a failure before the rename changes nothing, one after it stops the start" {
+    try eachKind(upgradeFails, .{});
+}
+
+fn upgradeFails(k: rig.Kind) !void {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var unused: journal_mod.Faults = .{};
-    const r = try setup(a, &unused);
+    const r = try setup(a, &unused, k);
     defer r.deinit();
     const v2 = try r.journal(a);
     const v1 = try formatOne(a, v2);
@@ -371,9 +413,9 @@ test "(i) the format-1 upgrade at startup: a failure before the rename changes n
 }
 
 /// The rig after two writes, the third's first F_FULLFSYNC failing with `e`: the reply, and the faults after it.
-fn fullSyncFails(a: std.mem.Allocator, e: std.c.E) !struct { r: *rig.Rig, got: rig.Reply, before: []const u8, fallbacks: u32 } {
+fn fullSyncFails(a: std.mem.Allocator, k: rig.Kind, e: std.c.E) !struct { r: *rig.Rig, got: rig.Reply, before: []const u8, fallbacks: u32 } {
     var faults: journal_mod.Faults = .{};
-    const r = try setup(a, &faults);
+    const r = try setup(a, &faults, k);
     errdefer r.deinit();
     const before = try r.journal(a);
     faults.full = faults.fulls;
@@ -388,14 +430,17 @@ test "(j) F_FULLFSYNC failing with EIO, ENODEV or EBADF is a failed sync: no pla
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    for ([_]std.c.E{ .IO, .NODEV, .BADF }) |e| {
-        const x = try fullSyncFails(a, e);
-        defer x.r.deinit();
-        try testing.expectEqual(@as(u16, 500), x.got.status);
-        try testing.expectEqualStrings("the write could not be stored on disk; nothing changed", rig.message(x.got));
-        try testing.expectEqual(@as(u32, 0), x.fallbacks);
-        try testing.expectEqualStrings(x.before, try x.r.journal(a));
-        try testing.expect(!x.r.store().journal.?.poisoned and !holds(x.r, "Helsinki"));
+    for (rig.kinds) |k| {
+        for ([_]std.c.E{ .IO, .NODEV, .BADF }) |e| {
+            errdefer std.debug.print("index {s}, side buffer {d}, errno {s}\n", .{ @tagName(k.kind), k.side_max, @tagName(e) });
+            const x = try fullSyncFails(a, k, e);
+            defer x.r.deinit();
+            try testing.expectEqual(@as(u16, 500), x.got.status);
+            try testing.expectEqualStrings("the write could not be stored on disk; nothing changed", rig.message(x.got));
+            try testing.expectEqual(@as(u32, 0), x.fallbacks);
+            try testing.expectEqualStrings(x.before, try x.r.journal(a));
+            try testing.expect(!x.r.store().journal.?.poisoned and !holds(x.r, "Helsinki"));
+        }
     }
 }
 
@@ -404,13 +449,16 @@ test "(k) F_FULLFSYNC unsupported (ENOTTY, ENOTSUP, EINVAL): plain fsync instead
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    for ([_]std.c.E{ .NOTTY, .OPNOTSUPP, .INVAL }) |e| {
-        const x = try fullSyncFails(a, e);
-        defer x.r.deinit();
-        try testing.expectEqual(@as(u16, 201), x.got.status);
-        try testing.expectEqual(@as(u32, 1), x.fallbacks);
-        try x.r.restart();
-        try testing.expectEqual(@as(usize, 3), x.r.store().replayed);
-        try testing.expect(holds(x.r, "Helsinki"));
+    for (rig.kinds) |k| {
+        for ([_]std.c.E{ .NOTTY, .OPNOTSUPP, .INVAL }) |e| {
+            errdefer std.debug.print("index {s}, side buffer {d}, errno {s}\n", .{ @tagName(k.kind), k.side_max, @tagName(e) });
+            const x = try fullSyncFails(a, k, e);
+            defer x.r.deinit();
+            try testing.expectEqual(@as(u16, 201), x.got.status);
+            try testing.expectEqual(@as(u32, 1), x.fallbacks);
+            try x.r.restart();
+            try testing.expectEqual(@as(usize, 3), x.r.store().replayed);
+            try testing.expect(holds(x.r, "Helsinki"));
+        }
     }
 }

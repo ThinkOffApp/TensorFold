@@ -40,6 +40,12 @@ pub const Echo = struct {
 /// The day the fixture's writes are told on (2026-10-16).
 pub const today = line_mod.ordinalOf(2026, 10, 16);
 
+/// An index kind and side buffer a rig is built with.
+pub const Kind = struct { kind: notes_store.IndexKind = .postings, side_max: u32 = 1024 };
+
+/// postings; sa with its side buffer (a few writes never merge); sa merging at every write (a new base each time).
+pub const kinds = [_]Kind{ .{}, .{ .kind = .sa }, .{ .kind = .sa, .side_max = 0 } };
+
 pub const Rig = struct {
     tmp: testing.TmpDir,
     snap: []u8, // the snapshot's path; the journal is snap + ".journal"
@@ -52,6 +58,11 @@ pub const Rig = struct {
 
     pub fn init(gpa: std.mem.Allocator) !*Rig {
         return initKind(gpa, .postings, 1024);
+    }
+
+    /// initKind() with `k`'s index kind and side buffer.
+    pub fn initWith(gpa: std.mem.Allocator, k: Kind) !*Rig {
+        return initKind(gpa, k.kind, k.side_max);
     }
 
     /// The rig with the n-gram index of `kind` (sa: a new base once the side buffer passes `side_max` notes).

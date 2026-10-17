@@ -108,7 +108,15 @@ test "a symlink or hardlink planted at the old temp name and at every name a rew
 }
 
 test "a rewrite that fails before its rename removes its own temp file (known by device and inode), nothing else" {
-    const r = try rig.Rig.init(testing.allocator);
+    for (rig.kinds) |k| {
+        errdefer std.debug.print("index {s}, side buffer {d}\n", .{ @tagName(k.kind), k.side_max });
+        try rewriteFails(k);
+    }
+}
+
+/// The erase refused with each index kind: the journal, the notes and the version lookups read all as before.
+fn rewriteFails(k: rig.Kind) !void {
+    const r = try rig.Rig.initWith(testing.allocator, k);
     defer r.deinit();
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -116,6 +124,7 @@ test "a rewrite that fails before its rename removes its own temp file (known by
     _ = try add(r, a, "My favourite colour is green.");
     const gone = try add(r, a, "I live in Oslo.");
     const before = try r.journal(a);
+    const ver = r.store().current;
     var faults: journal_mod.Faults = .{};
     r.store().journal.?.faults = &faults;
     faults.sync = faults.syncs; // the new file's sync, before the rename
@@ -123,6 +132,7 @@ test "a rewrite that fails before its rename removes its own temp file (known by
     try testing.expectError(error.Refused, ops.erase(r.store(), a, gone, &why));
     try testing.expectEqualStrings("the journal could not be rewritten without the note; nothing was erased", why.message);
     try testing.expectEqualStrings(before, try r.journal(a));
+    try testing.expect(r.store().current == ver and r.store().model.placeOf(gone) != null); // nothing swapped in
     var it = r.tmp.dir.iterate();
     while (try it.next(testing.io)) |e| try testing.expect(std.mem.indexOf(u8, e.name, ".tmp") == null); // no temp left
 }

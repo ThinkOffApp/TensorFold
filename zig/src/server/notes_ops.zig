@@ -216,6 +216,7 @@ pub fn erase(s: *Store, a: Allocator, id: u32, why: *Refusal) Error!Erased {
     if (s.defer_erase_merge) {
         // the negative control of the erase tests: the note hidden now, its bytes left to a later merge
         s.parked.append(s.gpa, old) catch old.deinit();
+        if (unsynced) return refuse(why, 500, erase_unsynced); // as below: applied, the disk state unknown
         return .{ .removed = removed.items, .moved = moved.items };
     }
     s.reclaim(true);
