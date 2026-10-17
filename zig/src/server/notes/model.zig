@@ -112,8 +112,10 @@ pub const Model = struct {
     }
 
     pub fn freeNote(g: Allocator, n: *Note) void {
-        g.free(n.bodyBlock());
-        g.free(n.line());
+        // A write installs cleanup before allocating the body and line. Do
+        // not evaluate their undefined pointers until ownership exists.
+        if (n.n_tokens != 0 or n.text_len != 0 or n.source_len != 0) g.free(n.bodyBlock());
+        if (n.line_len != 0) g.free(n.line());
     }
 
     /// A note id's place, or null.
@@ -399,4 +401,14 @@ fn str(v: Value, key: []const u8) LoadError![]const u8 {
 
 fn arr(v: Value, key: []const u8) LoadError![]Value {
     return (try need(v, key)).items() orelse error.BadSnapshot;
+}
+
+test "partial note cleanup before body and before line ownership" {
+    const g = std.testing.allocator;
+    var n: Note = .{ .id = 1, .entity = 0, .attribute = 0, .pair = 0, .value_ent = -1, .cost = 0, .version = 1, .told = 0, .state = .current, .kind = .fact };
+    var failing = std.testing.FailingAllocator.init(g, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, n.makeBody(failing.allocator(), 1, "body", "source"));
+    Model.freeNote(g, &n); // neither pointer has been initialized
+    try n.makeBody(g, 1, "body", "source");
+    Model.freeNote(g, &n); // body owned, line not allocated yet
 }
