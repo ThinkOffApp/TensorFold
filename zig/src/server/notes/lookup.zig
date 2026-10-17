@@ -203,7 +203,7 @@ fn keyHits(idx: *const Index, b: *const sa.Base, sc: *Scratch, keys: []const u32
             const place = b.placeOf(arr.get(k));
             if (sc.seen[place] == sc.sgen) continue;
             sc.seen[place] = sc.sgen;
-            if (!past and idx.state[place] != .current) continue; // retired since the base was built
+            if (!past and idx.stateAt(place) != .current) continue; // retired since the base was built
             try sc.hits.append(sc.gpa, place);
         }
     }
@@ -251,7 +251,7 @@ fn longHits(idx: *const Index, b: *const sa.Base, sc: *Scratch, keys: []const u3
     try keyHits(idx, b, sc, keys, past);
     for (0..idx.side_keys.len()) |k| {
         const place: u32 = @intCast(b.notes + k);
-        if (!past and idx.state[place] != .current) continue;
+        if (!past and idx.stateAt(place) != .current) continue;
         if (std.mem.indexOf(u32, idx.side_keys.of(k), keys) != null) try sc.hits.append(sc.gpa, place);
     }
     return sc.hits.items.len > 0;
@@ -388,10 +388,10 @@ pub fn lookup(idx: *const Index, sc: *Scratch, qids: []const u32, past: bool, ca
         for (rest[0..m]) |k| {
             if (@as(i64, cap) - @as(i64, used) < idx.min_line) break :walk;
             const i = placeOf(k);
-            const cur = idx.state[i] == .current;
+            const cur = idx.stateAt(i) == .current;
             if (!cur and !past) continue;
             const titled = if (cur) has_cur else has_hist;
-            const c = idx.cost[i] + idx.fx_nl + (if (titled) 0 else (if (cur) idx.fx_cur else idx.fx_hist) + idx.fx_nl);
+            const c = idx.costAt(i) + idx.fx_nl + (if (titled) 0 else (if (cur) idx.fx_cur else idx.fx_hist) + idx.fx_nl);
             if (@as(u64, used) + c <= cap) {
                 used += c;
                 try sc.chosen.append(gpa, i);
@@ -430,7 +430,7 @@ pub fn render(idx: *const Index, sc: *Scratch, chosen: []const u32) Allocator.Er
     var in_hist = false;
     for (sc.order.items) |x| {
         const i = x[0];
-        if (idx.state[i] == .current) {
+        if (idx.stateAt(i) == .current) {
             if (!in_cur) {
                 try sc.block.append(gpa, '\n');
                 try sc.block.appendSlice(gpa, idx.cur_title);
@@ -442,8 +442,8 @@ pub fn render(idx: *const Index, sc: *Scratch, chosen: []const u32) Allocator.Er
             in_hist = true;
         }
         try sc.block.append(gpa, '\n');
-        try sc.block.appendSlice(gpa, idx.line[i]);
-        try sc.ids.append(gpa, idx.note_id[i]);
+        try sc.block.appendSlice(gpa, idx.lineAt(i));
+        try sc.ids.append(gpa, idx.idAt(i));
         try sc.scores.append(gpa, sc.slot[i].score);
     }
     return .{ .ids = sc.ids.items, .scores = sc.scores.items, .block = sc.block.items };

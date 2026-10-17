@@ -174,6 +174,24 @@ pub const Index = struct {
         return self.note_id.len;
     }
 
+    // Version-local metadata seam. Lookups must not consult the mutable
+    // writer model when these columns move to a retained base plus delta.
+    pub fn stateAt(self: *const Index, place: u32) State {
+        return self.state[place];
+    }
+
+    pub fn lineAt(self: *const Index, place: u32) []const u8 {
+        return self.line[place];
+    }
+
+    pub fn costAt(self: *const Index, place: u32) u32 {
+        return self.cost[place];
+    }
+
+    pub fn idAt(self: *const Index, place: u32) u32 {
+        return self.note_id[place];
+    }
+
     /// A note id's place in the index, if the snapshot has that note.
     pub fn placeOfId(self: *const Index, id: u32) ?u32 {
         if (id >= self.id_place.len or self.id_place[id] == no_note) return null;

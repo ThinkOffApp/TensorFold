@@ -10,6 +10,31 @@ const Bytes = notes_test.Bytes;
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
 
+test "version metadata accessors keep a held reader unchanged across a replacement" {
+    const rig = @import("notes_rig_test.zig");
+    const r = try rig.Rig.initKind(testing.allocator, .sa, 1024);
+    defer r.deinit();
+    const store = r.store();
+    const held = store.acquire();
+    defer store.release(held);
+    var place: u32 = 0;
+    while (held.idx.stateAt(place) != .current) : (place += 1) {}
+    const id = held.idx.idAt(place);
+    const line = try testing.allocator.dupe(u8, held.idx.lineAt(place));
+    defer testing.allocator.free(line);
+    const cost = held.idx.costAt(place);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const path = try std.fmt.allocPrint(a, "/v1/notes/{d}", .{id});
+    const reply = try rig.request(r.srv, a, "PUT", path, "{\"text\":\"A uniquely new green Saab is parked in Tampere.\"}");
+    try testing.expectEqual(@as(u16, 201), reply.status);
+    try testing.expectEqual(index.State.current, held.idx.stateAt(place));
+    try testing.expectEqualStrings(line, held.idx.lineAt(place));
+    try testing.expectEqual(cost, held.idx.costAt(place));
+    try testing.expectEqual(index.State.superseded, store.current.idx.stateAt(place));
+}
+
 fn openSa(text: server.model_text.Text, bytes: []const u8) !*notes_route.Store {
     var why: []const u8 = "";
     return notes_route.Store.loadIndexed(testing.allocator, testing.io, bytes, text, .sa, &why);
