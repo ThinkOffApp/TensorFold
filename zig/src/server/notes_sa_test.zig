@@ -51,6 +51,20 @@ test "subject aliases reject ambiguous names and recover after take back" {
     try testing.expectEqual(@as(usize, 2), candidates.len);
     try testing.expect(std.mem.indexOfScalar(u32, candidates, sister) != null);
     try testing.expect(std.mem.indexOfScalar(u32, candidates, store.model.entityOf("my brother").?) != null);
+    const lookup_mod = @import("notes/lookup.zig");
+    var view = store.current.idx.*;
+    var scratch = try lookup_mod.Scratch.init(testing.allocator, &view);
+    defer scratch.deinit();
+    _ = try lookup_mod.lookup(&view, &scratch, ids, false, 512, &.{}, .{});
+    try testing.expectEqual(@as(usize, 0), scratch.found.items.len);
+    view.settings.resolve_subjects = true;
+    _ = try lookup_mod.lookup(&view, &scratch, ids, false, 512, &.{}, .{});
+    try testing.expectEqual(@as(usize, 2), scratch.found.items.len);
+    try testing.expectEqualSlices(u32, candidates, scratch.found.items);
+    for (scratch.found_weights.items) |weight| {
+        try testing.expect(weight > 0 and weight < 1);
+        try testing.expectApproxEqAbs(scratch.found_weights.items[0], weight, 1e-12);
+    }
     const newest = store.model.notes.items[store.model.notes.items.len - 1].id;
     const path = try std.fmt.allocPrint(a, "/v1/notes/{d}", .{newest});
     const withdrawn = try rig.request(r.srv, a, "DELETE", path, "{}");

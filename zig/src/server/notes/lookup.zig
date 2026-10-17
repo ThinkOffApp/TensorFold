@@ -28,6 +28,7 @@ pub const Scratch = struct {
     qkeys: std.ArrayList(u32) = .empty,
     qgrams: std.ArrayList(Gram) = .empty,
     found: std.ArrayList(u32) = .empty,
+    found_weights: std.ArrayList(f64) = .empty,
     spans: std.ArrayList([2]usize) = .empty,
     chosen: std.ArrayList(u32) = .empty,
     order: std.ArrayList([2]u32) = .empty,
@@ -38,7 +39,7 @@ pub const Scratch = struct {
     codes: std.ArrayList(u32) = .empty, // sa: a pattern's codes
     long: std.ArrayList([2]usize) = .empty, // sa, longer matches: the n-grams added (start and length in qkeys)
 
-    const lists = .{ "touched", "pool", "keys", "qkeys", "qgrams", "found", "spans", "chosen", "order", "ids", "scores", "block", "hits", "codes", "long" };
+    const lists = .{ "touched", "pool", "keys", "qkeys", "qgrams", "found", "found_weights", "spans", "chosen", "order", "ids", "scores", "block", "hits", "codes", "long" };
 
     pub fn init(gpa: Allocator, idx: *const Index) Allocator.Error!Scratch {
         const n = idx.notes();
@@ -162,9 +163,8 @@ fn subjects(idx: *const Index, sc: *Scratch) Allocator.Error!void {
             const phrase = index.packPhrase(q[j..][0..n]);
             const ordinary = if (n >= 2) idx.phrases.get(phrase) else null;
             const alias = if (idx.settings.resolve_subjects) idx.aliases.get(phrase) else null;
-            const e = ordinary orelse alias orelse continue;
-            if (e == index.no_note) continue;
-            if (!idx.settings.resolve_self and idx.self_entity == e) continue;
+            const candidates = if (idx.settings.resolve_subjects and ordinary == null) idx.alias_entities.get(phrase) else null;
+            if (ordinary == null and alias == null and candidates == null) continue;
             var inside = false;
             for (sc.spans.items) |sp| {
                 if (sp[0] <= j and j + n <= sp[1]) {
@@ -173,8 +173,27 @@ fn subjects(idx: *const Index, sc: *Scratch) Allocator.Error!void {
                 }
             }
             if (inside) continue;
-            try sc.found.append(sc.gpa, e);
-            try sc.spans.append(sc.gpa, .{ j, j + n });
+            const before = sc.found.items.len;
+            if (candidates) |cs| {
+                // Normalized entity IDF: a unique alias has full strength;
+                // common names retain all candidates with weaker evidence.
+                const entities: f64 = @floatFromInt(@max(idx.ent_cur.off.len - 1, cs.items.len));
+                const count: f64 = @floatFromInt(cs.items.len);
+                const weight = idx.log(1.0 + (entities - count + 0.5) / (count + 0.5)) /
+                    idx.log(1.0 + (entities - 0.5) / 1.5);
+                for (cs.items) |e| {
+                    if (!idx.settings.resolve_self and idx.self_entity == e) continue;
+                    try sc.found.append(sc.gpa, e);
+                    try sc.found_weights.append(sc.gpa, weight);
+                }
+            } else {
+                const e = ordinary orelse alias.?;
+                if (e == index.no_note) continue;
+                if (!idx.settings.resolve_self and idx.self_entity == e) continue;
+                try sc.found.append(sc.gpa, e);
+                try sc.found_weights.append(sc.gpa, 1.0);
+            }
+            if (sc.found.items.len > before) try sc.spans.append(sc.gpa, .{ j, j + n });
         }
     }
 }
@@ -305,9 +324,9 @@ pub fn lookup(idx: *const Index, sc: *Scratch, qids: []const u32, past: bool, ca
     if (st.subject > 0 and N > 0) {
         const top = idx.log(1.0 + (@as(f64, @floatFromInt(N)) - 0.5) / 1.5) * st.subject;
         try subjects(idx, sc);
-        for (sc.found.items) |e| {
-            for (idx.ent_cur.of(e)) |i| sc.add(i, top);
-            if (past) for (idx.ent_keys.of(e)) |k| for (idx.pair_notes.of(k)) |i| sc.add(i, top);
+        for (sc.found.items, sc.found_weights.items) |e, weight| {
+            for (idx.ent_cur.of(e)) |i| sc.add(i, top * weight);
+            if (past) for (idx.ent_keys.of(e)) |k| for (idx.pair_notes.of(k)) |i| sc.add(i, top * weight);
         }
     }
     if (excluding) { // for i in exclude: score.pop(i, None)
