@@ -188,6 +188,7 @@ pub fn erase(s: *Store, a: Allocator, id: u32, why: *Refusal) Error!Erased {
     const idx = index.Index.buildKind(s.gpa, fresh, s.kind) catch return error.OutOfMemory;
     var idx_owned = true;
     defer if (idx_owned) idx.deinit();
+    @import("notes/alias.zig").populate(idx, fresh, s.text) catch return error.OutOfMemory;
     const v = try s.gpa.create(store_mod.Version);
     var v_owned = true; // not an errdefer: an erase applied but not certain on disk returns a refusal after the swap
     defer if (v_owned) s.gpa.destroy(v);

@@ -164,6 +164,7 @@ fn subjects(idx: *const Index, sc: *Scratch) Allocator.Error!void {
             const alias = if (idx.settings.resolve_subjects) idx.aliases.get(phrase) else null;
             const e = ordinary orelse alias orelse continue;
             if (e == index.no_note) continue;
+            if (!idx.settings.resolve_self and idx.self_entity == e) continue;
             var inside = false;
             for (sc.spans.items) |sp| {
                 if (sp[0] <= j and j + n <= sp[1]) {

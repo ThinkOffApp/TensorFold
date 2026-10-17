@@ -168,6 +168,7 @@ pub const Live = struct {
             const alias = if (l.shape.resolve_subjects) idx.aliases.get(index.packPhrase(keys[0..n])) else null;
             const e = ordinary orelse alias orelse continue;
             if (e == index.no_note) continue;
+            if (idx.self_entity == e) continue; // the assistant's "my" is not the user's
             for (idx.ent_cur.of(e)) |p| {
                 const id = idx.idAt(p);
                 if (std.mem.indexOfScalar(u32, l.held.items, id) == null and std.mem.indexOfScalar(u32, l.exclude, id) == null) return true;
@@ -184,6 +185,7 @@ pub const Live = struct {
         defer s.release(v);
         var view = v.idx.*;
         view.settings.resolve_subjects = l.shape.resolve_subjects;
+        view.settings.resolve_self = false; // first-person aliases belong to the question-only prefetch
         const idx = &view;
         if (idx.ver != l.ver) {
             l.stop("the notes changed during the reply");

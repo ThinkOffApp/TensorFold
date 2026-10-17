@@ -70,6 +70,31 @@ test "subject aliases are consulted only by the opt in lookup view" {
     _ = try lookup_mod.lookup(&view, &scratch, qids, false, 512, &.{}, .{});
     try testing.expectEqual(@as(usize, 1), scratch.found.items.len);
     try testing.expectEqual(store.model.entityOf("my sister").?, scratch.found.items[0]);
+    const self_ids = try text.text().encode(testing.allocator, " my", false);
+    defer testing.allocator.free(self_ids);
+    view.settings.resolve_self = false;
+    _ = try lookup_mod.lookup(&view, &scratch, self_ids, false, 512, &.{}, .{});
+    try testing.expectEqual(@as(usize, 0), scratch.found.items.len);
+}
+
+test "subject aliases survive erasing an unrelated note" {
+    const rig = @import("notes_rig_test.zig");
+    const r = try rig.Rig.initKind(testing.allocator, .sa, 1024);
+    defer r.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ids = try r.store().text.encode(a, " Ana", false);
+    var keys: [index.max_phrase]u32 = @splat(index.none_key);
+    for (ids, keys[0..ids.len]) |id, *key| key.* = r.store().current.idx.keyOf(id);
+    const before = r.store().current.idx.aliases.get(keys).?;
+    const added = try rig.request(r.srv, a, "POST", "/v1/notes", "{\"text\":\"An unrelated bicycle is silver.\"}");
+    try testing.expectEqual(@as(u16, 201), added.status);
+    const id = r.store().model.notes.items[r.store().model.notes.items.len - 1].id;
+    const path = try std.fmt.allocPrint(a, "/v1/notes/{d}?erase=true", .{id});
+    const reply = try rig.request(r.srv, a, "DELETE", path, "{}");
+    try testing.expectEqual(@as(u16, 200), reply.status);
+    try testing.expectEqual(before, r.store().current.idx.aliases.get(keys).?);
 }
 
 test "version metadata accessors keep a held reader unchanged across a replacement" {

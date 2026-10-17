@@ -49,6 +49,7 @@ pub const Hop = enum { subject, subject_value, none };
 
 pub const Settings = struct {
     resolve_subjects: bool = false,
+    resolve_self: bool = true,
     cap: u32,
     n_min: u32,
     n_max: u32,
@@ -167,6 +168,7 @@ pub const Index = struct {
     phrase_max: usize,
     aliases: std.HashMapUnmanaged(Phrase, u32, PhraseCtx, 80),
     alias_max: usize,
+    self_entity: ?u32,
     names: std.AutoHashMapUnmanaged(u32, u32), // one-key entity phrases: key -> entity (the decode check's, not subjects())
     n_cur: u32,
     n_hist: u32,
@@ -293,6 +295,7 @@ pub const Index = struct {
         self.phrase_max = 0;
         self.aliases = .empty;
         self.alias_max = 0;
+        self.self_entity = m.entityOf("me");
         self.names = .empty;
         try self.phrasesOf(m);
         const ve = try @import("value.zig").ofWrites(self.arena.allocator(), self, m);
