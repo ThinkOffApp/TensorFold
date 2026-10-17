@@ -11,6 +11,34 @@ pub const Tmp = struct {
     ino: i128,
 };
 
+/// What a file is: its device and inode, and whether it is a folder.
+pub const Id = struct { dev: i128, ino: i128, dir: bool };
+
+/// The open file `fd`, or with `fd` < 0 the name `path` itself (a link not followed); null when it cannot be read.
+pub fn idOf(fd: c_int, path: [*:0]const u8) ?Id {
+    return if (builtin.os.tag == .linux) idStatx(fd, path) else idStat(fd, path);
+}
+
+/// Zig 0.17's std.c has no fstat or fstatat on Linux: statx, of the descriptor (an empty path) or of the name.
+fn idStatx(fd: c_int, path: [*:0]const u8) ?Id {
+    var x: std.os.linux.Statx = undefined;
+    const want: std.os.linux.STATX = .{ .TYPE = true, .INO = true };
+    const rc = if (fd >= 0)
+        std.c.statx(fd, "", std.c.AT.EMPTY_PATH, want, &x)
+    else
+        std.c.statx(std.c.AT.FDCWD, path, std.c.AT.SYMLINK_NOFOLLOW, want, &x);
+    if (rc != 0 or !x.mask.TYPE or !x.mask.INO) return null;
+    return .{ .dev = (@as(i128, x.dev_major) << 32) | x.dev_minor, .ino = x.ino, .dir = x.mode & std.c.S.IFMT == std.c.S.IFDIR };
+}
+
+/// Elsewhere (macOS): fstat of the descriptor, or fstatat of the name without following a link, as before.
+fn idStat(fd: c_int, path: [*:0]const u8) ?Id {
+    var st: std.c.Stat = undefined;
+    const rc = if (fd >= 0) std.c.fstat(fd, &st) else std.c.fstatat(std.c.AT.FDCWD, path, &st, std.c.AT.SYMLINK_NOFOLLOW);
+    if (rc != 0) return null;
+    return .{ .dev = st.dev, .ino = st.ino, .dir = st.mode & std.c.S.IFMT == std.c.S.IFDIR };
+}
+
 var counter: std.atomic.Value(u64) = .init(0);
 
 /// Tests only: the random part of every name, so a test can plant links at the names a rewrite will try.
@@ -45,14 +73,13 @@ pub fn create(a: Allocator, path: []const u8) error{ OutOfMemory, JournalIo }!Tm
         const name = try std.fmt.allocPrintSentinel(a, "{s}.tmp.{d}.{d}.{x:0>16}", .{ path, std.c.getpid(), n, random() }, 0);
         const fd = std.c.open(name, .{ .ACCMODE = .RDWR, .CREAT = true, .EXCL = true, .NOFOLLOW = true, .CLOEXEC = true }, @as(std.c.mode_t, 0o600));
         if (fd >= 0) {
-            var st: std.c.Stat = undefined;
-            if (std.c.fstat(fd, &st) != 0) {
+            const id = idOf(fd, "") orelse {
                 _ = std.c.close(fd);
                 _ = std.c.unlink(name); // it is ours: made exclusively a moment ago
                 a.free(name);
                 return error.JournalIo;
-            }
-            return .{ .path = name, .fd = fd, .dev = st.dev, .ino = st.ino };
+            };
+            return .{ .path = name, .fd = fd, .dev = id.dev, .ino = id.ino };
         }
         a.free(name);
         if (std.c.errno(fd) != .EXIST) return error.JournalIo;
@@ -63,9 +90,8 @@ pub fn create(a: Allocator, path: []const u8) error{ OutOfMemory, JournalIo }!Tm
 /// Closes it and removes its name, only while that name is still this very file (never what replaced it).
 pub fn removeOwn(t: Tmp) void {
     _ = std.c.close(t.fd);
-    var st: std.c.Stat = undefined;
-    if (std.c.fstatat(std.c.AT.FDCWD, t.path, &st, std.c.AT.SYMLINK_NOFOLLOW) != 0) return;
-    if (@as(i128, st.dev) == t.dev and @as(i128, st.ino) == t.ino) _ = std.c.unlink(t.path);
+    const id = idOf(-1, t.path) orelse return;
+    if (id.dev == t.dev and id.ino == t.ino) _ = std.c.unlink(t.path);
 }
 
 /// Whether `name` is one of ours for the journal named `base`: base.tmp (before unique names) or base.tmp.P.C.R.
@@ -106,9 +132,8 @@ pub fn cleanStale(a: Allocator, path: []const u8) error{OutOfMemory}!usize {
     }
     var n: usize = 0;
     for (gone.items) |g| {
-        var st: std.c.Stat = undefined;
-        if (std.c.fstatat(std.c.AT.FDCWD, g, &st, std.c.AT.SYMLINK_NOFOLLOW) != 0) continue;
-        if (st.mode & std.c.S.IFMT == std.c.S.IFDIR) continue;
+        const id = idOf(-1, g) orelse continue;
+        if (id.dir) continue;
         if (std.c.unlink(g) == 0) n += 1;
     }
     return n;
