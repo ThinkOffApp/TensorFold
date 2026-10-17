@@ -18,6 +18,12 @@ pub fn vtable(comptime H: type, v: be.Backend.VTable) be.Backend.VTable {
                 return x.inner.vtable.prefill_step.?(x.inner.ptr, s);
             }
         }.f else null,
+        .extend = if (v.extend != null) struct {
+            fn f(p: *anyopaque, s: *lanes.Stream) anyerror!void {
+                const x = H.bind(p);
+                return x.inner.vtable.extend.?(x.inner.ptr, s);
+            }
+        }.f else null,
         .first = struct {
             fn f(p: *anyopaque, s: *lanes.Stream, position: u64) anyerror!u64 {
                 const x = H.bind(p);
@@ -167,6 +173,11 @@ test "each forwarded entry calls the family's entry of the same name, once" {
                 return true;
             }
         }.f,
+        .extend = struct {
+            fn f(p: *anyopaque, _: *S) anyerror!void {
+                Rec.hit(p, "extend");
+            }
+        }.f,
         .first = struct {
             fn f(p: *anyopaque, _: *S, _: u64) anyerror!u64 {
                 Rec.hit(p, "first");
@@ -277,6 +288,8 @@ test "each forwarded entry calls the family's entry of the same name, once" {
     try rec.once("prefill");
     _ = try w.prefill_step.?(p, &s);
     try rec.once("prefill_step");
+    try w.extend.?(p, &s);
+    try rec.once("extend");
     _ = try w.first(p, &s, 0);
     try rec.once("first");
     _ = try w.queue(p, &s, feed, 0);

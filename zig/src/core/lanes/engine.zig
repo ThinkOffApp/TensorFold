@@ -82,6 +82,7 @@ pub const Engine = struct {
     pub const opened = open.opened;
     pub const fills = open.fills;
     pub const fillStream = open.fillStream;
+    pub const extend = open.extend;
 
     /// Take over a stream another driver decoded so far: its cache settled, `pending` and `cache_len` set, no drafts held.
     pub fn adopt(e: *Engine, s: *Stream) !void {
@@ -528,6 +529,11 @@ pub const Engine = struct {
         result.got = try e.arena.allocator().dupe(u32, s.emitted()[s.emitted().len - landed ..]);
         try trail.pipe(e, s, before, result.got);
         return result;
+    }
+
+    /// Between rounds: a queued step's token lands, so nothing is in flight (before context joins the stream).
+    pub fn settle(e: *Engine, s: *Stream) !void {
+        if (s.inflight != null) try e.landInflight(s);
     }
 
     /// Land the queued token without queuing another (a shared round is synchronous).

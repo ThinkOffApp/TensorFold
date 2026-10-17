@@ -1,6 +1,7 @@
 //! Which queued request a lane host admits next: the head, or one behind a head that waits for pool room.
 const api = @import("engine_api.zig");
 const LaneHost = @import("lane_host.zig").LaneHost;
+const injects = @import("lane_host_inject.zig");
 const Job = LaneHost.Job;
 
 /// The queued job to admit (its index), or null to hold; the caller holds the lock and a lane is free.
@@ -18,6 +19,8 @@ pub fn pick(h: *LaneHost) ?usize {
     return null;
 }
 
+/// The pool holds the request's prompt, its reply and the rows it keeps for injected context.
 fn fits(a: api.Admit, job: *const Job) bool {
-    return a.fits(a.ctx, @intCast(job.request.prompt.len), job.request.max_tokens);
+    const reply = job.request.max_tokens +| injects.room(job.request);
+    return a.fits(a.ctx, @intCast(job.request.prompt.len), reply);
 }

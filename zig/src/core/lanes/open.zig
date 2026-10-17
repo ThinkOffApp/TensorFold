@@ -33,7 +33,18 @@ pub fn opened(e: *Engine, s: *Stream) !void {
     s.rows.clearRetainingCapacity();
     s.pending = null;
     s.cache_len = s.prompt_len;
-    const position: u64 = s.prompt_len;
+    try draw(e, s, s.prompt_len);
+    try trail.resolve(e);
+    if (s.finished) {
+        try trail.finish(e, s);
+        e.release(s);
+        return;
+    }
+    try e.live.append(e.gpa, s);
+}
+
+/// The first token after a pass, drawn at `position` (the cache's length) and committed, and the first drafts asked.
+fn draw(e: *Engine, s: *Stream, position: u64) !void {
     const drawn = try e.drawFirst(s, position);
     var feed: Feed = .{ .handle = drawn };
     if (try e.forcedNext(s)) |t| feed = .{ .value = t };
@@ -42,7 +53,7 @@ pub fn opened(e: *Engine, s: *Stream) !void {
         // the head reads the prompt's last row and the first token, and drafts the one after it
         const d: u32 = @intCast(try e.rule.depth(win.who(s)));
         asked = d;
-        try e.backend.draft(&.{.{ .stream = s, .follow = &.{}, .first = feed, .rows = null, .start = s.prompt_len, .position = position + 1, .depth = d }});
+        try e.backend.draft(&.{.{ .stream = s, .follow = &.{}, .first = feed, .rows = null, .start = position, .position = position + 1, .depth = d }});
         s.dropHeld(e.gpa);
         s.next = .{ .count = d };
         if (e.backend.vtable.tree) |tree| if (try tree(e.backend.ptr, s, e.gpa)) |held| {
@@ -61,13 +72,23 @@ pub fn opened(e: *Engine, s: *Stream) !void {
     if (s.logprobs != null) first_row[0] = (try e.backend.firstRow(s)).forToken(value);
     _ = try s.commit(e.gpa, &.{value}, if (s.logprobs != null) &first_row else &.{});
     s.pending = value;
+}
+
+/// Context into a live stream between rounds: the backend reads it as a prompt pass, then the reply draws on after it.
+pub fn extend(e: *Engine, s: *Stream, tokens: []const u32) !void {
+    _ = e.arena.reset(.retain_capacity);
+    try e.settle(s);
+    if (s.finished) return;
+    const pass = e.backend.vtable.extend orelse return error.NoExtendPass;
+    if (s.context.items.len != s.cache_len + 1) return error.NotSettled; // the pending token is the one row past the cache
+    s.dropRoundState(e.gpa); // the drafts held for the next round read past where the context goes
+    try s.inject(e.gpa, tokens);
+    try pass(e.backend.ptr, s);
+    s.cache_len = s.context.items.len;
+    s.mode = null;
+    try trail.event(e, &.{ f("ev", str("extend")), f("stream", str(s.id)), f("n", int(tokens.len)), f("position", int(s.cache_len)) });
+    try draw(e, s, s.cache_len);
     try trail.resolve(e);
-    if (s.finished) {
-        try trail.finish(e, s);
-        e.release(s);
-        return;
-    }
-    try e.live.append(e.gpa, s);
 }
 
 /// Whether the backend can run a prompt pass a chunk at a time between rounds (`fillStream`).

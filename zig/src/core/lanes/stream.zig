@@ -130,6 +130,7 @@ pub const Spec = struct {
     decode_spans: []const [2]u32 = &.{}, // prompt rows an earlier reply decoded (Request.decode_spans), for backends that keep their bits
     images: []const Image = &.{}, // in prompt order; the backend's tower fills their rows
     key: []const u32 = &.{}, // the prompt as the cache matches it (image rows by their image); empty: the prompt
+    room: u32 = 0, // cache rows past max_new held for injected context (inject): the reply's own tokens stay max_new
 };
 
 pub const Stream = struct {
@@ -171,6 +172,8 @@ pub const Stream = struct {
     context: std.ArrayList(u32) = .empty,
     pending: ?u32 = null,
     force: std.ArrayList(u32) = .empty,
+    room: u32 = 0, // rows still held for injected context: in max_new, never the reply's own
+    stop_from: usize = 0, // where the last injection ends in emitted(): stop strings are read after it
     cache_len: u64 = 0,
     finished: bool = false,
     reason: Reason = .none,
@@ -205,7 +208,8 @@ pub const Stream = struct {
         var s: Stream = .{
             .id = spec.id,
             .prompt_len = spec.prompt.len,
-            .max_new = spec.max_new,
+            .max_new = spec.max_new + @min(spec.room, std.math.maxInt(u32) - spec.max_new),
+            .room = @min(spec.room, std.math.maxInt(u32) - spec.max_new), // capped: max_new + room stays a u32
             .eos = spec.eos,
             .sampling = spec.sampling,
             .drafts = spec.drafts,
@@ -280,7 +284,26 @@ pub const Stream = struct {
     }
 
     pub fn budgetLeft(s: *const Stream) i64 {
-        return @as(i64, s.max_new) - @as(i64, @intCast(s.emitted().len));
+        return @as(i64, s.max_new) - @as(i64, @intCast(s.emitted().len)) - s.room;
+    }
+
+    /// The reply's own tokens reached max_new: the rows still held for injected context are not its to take.
+    fn full(s: *const Stream) bool {
+        return s.emitted().len + s.room >= s.max_new;
+    }
+
+    /// Context tokens into the reply between rounds, after its pending token: rows the backend's extend pass reads.
+    pub fn inject(s: *Stream, gpa: Allocator, tokens: []const u32) !void {
+        if (tokens.len > s.room) return error.NoInjectRoom;
+        if (s.budgetActive()) s.think_budget += @intCast(tokens.len); // the reply's own thinking keeps its budget
+        try s.context.appendSlice(gpa, tokens);
+        // a logprob stream keeps one row a token of emitted(); these rows are never delivered
+        if (s.logprobs != null) for (tokens) |t| try s.rows.append(gpa, .{ .token = t, .logprob = std.math.nan(f32) });
+        for (tokens) |t| if (@as(i64, t) == s.think_end) {
+            s.think_open = false;
+        };
+        s.room -= @intCast(tokens.len);
+        s.stop_from = s.emitted().len;
     }
 
     /// Whether the request was cancelled (false with no hook); a prompt pass asks before each chunk.
@@ -386,7 +409,7 @@ pub const Stream = struct {
                 s.reason = .stop;
             } else if (fire) |period| {
                 s.loop_period = period;
-                if (s.emitted().len >= s.max_new) {
+                if (s.full()) {
                     s.finished = true;
                     s.reason = .length;
                 } else if (s.think_close.len == 0) {
@@ -398,7 +421,7 @@ pub const Stream = struct {
                     try s.force.appendSlice(gpa, s.think_close);
                 }
                 break;
-            } else if (s.emitted().len >= s.max_new) {
+            } else if (s.full()) {
                 s.finished = true;
                 s.reason = .length;
             }
@@ -408,7 +431,7 @@ pub const Stream = struct {
 
     fn stopped(s: *const Stream) bool {
         const c = s.stop_check orelse return false;
-        return c.check(c.ptr, s.emitted());
+        return c.check(c.ptr, s.emitted()[s.stop_from..]);
     }
 
     pub fn popForce(s: *Stream) ?u32 {

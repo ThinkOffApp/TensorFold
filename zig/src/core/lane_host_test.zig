@@ -545,12 +545,14 @@ test "a request that does not fit a shared cache pool waits, in order, until a s
     try e.submit(1, &long, .{ .ctx = &a, .event = Box.event }); // alone: admitted although nothing fits
     while (a.state()[0] == 0) std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
     var b: Box = .{};
-    const short: Request = .{ .prompt = &prompt, .max_tokens = 4 };
+    var held: api.Inject = .{ .io = std.testing.io, .gpa = gpa, .room = 16 }; // its rows count against the pool too
+    defer held.deinit();
+    const short: Request = .{ .prompt = &prompt, .max_tokens = 4, .inject = &held };
     try e.submit(2, &short, .{ .ctx = &b, .event = Box.event });
     std.Io.sleep(std.testing.io, .fromMilliseconds(50), .awake) catch {};
     try std.testing.expectEqual(@as(usize, 0), b.state()[0]); // a lane is free, the pool is not: it waits
     try std.testing.expectEqual(@as(?Reason, null), b.state()[1]);
-    try std.testing.expectEqual(@as(u32, prompt.len + 4), pool.asked.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, prompt.len + 4 + 16), pool.asked.load(.monotonic));
     e.cancel(1);
     try std.testing.expectEqual(Reason.cancelled, a.wait());
     try std.testing.expectEqual(Reason.length, b.wait()); // alone again: admitted
@@ -570,4 +572,5 @@ test {
     _ = @import("lane_host_borrow_test.zig");
     _ = @import("lane_host_warm_test.zig");
     _ = @import("lane_host_rows_test.zig");
+    _ = @import("lane_host_inject_test.zig");
 }

@@ -26,7 +26,7 @@ const row_slots = engine.max_streams * state.max_rows + 1;
 const ring = 1024;
 
 /// A stream's sequence (`own`: the engine's, the graphs' buffers) and its first token's logprob row from prefill.
-const Lane = struct { seq: *state.Seq, own: bool = false, pending_rows: ?usize = null, first: ?LogRow = null, stats: seq_graphs.Stats = .{}, keep: usize = 0, taps: Taps = .{} };
+const Lane = struct { seq: *state.Seq, own: bool = false, pending_rows: ?usize = null, first: ?LogRow = null, first_at: u64 = 0, stats: seq_graphs.Stats = .{}, keep: usize = 0, taps: Taps = .{} };
 
 /// A recorded stream's rows: its prompt's on the host until its first verify, then where its last verify started.
 const Taps = struct { prompt: std.ArrayList(u8) = .empty, from: usize = 0, verified: ?u64 = null };
@@ -83,6 +83,7 @@ pub const Cuda = struct {
     pub fn backend(self: *Cuda) be.Backend {
         return .{ .ptr = self, .vtable = &.{
             .prefill = prefillFn,
+            .extend = extendFn,
             .first = firstFn,
             .queue = queueFn,
             .read = readFn,
@@ -288,16 +289,48 @@ pub const Cuda = struct {
         if (self.tapped != null) e.taps = .{ .ctx = &tap, .call = TapSink.take };
         defer e.taps = null;
         const first = try e.prefillFrom(ids, from, null, self.head, .{ .ptr = s, .check = cancelled, .yields = s.yield_check != null }, keep);
-        // the head's first draft reads the prompt's last row (its hidden row waits where a window's would)
-        const last = ids.len - 1 - e.last_chunk;
+        try self.passEnd(gop.value_ptr, s, first, ids.len);
+    }
+
+    /// A pass's end: its last row waits for the head's first draft, and its draw (and logprob row) for `first`.
+    fn passEnd(self: *Cuda, l: *Lane, s: *const lanes.Stream, first: u32, len: usize) !void {
+        const e = self.e;
+        // the head's first draft reads the pass's last row (its hidden row waits where a window's would)
+        const last = len - 1 - e.last_chunk;
         try e.ops().copy(e.b.hidden, e.b.p_hidden + last * @as(u64, e.c.hidden) * 2, e.c.hidden * 2);
         _ = self.take(first);
+        l.first_at = len;
+        l.first = null;
         if (s.logprobs) |k| {
             const at = (row_slots - 1) * row_words;
             try e.ops().logprobRows(e.b.p_logits, e.c.vocab, e.b.p_sampled, k, false, self.rows_dev + at * 4, 1);
             try e.stream.synchronize();
-            gop.value_ptr.first = LogRow.fromWords(self.rows_out.slice(u32)[at..][0..row_words], first, k);
+            l.first = LogRow.fromWords(self.rows_out.slice(u32)[at..][0..row_words], first, k);
         }
+    }
+
+    /// Injected context as a prompt pass on the stream's sequence, after its last kept rows again and pending token.
+    fn extendFn(ptr: *anyopaque, s: *lanes.Stream) anyerror!void {
+        const self = of(ptr);
+        const e = self.e;
+        if (s.images.len > 0 or s.prompt_logprobs != null) return error.ExtendUnsupported;
+        const l = try self.bindLane(s, null);
+        if (e.lessons() != null) return error.ExtendUnsupported; // a pass would latch lessons again mid-reply
+        const ids = s.context.items;
+        if (e.pos != s.cache_len or ids.len <= e.pos + 1) return error.PositionMismatch;
+        const from = e.pos - e.prev_keep; // where the committed state stands
+        var head: ?*Head = null;
+        if (self.head) |h| if (s.drafts) {
+            if (h.pos != e.pos) return error.PositionMismatch;
+            h.pos = from;
+            head = h;
+        };
+        e.pos = from;
+        e.prev_keep = 0;
+        e.decide = lesson_route.none;
+        verified(self.gpa, l, from);
+        const first = try e.prefillFrom(ids, from, null, head, .{ .ptr = s, .check = cancelled, .yields = false }, null);
+        try self.passEnd(l, s, first, ids.len);
     }
 
     /// A stream's prompt rows as the engine reads them back, in prompt order.
@@ -366,7 +399,8 @@ pub const Cuda = struct {
 
     fn firstFn(ptr: *anyopaque, s: *lanes.Stream, position: u64) anyerror!u64 {
         const self = of(ptr);
-        if (position != s.prompt_len) return error.PositionMismatch;
+        const l = self.lanes.getPtr(s) orelse return error.UnknownStream;
+        if (position != l.first_at) return error.PositionMismatch;
         return self.next - 1;
     }
 

@@ -68,7 +68,9 @@ pub const Backend = struct {
         prefill: *const fn (ptr: *anyopaque, s: *Stream) anyerror!void,
         /// One chunk of the prompt pass, false while chunks remain; null: the pass runs whole.
         prefill_step: ?*const fn (ptr: *anyopaque, s: *Stream) anyerror!bool = null,
-        /// Draw the first token from the prompt's last row at `position`; a handle to it.
+        /// A live stream's context past its cache (its pending token, then injected context) as a prompt pass.
+        extend: ?*const fn (ptr: *anyopaque, s: *Stream) anyerror!void = null,
+        /// Draw the first token from the prompt's (or an extend pass's) last row at `position`; a handle to it.
         first: *const fn (ptr: *anyopaque, s: *Stream, position: u64) anyerror!u64,
         /// Feed one token and queue the draw of the next at `position` (a one-token round); a handle to it.
         queue: *const fn (ptr: *anyopaque, s: *Stream, feed: Feed, position: u64) anyerror!u64,

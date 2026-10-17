@@ -96,6 +96,8 @@ pub const Request = struct {
     images: []const Image = &.{},
     /// The prompt as the prompt cache matches it (each image's placeholders by its content); empty: ``prompt``.
     cache_key: []const u32 = &.{},
+    /// Context the server adds to the running reply between its rounds, when ``Info.inject``; null: none.
+    inject: ?*Inject = null,
 
     /// The prompt as the prompt cache matches it: an image request's placeholders stand for their images.
     pub fn cacheKey(r: *const Request) []const u32 {
@@ -252,6 +254,8 @@ pub const Info = struct {
     greedy_only: bool = false,
     /// Whether a request's caches fit beside the running streams' now (null: a free lane does); else it waits in order.
     admit: ?Admit = null,
+    /// The engine reads ``Request.inject`` (its host opts in and its backend has an extend pass), between rounds.
+    inject: bool = false,
 };
 
 pub const Admit = struct {
@@ -581,6 +585,9 @@ pub const ImprintDisk = @import("rows_ask.zig").Disk;
 
 /// Recall's record of the ids earlier requests read and wrote, for drafts (not the prompt cache's learned states).
 pub const recall_store = lanes.recall_store;
+
+/// Context a server adds to a running reply between its rounds (inject.zig).
+pub const Inject = @import("inject.zig").Inject;
 
 /// The idle keepalive's ticker and target contract.
 pub const keepalive = @import("keepalive.zig");
