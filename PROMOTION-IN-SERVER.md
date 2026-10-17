@@ -70,6 +70,14 @@ production asks them (notes in, in-weights notes out); after the teach they are 
 wrong after, or a control that changed in substance, counts as worse; more than the tolerance (0) rejects the plan.
 A rejected `add` zeroes tonight's neurons and asks again; still worse goes to `source`.
 
+**Regression set (since `4274b6b9`).** Besides the promoted facts' learner questions and the 4 controls, every
+current fact note's own question joins it (`--notes-promote-regress N`: a sample of N by key hash; default all). The
+question is written once per note by the untaught model ("the one short question the user would ask you later to hear
+this again"), with its reference answer (the untaught model, the fact before it), and kept in the state. The night's
+log and state name every question that went worse (`worse_list`: question, new reply, old reply).
+
+**Retry.** A missed or rejected fact is due once more the next night (`retries`, kept in the state); not a third time.
+
 **Alone.** On the accepted state each fact in the pocket is asked its probes with its own note left out (and the other
 in-weights notes, as production does). All right: its streak grows; `alone` nights running: `in_weights`, and from then
 on every `"notes": true` chat request has that note excluded. One wrong: back to `promoted`, the streak starts again.
@@ -83,9 +91,13 @@ does) and asks through `slide_ask.ask` side by side; the engine steps the learne
 
 **Erase.** `DELETE /v1/notes/ID?erase=true` of a note whose fact is in the pocket zeroes that fact's neurons through
 the learner's `retire` (the same op a learn request uses when a newer chat fact replaces an older one) and saves the
-pocket into the model's files before the reply, which says so (`promotion: {zeroed, facts, ms}`). The fact is
-recorded `freed` in the state file, so a restart keeps it out. While a night holds the learner the zeroing waits for
-the night's end (`pending: true`). Zeroing one fact's neurons removes their output exactly (READ `pocket.retire`:
+pocket into the model's files before the reply, which says so (`promotion: {zeroed, facts, ms}`). The store is the record: every fact in the pocket whose note the store no longer holds is
+a target. The state keeps the fact's neurons until the zeroing succeeded; only then is the fact `freed`, and only once
+the state file is written and the in-weights list refreshed is the erase reported done. A refused zeroing, a state
+write that fails or a refresh that fails is reported `pending: true` with `failed`, and is done again after the next
+night, before the next one, and at the next start (codexmb's review of `b40461d0`: the first version marked the fact
+freed and dropped its neurons even when the learner refused, and reported done without the state written). While the
+learner is busy (a night or a lesson) the erase is `pending` and done when it is free. Zeroing one fact's neurons removes their output exactly (READ `pocket.retire`:
 input and output weights set to zero); what it cannot undo is a later lesson's refit of an earlier neuron (question 1).
 Take-backs and changes do not zero anything at once: the note answers, and the next night rebuilds the pocket.
 

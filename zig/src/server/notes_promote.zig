@@ -22,6 +22,9 @@ const Store = notes_route.Store;
 const Value = json.Value;
 const Allocator = std.mem.Allocator;
 
+/// How a note's own question is asked for: the model writes what its user would ask to hear the note again.
+const question_prompt = "The user once told you: \"{s}\"\nWrite the one short question the user would ask you later to hear this again, in the user's own words (for example: What is my dog's name?). Reply with the question only.";
+
 /// Tokens a night's question is answered in at most (the learner's own checks read 48).
 pub const answer_tokens = 48;
 
@@ -81,7 +84,6 @@ pub const Promoter = struct {
     running: std.atomic.Value(bool) = .init(false),
     thread: ?std.Thread = null,
     last_end_ms: i64 = 0,
-    pending: std.ArrayList([]u8) = .empty, // erased keys whose neurons wait for the night that runs now to end
 
     /// The promoter for `store`, its state read from SNAPSHOT.promote when there is one; the thread not started.
     pub fn init(gpa: Allocator, io: std.Io, srv: *Server, store: *Store, snapshot: []const u8, o: Options, problem: *[]const u8) !*Promoter {
@@ -120,8 +122,6 @@ pub const Promoter = struct {
         p.retrieved.deinit(g);
         for (p.weights.items) |k| g.free(k);
         p.weights.deinit(g);
-        for (p.pending.items) |k| g.free(k);
-        p.pending.deinit(g);
         p.clearCache();
         p.cache_keys.deinit(g);
         p.cache_excl.deinit(g);
@@ -210,6 +210,10 @@ pub const Promoter = struct {
     }
 
     fn loop(p: *Promoter) void {
+        // an erase a stop or a failure left half done is finished first
+        p.srv.teacher.learning.lockUncancelable(p.io);
+        p.drainPending();
+        p.srv.teacher.learning.unlock(p.io);
         while (!p.stop.load(.acquire)) {
             std.Io.sleep(p.io, .fromMilliseconds(500), .awake) catch {};
             const due = clockMs(p.io) - p.last_end_ms >= p.every_ms;
@@ -237,85 +241,100 @@ pub const Promoter = struct {
             p.reload();
             return;
         };
+        if (n.worse_list.len > 0) log.line("notes promotion: night {d}: worse: {s}", .{ n.night, n.worse_list });
         log.line("notes promotion: night {d}: {d} due, {d} stale, plan {s} ({d} tried, {d} rejected), {d} taught ({d} kept, {d} missed), {d} worse of {d} probes; alone {d} of {d} right, {d} left the prompt, {d} back; {d} in weights, {d} in the pocket; {d} asks in {d:.1} s", .{ n.night, n.due, n.stale, n.plan, n.tries, n.rejected, n.taught, n.kept, n.missed, n.worse, n.probes, n.alone_right, n.alone_asked, n.left_prompt, n.back_to_prompt, n.in_weights, n.pocket, n.asks, n.secs });
         p.compact();
         p.publish() catch {};
         p.drainPending();
     }
 
-    /// An erase of notes `sources` reaches the pocket: their facts' neurons zeroed now, or once the running night ends.
+    /// An erase reaches the pocket: the erased notes' facts' neurons zeroed now, or once the running night ends.
     pub fn erased(p: *Promoter, a: Allocator, sources: []const []const u8) Allocator.Error!Value {
+        _ = sources; // the store is the record: every fact in the pocket whose note it no longer holds is a target
         const o = try json.newObject(a);
         if (!p.srv.teacher.learning.tryLock()) {
-            p.mu.lockUncancelable(p.io);
-            for (sources) |k| try p.pending.append(p.gpa, try p.gpa.dupe(u8, k));
-            p.mu.unlock(p.io);
             try o.put(a, "pending", .{ .bool = true });
-            try o.put(a, "message", .{ .string = "a night is running: the erased note's neurons are zeroed when it ends" });
+            try o.put(a, "message", .{ .string = "the learner is busy (a night or a lesson): the erased note's neurons are zeroed when it is free, before the next night" });
             return .{ .object = o };
         }
         defer p.srv.teacher.learning.unlock(p.io);
-        const z = p.zeroKeys(a, sources);
-        try o.put(a, "pending", .{ .bool = false });
+        const z = p.zeroErased(a);
+        try o.put(a, "pending", .{ .bool = z.failed != null });
         try o.put(a, "zeroed", try json.intValue(a, z.neurons));
         try o.put(a, "facts", try json.intValue(a, z.facts));
         try o.put(a, "ms", try json.intValue(a, z.ms));
-        if (z.failed) try o.put(a, "failed", .{ .string = "the learner refused to zero the neurons; the next night rebuilds the pocket" });
+        if (z.failed) |why| try o.put(a, "failed", .{ .string = why });
         return .{ .object = o };
     }
 
-    const Zeroed = struct { neurons: usize = 0, facts: usize = 0, ms: i64 = 0, failed: bool = false };
+    /// What zeroing erased facts did; `failed`: not durably done, tried again before the next night and at a start.
+    const Zeroed = struct { neurons: usize = 0, facts: usize = 0, ms: i64 = 0, failed: ?[]const u8 = null };
 
-    /// The facts of `keys` out of the pocket (the learner's lock held): neurons zeroed and saved, state written.
-    fn zeroKeys(p: *Promoter, a: Allocator, keys: []const []const u8) Zeroed {
+    /// Tests only: a state write or publish that fails.
+    pub var fail_persist: bool = false;
+    pub var fail_publish: bool = false;
+
+    /// Pocket facts whose notes are erased: zeroed and saved first, then the state lets go (zeroing twice is a no-op).
+    fn zeroErased(p: *Promoter, a: Allocator) Zeroed {
         var out: Zeroed = .{};
         const t0 = clockMs(p.io);
         const s = &p.state;
+        const listed = ops.list(p.store, a, true) catch return .{ .failed = "out of memory listing the notes" };
+        var held: std.StringHashMapUnmanaged(void) = .empty;
+        for (listed) |v| held.put(a, keyOf(a, v) catch return .{ .failed = "out of memory" }, {}) catch return .{ .failed = "out of memory" };
         var gone: std.ArrayList(promote.Neuron) = .empty;
-        for (s.facts.items) |*f| for (keys) |k| if (std.mem.eql(u8, f.key, k)) {
-            if (promote.active(f.status)) gone.appendSlice(a, f.neurons) catch return .{ .failed = true };
-            out.facts += @intFromBool(promote.active(f.status));
+        var targets: std.ArrayList(*promote.Fact) = .empty;
+        for (s.facts.items) |*f| if (promote.active(f.status) and !held.contains(f.key)) {
+            gone.appendSlice(a, f.neurons) catch return .{ .failed = "out of memory" };
+            targets.append(a, f) catch return .{ .failed = "out of memory" };
         };
+        if (targets.items.len == 0) return out;
+        out.facts = targets.items.len;
+        out.neurons = gone.items.len;
         if (gone.items.len > 0 and !slide.retire(p.srv, a, gone.items)) {
-            s.rebuild_next = true; // whatever the learner did, the next night zeroes every promotion neuron
-            out.failed = true;
+            out.failed = "the learner refused to zero the neurons: they stay recorded and are zeroed at the next try";
+            log.line("notes promotion: {s}", .{out.failed.?});
+            return out;
         }
-        for (s.facts.items) |*f| for (keys) |k| if (std.mem.eql(u8, f.key, k)) {
-            if (promote.active(f.status) or f.status == .note) {
-                f.status = .freed;
-                f.why = "erased: the note is gone and its neurons were zeroed";
-            }
+        // zeroed and saved in the model's files: now the state lets them go
+        var left: std.ArrayList(promote.Neuron) = .empty;
+        for (s.pocket) |n| if (!promote.has(gone.items, n)) left.append(s.alloc(), n) catch return .{ .failed = "out of memory" };
+        for (targets.items) |f| {
+            f.status = .freed;
+            f.why = "erased: the note is gone and its neurons were zeroed";
             f.neurons = &.{};
             f.probes = &.{};
             f.alone = 0;
-        };
-        var left: std.ArrayList(promote.Neuron) = .empty;
-        for (s.pocket) |n| if (!promote.has(gone.items, n)) left.append(s.alloc(), n) catch {};
+        }
         s.pocket = left.items;
-        out.neurons = gone.items.len;
         var b: Backend = .{ .p = p };
-        b.persist(s) catch {};
-        p.publish() catch {};
+        if (fail_persist) {
+            out.failed = "the neurons are zeroed in the model's files but the state file was not written: the next try writes it";
+        } else b.persist(s) catch {
+            out.failed = "the neurons are zeroed in the model's files but the state file was not written: the next try writes it";
+        };
+        if (out.failed == null) {
+            if (fail_publish) {
+                out.failed = "the state is written but the in-weights list was not refreshed: the next try refreshes it";
+            } else p.publish() catch {
+                out.failed = "the state is written but the in-weights list was not refreshed: the next try refreshes it";
+            };
+        }
+        if (out.failed != null) {
+            // not durable: the state on file, still holding these facts, comes back for the next try
+            p.reload();
+            log.line("notes promotion: {s}", .{out.failed.?});
+        }
         out.ms = clockMs(p.io) - t0;
-        if (out.facts > 0) log.line("notes promotion: an erase zeroed {d} neurons of {d} facts in {d} ms", .{ out.neurons, out.facts, out.ms });
+        if (out.failed == null) log.line("notes promotion: an erase zeroed {d} neurons of {d} facts in {d} ms", .{ out.neurons, out.facts, out.ms });
         return out;
     }
 
-    /// Erases that came during a night, applied now (the learner's lock held).
+    /// Erases not yet in the pocket, applied now (the learner's lock held): after a night, before one, at a start.
     pub fn drainPending(p: *Promoter) void {
-        p.mu.lockUncancelable(p.io);
-        const keys = p.pending.toOwnedSlice(p.gpa) catch return p.mu.unlock(p.io);
-        p.mu.unlock(p.io);
-        defer {
-            for (keys) |k| p.gpa.free(k);
-            p.gpa.free(keys);
-        }
-        if (keys.len == 0) return;
         var arena: std.heap.ArenaAllocator = .init(p.gpa);
         defer arena.deinit();
-        const ks = arena.allocator().alloc([]const u8, keys.len) catch return;
-        for (keys, ks) |k, *x| x.* = k;
-        _ = p.zeroKeys(arena.allocator(), ks);
+        _ = p.zeroErased(arena.allocator());
     }
 
     /// The state read back from its own bytes: one night's allocations go, the facts stay.
@@ -476,6 +495,15 @@ const Backend = struct {
         };
         try side.each(asks.len, &Job{ .b = b, .a = a, .asks = asks, .out = out });
         return out;
+    }
+
+    /// The question the note answers, as its user would ask it, written by the untaught model ("" when it gives none).
+    pub fn questionOf(b: *Backend, a: Allocator, fact: []const u8) ![]const u8 {
+        var cx: errors.Cx = .{ .a = a };
+        const ask = try std.fmt.allocPrint(a, question_prompt, .{fact});
+        const r = try slide_ask.askBase(b.srv(), &cx, null, ask, 32, b.stopper());
+        const q = std.mem.trim(u8, r.content, " \t\r\n\"*");
+        return if (q.len > 0 and q.len < 200 and q[q.len - 1] == '?' and std.mem.indexOfScalar(u8, q, '\n') == null) q else "";
     }
 
     pub fn agrees(_: *Backend, fact: []const u8, question: []const u8, ref: []const u8, reply: []const u8) bool {

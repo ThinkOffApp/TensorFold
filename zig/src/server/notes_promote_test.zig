@@ -10,7 +10,7 @@ const Neuron = promote.Neuron;
 const FNote = struct { id: u32, key: []const u8, text: []const u8, told: i64, fact: bool = true, current: bool = true };
 
 /// A taught fact in the fake pocket: its topic, value and neurons (live until retired).
-const Live = struct { topic: []const u8, value: []const u8, neurons: []const Neuron, live: bool = true, breaks: bool = false };
+const Live = struct { topic: []const u8, value: []const u8, neurons: []const Neuron, live: bool = true, breaks: bool = false, clobbers: bool = false };
 
 const Fake = struct {
     a: Allocator,
@@ -20,6 +20,10 @@ const Fake = struct {
     misses: []const []const u8 = &.{}, // texts the learner does not keep
     breaks: []const u8 = "", // a text whose neurons, taught from now on and while live, change a control's answer
     weak: []const u8 = "", // a topic the neurons do not answer alone
+    clobbers: []const u8 = "", // a text whose neurons, while live, make `clobbered` answer wrong even with its note
+    clobbered: []const u8 = "",
+    miss_once: []const u8 = "", // a text the learner misses the first time only
+    questions: u32 = 0, // notes' own questions written
     crash_at_teach: ?u32 = null, // the teach call to stop at (a crash): error.Crash
     teaches: u32 = 0,
     retires: u32 = 0,
@@ -72,14 +76,22 @@ const Fake = struct {
         f.teaches += 1;
         if (f.crash_at_teach) |c| if (c == f.teaches) return error.Crash;
         for (f.misses) |m| if (std.mem.eql(u8, m, text)) return .{ .kept = false, .why = "too few clean answers to learn from" };
+        if (f.miss_once.len > 0 and std.mem.eql(u8, f.miss_once, text)) {
+            f.miss_once = "";
+            return .{ .kept = false, .why = "missed once" };
+        }
         const ns = try f.a.alloc(Neuron, 2);
         for (ns) |*n| {
             n.* = .{ .layer = 1, .neuron = f.next_neuron, .key = .reply };
             f.next_neuron += 1;
         }
-        try f.pocket.append(f.a, .{ .topic = topic(text), .value = val(text), .neurons = ns, .breaks = std.mem.eql(u8, text, f.breaks) });
+        try f.pocket.append(f.a, .{ .topic = topic(text), .value = val(text), .neurons = ns, .breaks = std.mem.eql(u8, text, f.breaks), .clobbers = std.mem.eql(u8, text, f.clobbers) });
         const q = try std.fmt.allocPrint(a, "Q:{s}", .{topic(text)});
         return .{ .kept = true, .neurons = ns, .questions = try a.dupe([]const u8, &.{ q, q, q, q, q }) };
+    }
+    pub fn questionOf(f: *Fake, a: Allocator, text: []const u8) ![]const u8 {
+        f.questions += 1;
+        return std.fmt.allocPrint(a, "Q:{s}", .{topic(text)});
     }
     pub fn references(_: *Fake, a: Allocator, fact: []const u8, qs: []const []const u8) ![]const []const u8 {
         const out = try a.alloc([]const u8, qs.len);
@@ -92,6 +104,7 @@ const Fake = struct {
             return "Paris";
         }
         const t = q.q[2..];
+        for (f.pocket.items) |l| if (l.live and l.clobbers and std.mem.eql(u8, t, f.clobbered)) return "wrong";
         if (q.exclude) |ex| for (f.store.items) |n| {
             if (!n.current or std.mem.indexOfScalar(u32, ex, n.id) != null or !std.mem.eql(u8, topic(n.text), t)) continue;
             return val(n.text);
@@ -188,7 +201,7 @@ test "promotion: a kept fact is promoted, a missed one stays a note; two nights 
     const w = try s.inWeights(arena.allocator());
     try testing.expectEqual(@as(usize, 1), w.len);
     try testing.expectEqualStrings("w1", w[0]);
-    try testing.expectEqual(@as(u32, 2), f.teaches); // a missed fact is not taught again
+    try testing.expectEqual(@as(u32, 3), f.teaches); // the missed fact tried once more on night 2
 }
 
 test "promotion: wrong once without its note and the fact goes back to the prompt, its streak from zero" {
@@ -369,4 +382,71 @@ test "promotion: --notes-promote-every takes a duration, off by default; hold an
     for ([_][]const u8{ "", "0", "10x", "m", "-5m" }) |bad| try testing.expect(np.parseDuration(bad) == null);
     try testing.expectError(error.Usage, cli.parse(a, &.{ "m", "--notes-promote-every", "soon" }, &u));
     try testing.expectError(error.Usage, cli.parse(a, &.{ "m", "--notes-promote-hold", "0" }, &u));
+    try testing.expect(plain.notes_promote_regress == null); // every current note by default
+    try testing.expectEqual(@as(?u32, 5), (try cli.parse(a, &.{ "m", "--notes-promote-regress", "5" }, &u)).notes_promote_regress);
+    try testing.expect((try cli.parse(a, &.{ "m", "--notes-promote-regress", "all" }, &u)).notes_promote_regress == null);
+    try testing.expectError(error.Usage, cli.parse(a, &.{ "m", "--notes-promote-regress", "some" }, &u));
+}
+
+test "promotion: the regression set asks every current note's own question; a night that breaks an untaught note is rejected and named" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    for ([_]?u32{ null, 0 }) |sample| {
+        var f: Fake = .{ .a = arena.allocator(), .clobbers = "boat=blue", .clobbered = "cat" };
+        _ = try f.add("w1", "cat=green");
+        f.retrieved.items.len = 0; // the cat's note is never in a block: never due, a bystander
+        _ = try f.add("w2", "boat=blue");
+        var s = promote.State.init(testing.allocator, .{ .regress_notes = sample });
+        defer s.deinit();
+        const n = try run(&s, &f, &arena);
+        if (sample == null) {
+            try testing.expectEqual(@as(u32, 1), n.rejected); // the cat's answer went wrong with its note in the prompt
+            try testing.expectEqual(promote.Status.rejected, status(&s, "w2"));
+            try testing.expect(std.mem.indexOf(u8, n.worse_list, "Q:cat -> wrong (was green)") != null);
+            try testing.expectEqualStrings("Q:cat", s.find("w1").?.ask.?.q);
+            try testing.expectEqual(@as(u32, 2 + promote.controls.len), n.probes);
+        } else { // control: without the notes' questions the same night is kept
+            try testing.expectEqual(@as(u32, 0), n.rejected);
+            try testing.expectEqual(promote.Status.promoted, status(&s, "w2"));
+            try testing.expectEqual(@as(u32, promote.controls.len), n.probes);
+        }
+    }
+    // a sample of 1 of 3 notes: one note's question joins the set, written once and kept across nights
+    var g: Fake = .{ .a = arena.allocator() };
+    _ = try g.add("w1", "cat=green");
+    _ = try g.add("w2", "boat=blue");
+    _ = try g.add("w3", "tent=red");
+    var s3 = promote.State.init(testing.allocator, .{ .regress_notes = 1 });
+    defer s3.deinit();
+    const n3 = try run(&s3, &g, &arena);
+    try testing.expectEqual(@as(u32, 1 + promote.controls.len), n3.probes);
+    try testing.expectEqual(@as(u32, 1), g.questions);
+    _ = try g.add("w4", "kite=pink");
+    _ = try run(&s3, &g, &arena);
+    try testing.expect(g.questions <= 2);
+}
+
+test "promotion: a missed or rejected fact is tried once more the next night, and not a third time" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var f: Fake = .{ .a = arena.allocator(), .miss_once = "dog=Luna", .misses = &.{"cat=green"} };
+    _ = try f.add("w1", "dog=Luna");
+    _ = try f.add("w2", "cat=green");
+    var s = promote.State.init(testing.allocator, .{});
+    defer s.deinit();
+    _ = try run(&s, &f, &arena);
+    try testing.expectEqual(promote.Status.missed, status(&s, "w1"));
+    try testing.expectEqual(promote.Status.missed, status(&s, "w2"));
+    const n2 = try run(&s, &f, &arena);
+    try testing.expectEqual(@as(u32, 2), n2.due); // both once more
+    try testing.expectEqual(promote.Status.promoted, status(&s, "w1")); // kept the second time
+    try testing.expectEqual(promote.Status.missed, status(&s, "w2"));
+    const n3 = try run(&s, &f, &arena);
+    try testing.expectEqual(@as(u32, 0), n3.due); // not a third time
+    try testing.expectEqual(@as(u32, 1), s.find("w2").?.retries);
+    // the retry count and the notes' questions survive the state file
+    var back = try pjson.decode(testing.allocator, try pjson.encode(&s, arena.allocator()), .{});
+    defer back.deinit();
+    try testing.expectEqual(@as(u32, 1), back.find("w2").?.retries);
+    try testing.expectEqualStrings("Q:dog", back.find("w1").?.ask.?.q);
 }

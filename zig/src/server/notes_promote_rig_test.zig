@@ -120,6 +120,7 @@ test "promotion rig: a note written after a night is keyed by its write, and an 
 const Learner = struct {
     zeroed: std.ArrayList(promote.Neuron) = .empty,
     saves: u32 = 0,
+    refuse: bool = false, // every learn request refused (busy)
     const api = @import("engine_api");
     fn engine(e: *Learner) api.Engine {
         return .{ .ctx = e, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory, .learn = learn } };
@@ -141,6 +142,7 @@ const Learner = struct {
     }
     fn learn(ctx: *anyopaque, req: *const api.LearnRequest, sink: api.LearnSink) api.LearnError!void {
         const e: *Learner = @ptrCast(@alignCast(ctx));
+        if (e.refuse) return error.Busy;
         e.zeroed.appendSlice(testing.allocator, req.retire) catch {};
         e.saves += @intFromBool(req.save);
         sink.event(sink.ctx, &.{ .done = .{} });
@@ -209,4 +211,55 @@ test "promotion rig: erasing a promoted note zeroes its neurons at once, or when
     const er3 = try rig.request(r.srv, a, "DELETE", try std.fmt.allocPrint(a, "/v1/notes/{d}?erase=true", .{w3.value.get("id").?.int64().?}), null);
     try testing.expect(er3.value.get("promotion") == null);
     try testing.expectEqual(@as(usize, 4), learner.zeroed.items.len);
+}
+
+test "promotion rig: an erase whose zeroing is refused, or whose state is not written, is never reported done and is finished after a restart" {
+    const Fail = enum { refused, persist, publish };
+    for ([_]Fail{ .refused, .persist, .publish }) |fail| {
+        var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const r = try rig.Rig.init(testing.allocator);
+        defer r.deinit();
+        var learner: Learner = .{};
+        defer learner.zeroed.deinit(testing.allocator);
+        r.srv.engine = learner.engine();
+        const w = try rig.request(r.srv, a, "POST", "/v1/notes", "{\"text\": \"My kite is orange.\", \"subject\": \"my kite\"}");
+        try inWeights(a, r, w.value.strField("source").?, 0);
+        var why: []const u8 = "";
+        var p = try notes_promote.Promoter.init(testing.allocator, testing.io, r.srv, r.store(), r.snap, .{ .every_ms = 600_000 }, &why);
+        r.srv.promote = p;
+        learner.refuse = fail == .refused;
+        notes_promote.Promoter.fail_persist = fail == .persist;
+        notes_promote.Promoter.fail_publish = fail == .publish;
+        const er = try rig.request(r.srv, a, "DELETE", try std.fmt.allocPrint(a, "/v1/notes/{d}?erase=true", .{w.value.get("id").?.int64().?}), null);
+        notes_promote.Promoter.fail_persist = false;
+        notes_promote.Promoter.fail_publish = false;
+        learner.refuse = false;
+        const pr = er.value.get("promotion").?;
+        try testing.expect(pr.get("pending").?.bool); // never reported done
+        try testing.expect(pr.get("failed") != null);
+        if (fail != .publish) { // the state still owns the fact's neurons: the next try can find and zero them
+            try testing.expect(promote.active(p.state.facts.items[0].status));
+            try testing.expectEqual(@as(usize, 2), p.state.facts.items[0].neurons.len);
+            try testing.expectEqual(@as(usize, 2), p.state.pocket.len);
+        }
+        // a restart: the file read again, and the start's first step finishes the erase
+        r.srv.promote = null;
+        p.deinit();
+        p = try notes_promote.Promoter.init(testing.allocator, testing.io, r.srv, r.store(), r.snap, .{ .every_ms = 600_000 }, &why);
+        defer p.deinit();
+        if (fail != .publish) try testing.expect(promote.active(p.state.facts.items[0].status)); // still erase-pending on disk
+        const zeroed_before = learner.zeroed.items.len;
+        r.srv.teacher.learning.lockUncancelable(testing.io);
+        p.drainPending();
+        r.srv.teacher.learning.unlock(testing.io);
+        try testing.expectEqual(promote.Status.freed, p.state.facts.items[0].status);
+        try testing.expectEqual(@as(usize, 0), p.state.pocket.len);
+        if (fail != .publish) try testing.expectEqual(zeroed_before + 2, learner.zeroed.items.len);
+        // and the file now says so
+        var back = try pjson.decode(testing.allocator, try r.tmp.dir.readFileAlloc(testing.io, "snap.json.promote", a, .limited(1 << 20)), .{});
+        defer back.deinit();
+        try testing.expectEqual(promote.Status.freed, back.facts.items[0].status);
+    }
 }

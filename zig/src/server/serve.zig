@@ -154,7 +154,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
             return 2;
         }
         var why: []const u8 = "";
-        srv.promote = notes_promote.Promoter.init(gpa, io, srv, srv.notes.?, path, .{ .every_ms = every, .settings = .{ .hold = args.notes_promote_hold, .alone = args.notes_promote_alone } }, &why) catch |e| {
+        srv.promote = notes_promote.Promoter.init(gpa, io, srv, srv.notes.?, path, .{ .every_ms = every, .settings = .{ .hold = args.notes_promote_hold, .alone = args.notes_promote_alone, .regress_notes = args.notes_promote_regress } }, &why) catch |e| {
             std.debug.print("tensorfold: --notes-promote-every: {s} ({s})\n", .{ why, @errorName(e) });
             return 2;
         };

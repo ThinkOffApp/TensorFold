@@ -65,6 +65,13 @@ pub fn value(s: *const State, a: Allocator) !Value {
         }
         try x.put(a, "probes", .{ .array = ps });
         try x.put(a, "why", .{ .string = f.why });
+        try x.put(a, "retries", try int(a, f.retries));
+        if (f.ask) |p| {
+            const y = try json.newObject(a);
+            try y.put(a, "q", .{ .string = p.q });
+            try y.put(a, "ref", .{ .string = p.ref });
+            try x.put(a, "ask", .{ .object = y });
+        } else try x.put(a, "ask", .null);
         v.* = .{ .object = x };
     }
     try o.put(a, "facts", .{ .array = facts });
@@ -143,13 +150,16 @@ pub fn decode(gpa: Allocator, bytes: []const u8, settings: promote.Settings) Loa
         for (ps, probes) |p, *o| o.* = .{ .q = try str(sa, p.field("q")), .ref = try str(sa, p.field("ref")) };
         f.probes = probes;
         f.why = try str(sa, x.field("why"));
+        if (x.field("retries")) |r| f.retries = try uint(u32, r); // absent in a file from before retries
+        if (x.field("ask")) |p| f.ask = .{ .q = try str(sa, p.field("q")), .ref = try str(sa, p.field("ref")) };
         try s.facts.append(sa, f);
     }
     for ((v.field("nights") orelse return error.BadState).items() orelse return error.BadState) |x| {
         var n: promote.NightLog = .{};
         const info = @typeInfo(promote.NightLog).@"struct";
         inline for (info.field_names, info.field_types) |name, T| {
-            @field(n, name) = switch (T) {
+            // a field a file from an earlier build lacks keeps its default
+            if (x.field(name) != null) @field(n, name) = switch (T) {
                 []const u8 => try str(sa, x.field(name)),
                 f64 => (x.field(name) orelse return error.BadState).float64() orelse return error.BadState,
                 i64 => (x.field(name) orelse return error.BadState).int64() orelse return error.BadState,
