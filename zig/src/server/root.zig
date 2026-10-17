@@ -82,6 +82,7 @@ test {
     _ = @import("notes/question.zig");
     _ = @import("notes/model.zig");
     _ = @import("notes/overlay.zig");
+    _ = @import("notes/alias.zig");
     _ = @import("notes/write.zig");
     _ = @import("notes/journal.zig");
     _ = @import("notes/journal_tmp.zig");

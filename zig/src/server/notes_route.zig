@@ -160,7 +160,7 @@ pub const Used = struct {
         var wb: [200]u8 = undefined;
         const wrote = if (u.wrote.verdict) |v| std.fmt.bufPrint(&wb, "{s} [{d}] in {d:.1} us", .{ @tagName(v), u.wrote.id, micro(u.write_ns) }) catch "" else if (u.wrote.failed.len > 0) std.fmt.bufPrint(&wb, "refused ({s})", .{u.wrote.failed}) catch "" else std.fmt.bufPrint(&wb, "skipped ({s})", .{u.wrote.skipped}) catch "";
         log.line("notes {s}: [{s}] {d} tokens of {d}, past {s}, {d} candidates; tokenize {d:.1} us, lookup {d:.1} us, fit {d:.1} us, total {d:.1} us; write {s}", .{
-            id,                     ids,                          u.found.tokens,            u.cap,            if (u.past) "yes" else "no", u.found.candidates,
+            id,                   ids,                      u.found.tokens,        u.cap,             if (u.past) "yes" else "no", u.found.candidates,
             micro(u.tokenize_ns), micro(u.found.lookup_ns), micro(u.found.fit_ns), micro(u.total_ns), wrote,
         });
     }
@@ -216,7 +216,7 @@ pub fn withBlockAt(cx: *Cx, raw: Value, block: []const u8, needs_user_after_tool
 }
 
 /// How the block is looked up and placed: the hop (null: the snapshot's), and before the last user message or first.
-pub const Shape = struct { hop: ?@import("notes/index.zig").Hop = null, before_user: bool = false };
+pub const Shape = struct { hop: ?@import("notes/index.zig").Hop = null, before_user: bool = false, resolve_subjects: bool = false };
 
 /// For a chat request that asks: the lookup on its last user message, and `normalized` with the block put first.
 pub fn apply(store: *Store, text: model_text.Text, needs_user_after_tool: bool, cx: *Cx, body: Value, normalized: *Value) errors.Refused!?Used {
@@ -236,7 +236,7 @@ pub fn applyShaped(store: *Store, text: model_text.Text, needs_user_after_tool: 
     const t1 = clock.nowNs(io);
     const past = ask.past orelse past_mod.isPast(question);
     const cap = ask.cap orelse store.settings().cap;
-    const found = store.retrieveWith(cx.a, text, qids, past, cap, ask.exclude, shape.hop) catch |e| return switch (e) {
+    const found = store.retrieveSubjects(cx.a, text, qids, past, cap, ask.exclude, shape.hop, shape.resolve_subjects) catch |e| return switch (e) {
         error.OutOfMemory => error.OutOfMemory,
         error.Tokenizer => cx.other("the tokenizer cannot count the notes block"),
     };

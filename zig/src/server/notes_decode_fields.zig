@@ -29,8 +29,9 @@ pub fn shapeAsked(cx: *Cx, body: Value) errors.Refused!notes_route.Shape {
     const on = (try notes_route.asked(cx, body)) != null;
     const hop = body.field("notes_value_hop");
     const position = body.field("notes_position");
+    const subjects = body.field("notes_subjects");
     if (!on) {
-        if (hop != null or position != null) return cx.refuse("notes_value_hop and notes_position need \"notes\": true");
+        if (hop != null or position != null or subjects != null) return cx.refuse("notes_value_hop, notes_position and notes_subjects need \"notes\": true");
         return .{};
     }
     var value_hop = default_value_hop;
@@ -43,7 +44,12 @@ pub fn shapeAsked(cx: *Cx, body: Value) errors.Refused!notes_route.Shape {
         const s = v.str() orelse "";
         before = if (std.mem.eql(u8, s, "user")) true else if (std.mem.eql(u8, s, "first")) false else return cx.refuse("notes_position must be \"first\" or \"user\"");
     }
-    return .{ .hop = if (value_hop) .subject_value else null, .before_user = before };
+    var resolve_subjects = false;
+    if (subjects) |v| {
+        if (v != .bool) return cx.refuse("notes_subjects must be a boolean");
+        resolve_subjects = v.bool;
+    }
+    return .{ .hop = if (value_hop) .subject_value else null, .before_user = before, .resolve_subjects = resolve_subjects };
 }
 
 /// The decode fields of a request; `notes_on`: it asked for notes, which they need.
@@ -168,7 +174,7 @@ pub fn logLine(id: []const u8, inj: *const Injection) void {
     for (inj.ids, 0..) |n, k| w.print("{s}{d}", .{ if (k > 0) "," else "", n }) catch break;
     const cached = inj.cached orelse 0;
     log.line("notes decode {s}: [{s}] put in after reply token {d} ({s}), pause {d:.1} ms (lookup {d:.1} us, render {d:.1} us, cancel {d:.1} ms, prefill and first token {d:.1} ms); prompt {d} tokens, {d} cached, {d} prefilled; notes {d} tokens", .{
-        id,                       w.buffered(),                   inj.at,     @tagName(inj.place), micro(inj.pause_ns orelse 0) / 1e3, micro(inj.lookup_ns), micro(inj.build_ns),
-        micro(inj.drain_ns) / 1e3, micro(inj.wait_ns) / 1e3, inj.prompt, cached,              inj.prompt -| cached,            inj.block_tokens,
+        id,                        w.buffered(),             inj.at,     @tagName(inj.place), micro(inj.pause_ns orelse 0) / 1e3, micro(inj.lookup_ns), micro(inj.build_ns),
+        micro(inj.drain_ns) / 1e3, micro(inj.wait_ns) / 1e3, inj.prompt, cached,              inj.prompt -| cached,               inj.block_tokens,
     });
 }

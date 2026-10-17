@@ -174,6 +174,7 @@ pub const Store = struct {
             return e;
         };
         errdefer idx.deinit();
+        try @import("notes/alias.zig").populate(idx, m, text);
         const v = try gpa.create(Version);
         v.* = .{ .idx = idx };
         s.current = v;
@@ -273,12 +274,17 @@ pub const Store = struct {
 
     /// retrieve() with the snapshot's hop setting replaced for this lookup (null: as the snapshot says).
     pub fn retrieveWith(s: *Store, a: Allocator, text: model_text.Text, qids: []const u32, past: bool, cap: u32, exclude: []const u32, hop: ?index.Hop) Failure!Found {
+        return s.retrieveSubjects(a, text, qids, past, cap, exclude, hop, false);
+    }
+
+    pub fn retrieveSubjects(s: *Store, a: Allocator, text: model_text.Text, qids: []const u32, past: bool, cap: u32, exclude: []const u32, hop: ?index.Hop, resolve_subjects: bool) Failure!Found {
         const v = s.acquire();
         defer s.release(v);
         var view: index.Index = undefined; // a shallow copy: the same notes and maps, read only
-        const idx = if (hop) |h| blk: {
+        const idx = if (hop != null or resolve_subjects) blk: {
             view = v.idx.*;
-            view.settings.hop = h;
+            if (hop) |h| view.settings.hop = h;
+            view.settings.resolve_subjects = resolve_subjects;
             break :blk &view;
         } else v.idx;
         const k = try s.take(idx);
@@ -370,6 +376,7 @@ pub const Store = struct {
     fn buildOn(s: *Store, reuse: ?*sa.Base) !*Version {
         const idx = try index.Index.buildWith(s.gpa, s.model, s.kind, reuse);
         errdefer idx.deinit();
+        try @import("notes/alias.zig").populate(idx, s.model, s.text);
         const v = try s.gpa.create(Version);
         v.* = .{ .idx = idx };
         idx.ver = s.next_ver;

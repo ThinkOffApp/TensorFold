@@ -153,12 +153,17 @@ fn selectFirst(ks: []u128, k: usize) void {
 /// NoteStore.subjects: entities whose phrase the question holds, longest first, none inside another; repeats count.
 fn subjects(idx: *const Index, sc: *Scratch) Allocator.Error!void {
     const q = sc.qkeys.items;
-    if (idx.phrases.count() == 0) return;
-    var n: usize = @min(q.len, index.max_phrase, idx.phrase_max);
-    while (n >= 2) : (n -= 1) {
+    if (idx.phrases.count() == 0 and !idx.settings.resolve_subjects) return;
+    const maximum = if (idx.settings.resolve_subjects) @max(idx.phrase_max, idx.alias_max) else idx.phrase_max;
+    var n: usize = @min(q.len, index.max_phrase, maximum);
+    while (n >= 1) : (n -= 1) {
         var j: usize = 0;
         while (j + n <= q.len) : (j += 1) {
-            const e = idx.phrases.get(index.packPhrase(q[j..][0..n])) orelse continue;
+            const phrase = index.packPhrase(q[j..][0..n]);
+            const ordinary = if (n >= 2) idx.phrases.get(phrase) else null;
+            const alias = if (idx.settings.resolve_subjects) idx.aliases.get(phrase) else null;
+            const e = ordinary orelse alias orelse continue;
+            if (e == index.no_note) continue;
             var inside = false;
             for (sc.spans.items) |sp| {
                 if (sp[0] <= j and j + n <= sp[1]) {

@@ -335,7 +335,21 @@ fn scratchInit(gpa: std.mem.Allocator, idx: *const index.Index) !void {
 }
 
 fn indexLoad(gpa: std.mem.Allocator, bytes: []const u8) !void {
-    const idx = try index.Index.load(gpa, bytes);
+    // Disable address-dependent in-place growth so the failure sweep visits
+    // the same allocation sequence on every attempt.
+    var child = gpa;
+    const Stable = struct {
+        fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
+            const a: *std.mem.Allocator = @ptrCast(@alignCast(ctx));
+            return a.rawAlloc(len, alignment, ret);
+        }
+        fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret: usize) void {
+            const a: *std.mem.Allocator = @ptrCast(@alignCast(ctx));
+            a.rawFree(memory, alignment, ret);
+        }
+    };
+    const stable: std.mem.Allocator = .{ .ptr = &child, .vtable = &.{ .alloc = Stable.alloc, .free = Stable.free, .resize = std.mem.Allocator.noResize, .remap = std.mem.Allocator.noRemap } };
+    const idx = try index.Index.load(stable, bytes);
     idx.deinit();
 }
 

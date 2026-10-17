@@ -10,6 +10,68 @@ const Bytes = notes_test.Bytes;
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
 
+test "subject aliases contain only current names and first person words" {
+    var text: Bytes = .{};
+    const store = try openSa(text.text(), notes_test.snapshot);
+    defer store.deinit();
+    const idx = store.current.idx;
+    for ([_][]const u8{ "Ana", "Bruno", "Milo", "Otto", "my", "me", "I" }) |name| {
+        const spaced = try std.mem.concat(testing.allocator, u8, &.{ " ", name });
+        defer testing.allocator.free(spaced);
+        const ids = try text.text().encode(testing.allocator, spaced, false);
+        defer testing.allocator.free(ids);
+        var keys: [index.max_phrase]u32 = @splat(index.none_key);
+        for (ids, keys[0..ids.len]) |id, *key| key.* = idx.keyOf(id);
+        try testing.expect(idx.aliases.get(keys) != null);
+    }
+    const old_name = try text.text().encode(testing.allocator, " Luna", false);
+    defer testing.allocator.free(old_name);
+    var keys: [index.max_phrase]u32 = @splat(index.none_key);
+    for (old_name, keys[0..old_name.len]) |id, *key| key.* = idx.keyOf(id);
+    try testing.expect(idx.aliases.get(keys) == null);
+    try testing.expect(!idx.settings.resolve_subjects);
+}
+
+test "subject aliases reject ambiguous names and recover after take back" {
+    const rig = @import("notes_rig_test.zig");
+    const r = try rig.Rig.initKind(testing.allocator, .sa, 1024);
+    defer r.deinit();
+    const store = r.store();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ids = try store.text.encode(a, " Ana", false);
+    var keys: [index.max_phrase]u32 = @splat(index.none_key);
+    for (ids, keys[0..ids.len]) |id, *key| key.* = store.current.idx.keyOf(id);
+    const sister = store.current.idx.aliases.get(keys).?;
+    const reply = try rig.request(r.srv, a, "PUT", "/v1/notes/16", "{\"text\":\"My brother's name is Ana.\"}");
+    try testing.expectEqual(@as(u16, 201), reply.status);
+    try testing.expectEqual(index.no_note, store.current.idx.aliases.get(keys).?);
+    const newest = store.model.notes.items[store.model.notes.items.len - 1].id;
+    const path = try std.fmt.allocPrint(a, "/v1/notes/{d}", .{newest});
+    const withdrawn = try rig.request(r.srv, a, "DELETE", path, "{}");
+    try testing.expectEqual(@as(u16, 201), withdrawn.status);
+    try testing.expectEqual(sister, store.current.idx.aliases.get(keys).?);
+}
+
+test "subject aliases are consulted only by the opt in lookup view" {
+    var text: Bytes = .{};
+    const store = try openSa(text.text(), notes_test.snapshot);
+    defer store.deinit();
+    const lookup_mod = @import("notes/lookup.zig");
+    var view = store.current.idx.*;
+    var scratch = try lookup_mod.Scratch.init(testing.allocator, &view);
+    defer scratch.deinit();
+    const qids = try text.text().encode(testing.allocator, " Ana", false);
+    defer testing.allocator.free(qids);
+    _ = try lookup_mod.lookup(&view, &scratch, qids, false, 512, &.{}, .{});
+    try testing.expectEqual(@as(usize, 0), scratch.found.items.len);
+    view.settings.resolve_subjects = true;
+    _ = try lookup_mod.lookup(&view, &scratch, qids, false, 512, &.{}, .{});
+    try testing.expectEqual(@as(usize, 1), scratch.found.items.len);
+    try testing.expectEqual(store.model.entityOf("my sister").?, scratch.found.items[0]);
+}
+
 test "version metadata accessors keep a held reader unchanged across a replacement" {
     const rig = @import("notes_rig_test.zig");
     const r = try rig.Rig.initKind(testing.allocator, .sa, 1024);

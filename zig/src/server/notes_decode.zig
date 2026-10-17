@@ -161,9 +161,13 @@ pub const Live = struct {
         if (idx.ver != l.ver) return false;
         var keys: [index.max_phrase]u32 = undefined;
         var n: usize = 1;
-        while (n <= @min(collected.len, @max(idx.phrase_max, 1))) : (n += 1) {
+        const maximum = if (l.shape.resolve_subjects) @max(idx.phrase_max, idx.alias_max) else idx.phrase_max;
+        while (n <= @min(collected.len, @max(maximum, 1))) : (n += 1) {
             for (collected[collected.len - n ..], keys[0..n]) |t, *k| k.* = idx.keyOf(t);
-            const e = (if (n == 1) idx.names.get(keys[0]) else idx.phrases.get(index.packPhrase(keys[0..n]))) orelse continue;
+            const ordinary = if (n == 1) idx.names.get(keys[0]) else idx.phrases.get(index.packPhrase(keys[0..n]));
+            const alias = if (l.shape.resolve_subjects) idx.aliases.get(index.packPhrase(keys[0..n])) else null;
+            const e = ordinary orelse alias orelse continue;
+            if (e == index.no_note) continue;
             for (idx.ent_cur.of(e)) |p| {
                 const id = idx.idAt(p);
                 if (std.mem.indexOfScalar(u32, l.held.items, id) == null and std.mem.indexOfScalar(u32, l.exclude, id) == null) return true;
@@ -178,7 +182,9 @@ pub const Live = struct {
         const t0 = clock.nowNs(s.io);
         const v = s.acquire();
         defer s.release(v);
-        const idx = v.idx;
+        var view = v.idx.*;
+        view.settings.resolve_subjects = l.shape.resolve_subjects;
+        const idx = &view;
         if (idx.ver != l.ver) {
             l.stop("the notes changed during the reply");
             return null;
