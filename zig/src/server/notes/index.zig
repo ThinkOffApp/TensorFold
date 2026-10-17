@@ -40,6 +40,9 @@ pub const State = enum(u8) { current = 0, superseded = 1, tombstoned = 2 };
 /// The n-gram index: LLWZ's posting lists, or a suffix array over the notes' folded keys.
 pub const Kind = enum { postings, sa };
 
+/// What --notes-index and the notes benches build unless told: the suffix array (postings stays selectable).
+pub const default_kind: Kind = .sa;
+
 /// Matches over n_max keys, sa only, off by default: all n-grams up to `max`, or each position's longest (lookup.zig).
 pub const Long = struct { mode: enum { off, all, longest } = .off, max: u8 = 8 };
 pub const Hop = enum { subject, subject_value, none };

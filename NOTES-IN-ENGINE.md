@@ -298,6 +298,14 @@ New in `zig build test` (each server test runs in two binaries): the line render
 - The `F_FULLFSYNC` fallback is tested by fault injection only (no filesystem on this Mac answers `ENOTTY`, `ENOTSUP` or `EINVAL`), and the plain-`fsync` path of Linux is not tested at all.
 - Linux is compiled, not run. From `7cde695c` to `eb50d418` the branch did not build for Linux: `notes/journal_tmp.zig` called `std.c.fstat` and `std.c.fstatat`, which Zig 0.17's `std.c` leaves out on Linux. It now reads a file's device, inode and type with `statx` there (glibc 2.28's `statx`, of the descriptor with an empty path, or of the name without following a link; the macOS calls unchanged), and the notes tests and the whole server test module cross-compile for `aarch64-linux-gnu` with no stubs. No test has run on Linux.
 
+## The n-gram index (`--notes-index`)
+
+Two kinds, the same lookups. **`sa`, the default** (from the commit that made it so on `notes-integrated`): a suffix array over the notes' folded keys (Infini-gram style), with a side buffer of the notes written since it was built (posting lists), merged into a new suffix array past 1,024 written notes. **`postings`**: LLWZ's posting lists, as before; `--notes-index postings` keeps them. `notes-golden` and `notes-size-bench` default to the server's kind too (`index.default_kind`); `--index postings` asks for the other.
+
+- **The same blocks.** `notes-golden` over the 1,568 questions: 1,568 of 1,568 equal with each kind (block, ids, tokens, past flag, candidates); the controls del-B 0 of 56 and hop-off 9 of 56 with each. The live-writes cross-check (`tools/notes/live.py --index postings|sa`) and the journal's fault tests (each case with postings, with sa's side buffer, and with sa merging at every write) pass with both.
+- **A smaller store.** On branch `notes-sa-index` at `687cdceb` (`notes-size-bench`, the sweep stores; MEASURED there): about 444 requested live bytes per note at 100,000 notes with `sa`, including the vocabulary tables (about 6.6 bytes per note). This excludes lookup scratch, journal, tokenizer implementation, model and KV cache; it is not process RSS or a universal per-note bound. The earlier postings measurements and allocator-held bytes are separate metrics.
+- **Waiting on review.** The default is `sa` only on `notes-integrated`, and only once codexmb's review of the suffix-array index (`notes-sa-index`) is done; `postings` stays selectable either way.
+
 ## Reproducing
 
 ```sh

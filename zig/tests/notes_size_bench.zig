@@ -272,8 +272,8 @@ pub fn main(init: std.process.Init) !u8 {
     const io = init.io;
     const a = init.arena.allocator();
     const all_args = try init.minimal.args.toSlice(a);
-    // MODEL_DIR [--index postings|sa] REF_DIR SNAPSHOT...
-    var kind: server.notes_store.IndexKind = .postings;
+    // MODEL_DIR [--index postings|sa (default sa)] REF_DIR SNAPSHOT...
+    var kind: server.notes_store.IndexKind = server.notes_index.default_kind;
     var argv = all_args;
     if (all_args.len > 3 and std.mem.eql(u8, all_args[2], "--index")) {
         kind = std.meta.stringToEnum(server.notes_store.IndexKind, all_args[3]) orelse return 2;

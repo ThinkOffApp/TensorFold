@@ -174,7 +174,7 @@ pub const Args = struct {
     policy: []const u8 = "", // every --policy joined by commas
     notes: ?[]const u8 = null, // an LLWZ note snapshot for "notes": true requests; no named tokenizer hash: vocabulary-only check
     notes_write: bool = true, // a "notes": true request's last user message goes through the intake into the notes
-    notes_index: []const u8 = "postings", // the notes' n-gram index: LLWZ's posting lists, or a suffix array ("sa")
+    notes_index: []const u8 = "sa", // the notes' n-gram index: a suffix array, or LLWZ's posting lists ("postings")
     cortheon: bool = false, // Cortheon's program, research before building, and cortheon_search/cortheon_fetch run by the server
 };
 
@@ -459,13 +459,14 @@ test "parse and capabilities share the table" {
     try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--compact-keep", "-1" }, &u));
 }
 
-test "--notes-index: postings by default, sa on request, nothing else" {
+test "--notes-index: sa by default, postings on request, nothing else" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var u: Usage = .{};
-    try std.testing.expectEqualStrings("postings", (try parse(a, &.{ "m", "--notes", "s.json" }, &u)).notes_index);
-    try std.testing.expectEqualStrings("sa", (try parse(a, &.{ "m", "--notes", "s.json", "--notes-index", "sa" }, &u)).notes_index);
+    try std.testing.expectEqualStrings("sa", (try parse(a, &.{ "m", "--notes", "s.json" }, &u)).notes_index);
+    try std.testing.expectEqualStrings("postings", (try parse(a, &.{ "m", "--notes", "s.json", "--notes-index", "postings" }, &u)).notes_index);
+    try std.testing.expectEqualStrings("sa", (try parse(a, &.{ "m", "--notes-index=sa" }, &u)).notes_index);
     try std.testing.expectEqualStrings("postings", (try parse(a, &.{ "m", "--notes-index=postings" }, &u)).notes_index);
     try std.testing.expectError(error.Usage, parse(a, &.{ "m", "--notes-index", "suffix" }, &u));
 }

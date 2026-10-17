@@ -1,6 +1,7 @@
 """/v1/notes writes on a real tensorfold-native against LLWZ Python, under the model's tokenizer.
 
   PYTHONHASHSEED=0 python tools/notes/live.py LLWZ_DIR MODEL_DIR SERVER_BIN OUT_DIR [--stores l6-teach,...]
+      [--index postings|sa] [--port PORT]
 
 For each store (the 1,568-question set's: l6-teach and nights-day1..5 with the past, excl2 and past-excl2
 variants, sweep-100..100000 plain) it builds the store in LLWZ's NoteStore with the server's intake
@@ -66,9 +67,9 @@ def call(method, path, body=None, timeout=600):
 class Server:
     """tensorfold-native serve on PORT with --notes SNAP; started and stopped by this script alone."""
 
-    def __init__(self, binary, model, snap, log):
+    def __init__(self, binary, model, snap, log, index=""):
         self.args = [binary, "serve", model, "--port", str(PORT), "--prompt-cache-gib", "0", "--context", "32768",
-                     "--no-update-check", "--notes", snap]
+                     "--no-update-check", "--notes", snap] + (["--notes-index", index] if index else [])
         self.log = log
         self.proc = None
 
@@ -101,7 +102,7 @@ class Server:
 def engine_block(q, past=None, exclude=()):
     body = {"model": "m", "messages": [{"role": "user", "content": q}], "max_tokens": 1, "temperature": 0,
             "chat_template_kwargs": {"enable_thinking": False}, "notes": True, "notes_echo": True,
-            "notes_write": False}
+            "notes_write": False, "notes_value_hop": False, "notes_decode": False}  # LLWZ's own lookup, no mid-reply one
     if past is not None:
         body["notes_past"] = past
     if exclude:
@@ -171,7 +172,7 @@ def run_store(a, nm, nx, intake, L, tok, S, store_name, variants):
     nx.write(snap, path)
     base_told = max(n["told"] for n in snap["notes"])
     today = L.tick(time.strftime("%Y-%m-%d"))
-    srv = Server(a.server, a.model, path, os.path.join(d, "server.log"))
+    srv = Server(a.server, a.model, path, os.path.join(d, "server.log"), a.index)
     load_s = srv.start()
     out = open(os.path.join(a.out, f"live-{store_name}.jsonl"), "w")
     tally, src, n, bad_replies = [], {}, 0, 0
@@ -250,7 +251,7 @@ def run_store(a, nm, nx, intake, L, tok, S, store_name, variants):
         nx.write(snap2, p2)
         if os.path.exists(p2 + ".journal"):
             os.remove(p2 + ".journal")
-        srv = Server(a.server, a.model, p2, os.path.join(d, "server-exported.log"))
+        srv = Server(a.server, a.model, p2, os.path.join(d, "server-exported.log"), a.index)
         srv.start()
         tally.append(("C from Python's export", *checkpoint(ns, owner, S, variants, out, "C from Python's export", base)))
     finally:
@@ -271,7 +272,10 @@ def main():
     ap.add_argument("out")
     ap.add_argument("--stores", default="l6-teach,nights-day1,nights-day2,nights-day3,nights-day4,nights-day5,"
                                         "sweep-100,sweep-1000,sweep-10000,sweep-100000")
+    ap.add_argument("--index", default="", choices=["", "postings", "sa"], help="--notes-index (default: the server's)")
+    ap.add_argument("--port", type=int, default=PORT)
     a = ap.parse_args()
+    globals()["PORT"] = a.port
     sys.path.insert(0, os.path.join(a.llwz, "zengine"))
     import notes as nm  # noqa: E402
     import notes_export as nx  # noqa: E402

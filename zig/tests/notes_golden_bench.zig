@@ -10,11 +10,11 @@ pub fn main(init: std.process.Init) !u8 {
     const a = init.arena.allocator();
     const argv = try init.minimal.args.toSlice(a);
     if (argv.len < 4) {
-        std.debug.print("usage: notes-golden MODEL_DIR [--index postings|sa] SNAPSHOT REF.json [SNAPSHOT REF.json ...]\n", .{});
+        std.debug.print("usage: notes-golden MODEL_DIR [--index postings|sa (default sa)] SNAPSHOT REF.json [SNAPSHOT REF.json ...]\n", .{});
         return 2;
     }
     var at: usize = 2;
-    var kind: server.notes_store.IndexKind = .postings;
+    var kind: server.notes_store.IndexKind = server.notes_index.default_kind;
     if (std.mem.eql(u8, argv[2], "--index")) {
         kind = std.meta.stringToEnum(server.notes_store.IndexKind, argv[3]) orelse {
             std.debug.print("--index: postings or sa\n", .{});
