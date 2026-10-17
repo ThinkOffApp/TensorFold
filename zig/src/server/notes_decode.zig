@@ -165,7 +165,7 @@ pub const Live = struct {
             for (collected[collected.len - n ..], keys[0..n]) |t, *k| k.* = idx.keyOf(t);
             const e = (if (n == 1) idx.names.get(keys[0]) else idx.phrases.get(index.packPhrase(keys[0..n]))) orelse continue;
             for (idx.ent_cur.of(e)) |p| {
-                const id = idx.note_id[p];
+                const id = idx.idAt(p);
                 if (std.mem.indexOfScalar(u32, l.held.items, id) == null and std.mem.indexOfScalar(u32, l.exclude, id) == null) return true;
             }
         }
@@ -199,7 +199,7 @@ pub const Live = struct {
         if (top == 0) return null;
         const names = try named(a, idx, sc);
         // the best of the lookup's own candidates, named or not: what the threshold is weighed against (diagnostics)
-        var first: Check = if (got.chosen.len > 0) .{ .at = at, .best = idx.note_id[got.chosen[0]], .share = scoreOf(sc, got.chosen[0]) / top } else .{ .at = at };
+        var first: Check = if (got.chosen.len > 0) .{ .at = at, .best = idx.idAt(got.chosen[0]), .share = scoreOf(sc, got.chosen[0]) / top } else .{ .at = at };
         if (first.share > l.best.share) l.best = first;
         l.n_checks += 1;
         if (l.echo) {
@@ -208,7 +208,7 @@ pub const Live = struct {
             const sh = try l.a.alloc(f64, n);
             const ln = try l.a.alloc(bool, n);
             for (got.chosen[0..n], ids, sh, ln) |p, *id, *x, *y| {
-                id.* = idx.note_id[p];
+                id.* = idx.idAt(p);
                 x.* = scoreOf(sc, p) / top;
                 y.* = std.mem.indexOfScalar(u32, names.all, idx.entity[p]) != null;
             }
@@ -229,9 +229,9 @@ pub const Live = struct {
         }
         var it = score.iterator();
         while (it.next()) |kv| {
-            const id = idx.note_id[kv.key_ptr.*];
+            const id = idx.idAt(kv.key_ptr.*);
             if (std.mem.indexOfScalar(u32, l.exclude, id) != null or std.mem.indexOfScalar(u32, l.held.items, id) != null) continue;
-            if (!l.past and idx.state[kv.key_ptr.*] != .current) continue;
+            if (!l.past and idx.stateAt(kv.key_ptr.*) != .current) continue;
             if (kv.value_ptr.* < min_share * top) continue;
             try keys.append(a, lookup.orderKey(kv.value_ptr.*, idx.trank[kv.key_ptr.*], kv.key_ptr.*));
         }
@@ -258,7 +258,7 @@ pub const Live = struct {
             const tokens = counted.len;
             if ((if (l.place == .first) tokens else l.block_tokens + tokens) > l.cap) continue;
             const ids = try a.alloc(u32, n);
-            for (fresh[0..n], ids) |p, *id| id.* = idx.note_id[p];
+            for (fresh[0..n], ids) |p, *id| id.* = idx.idAt(p);
             return .{ .ids = ids, .shares = shares[0..n], .block = try l.a.dupe(u8, block), .tokens = tokens, .lookup_ns = clock.nowNs(s.io) - t0 };
         }
         l.capped += 1;
