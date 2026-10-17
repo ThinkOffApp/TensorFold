@@ -414,17 +414,16 @@ pub fn render(idx: *const Index, sc: *Scratch, chosen: []const u32) Allocator.Er
     if (chosen.len == 0) return .{ .ids = &.{}, .scores = &.{}, .block = "" };
     for (chosen, 0..) |i, k| try sc.order.append(gpa, .{ i, @intCast(k) });
     const ByTold = struct {
-        told: []const i64,
-        state: []const index.State,
+        idx: *const Index,
         fn less(c: @This(), a: [2]u32, b: [2]u32) bool {
-            const ca = c.state[a[0]] == .current;
-            const cb = c.state[b[0]] == .current;
+            const ca = c.idx.stateAt(a[0]) == .current;
+            const cb = c.idx.stateAt(b[0]) == .current;
             if (ca != cb) return ca;
-            if (c.told[a[0]] != c.told[b[0]]) return c.told[a[0]] < c.told[b[0]];
+            if (c.idx.toldAt(a[0]) != c.idx.toldAt(b[0])) return c.idx.toldAt(a[0]) < c.idx.toldAt(b[0]);
             return a[1] < b[1];
         }
     };
-    std.sort.pdq([2]u32, sc.order.items, ByTold{ .told = idx.told, .state = idx.state }, ByTold.less);
+    std.sort.pdq([2]u32, sc.order.items, ByTold{ .idx = idx }, ByTold.less);
     try sc.block.appendSlice(gpa, idx.head);
     var in_cur = false;
     var in_hist = false;

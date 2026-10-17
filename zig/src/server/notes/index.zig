@@ -196,6 +196,10 @@ pub const Index = struct {
         return self.trank[place];
     }
 
+    pub fn toldAt(self: *const Index, place: u32) i64 {
+        return self.told[place];
+    }
+
     pub fn entityAt(self: *const Index, place: u32) u32 {
         return self.entity[place];
     }
