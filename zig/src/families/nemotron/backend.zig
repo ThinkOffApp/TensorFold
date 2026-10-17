@@ -14,6 +14,7 @@ const head_tree = @import("head_tree.zig");
 const prefill = @import("prefill.zig");
 const head_block = @import("head_block.zig");
 const snapshot = @import("snapshot.zig");
+const pass = @import("pass.zig");
 const Model = @import("model.zig").Model;
 const nemotron_config = @import("config.zig");
 const grammar = @import("grammar.zig");
@@ -121,7 +122,7 @@ pub const Metal = struct {
     }
 
     pub fn backend(self: *Metal) be.Backend {
-        return .{ .ptr = self, .vtable = &.{ .prefill = prefillFn, .first = firstFn, .first_masked = grammar.firstMasked, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .release = releaseFn, .alternatives = alternativesFn, .held = grammar.held, .reports_fill = true } };
+        return .{ .ptr = self, .vtable = &.{ .prefill = prefillFn, .extend = pass.extend, .first = firstFn, .first_masked = grammar.firstMasked, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .release = releaseFn, .alternatives = alternativesFn, .held = grammar.held, .reports_fill = true } };
     }
 
     /// The facts the round loop reads at setup (Python's NemotronH attributes), with this engine's own timings.
@@ -212,7 +213,7 @@ pub const Metal = struct {
     }
 
     /// Commit a verify whose rows all stayed (the round loop calls keep() only when it drops rows).
-    fn settle(self: *Metal, c: *st.Cache) void {
+    pub fn settle(self: *Metal, c: *st.Cache) void {
         if (c.pending) |p| c.commit(&self.pool, p.rows);
     }
 
@@ -253,43 +254,6 @@ pub const Metal = struct {
         c.untaught = s.untaught;
         try self.caches.put(self.gpa, s, c);
         @memcpy(self.prompt.slice(u32, ids.len), ids);
-        const Chunks = struct {
-            n: usize,
-            c: *st.Cache,
-            at: usize,
-            rows: usize,
-            fn encode(j: @This(), b: *Metal, e: *fwd.Enc) !void {
-                const d = b.m.config.hidden * 2;
-                const rows = j.rows;
-                const fresh = try b.pool.take();
-                var out = b.scratch.x; // the chunk's final-normed rows
-                if (rows <= fused_rows) {
-                    const segs = [_]fwd.Seg{.{ .rows = rows, .cache = j.c, .store = .full, .slot = @intCast(fresh) }};
-                    b.forward().body(e, &segs, b.prompt, j.at * 4);
-                } else {
-                    const w = &b.wide.?;
-                    w.chunk(e, b.forward(), j.c, b.prompt, j.at * 4, rows, fresh);
-                    out = w.s.x;
-                }
-                j.c.advance(&b.pool, rows, fresh);
-                // the head's cache takes each row whose next token the prompt holds, as many rows a call as a window
-                const absorbed = @min(j.at + rows, j.n - 1) - j.at;
-                if (b.head) |*h| {
-                    var r: usize = 0;
-                    while (r < absorbed) : (r += max_window) h.absorb(e, j.c, @min(max_window, absorbed - r), out, r * d, b.prompt, (j.at + 1 + r) * 4);
-                }
-                j.c.start = 0;
-                j.c.rows = rows;
-                if (rows > fused_rows) {
-                    // the last row where the first draw and the head read it
-                    e.pipe(b.m.kernels.get("tf_copy_rows"));
-                    e.buf(out, (rows - 1) * d, 0);
-                    e.buf(b.scratch.x, 0, 1);
-                    e.run(.{ d / 2, 1, 1 }, .{ 256, 1, 1 });
-                    j.c.rows = 1;
-                }
-            }
-        };
         s.cached = 0;
         var at: usize = 0;
         if (s.reuse.saved) |saved| { // a kept state of this prompt's prefix: the pass starts there
@@ -310,7 +274,7 @@ pub const Metal = struct {
             if (c.decide != lesson_route.none and c.decide >= at and c.decide + 1 < end) end = @intCast(c.decide + 1);
             const rows = @min(self.o.chunk, end - at);
             if (s.isCancelled()) return error.Cancelled; // release() waits for the chunk still in flight
-            try self.submit(.prefill, self.next, Chunks{ .n = ids.len, .c = c, .at = at, .rows = rows });
+            try self.submit(.prefill, self.next, pass.Chunk{ .n = ids.len, .c = c, .at = at, .rows = rows });
             while (self.flights.items.len > 1) try self.land();
             at += rows;
             // landed tokens only: the newest chunk is still queued on the GPU

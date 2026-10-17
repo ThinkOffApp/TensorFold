@@ -132,7 +132,7 @@ delete runs gets 503, an id that is not a number 400, and an id the graph does n
 | `reasoning_effort` | `none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max` | Both |
 | `thinking_budget` | Token-count limit inside reasoning | Both |
 | `priority` | `background` yields to foreground requests | Both |
-| `inject_room` | Tokens of context the reply may take in while it runs ([Injected context](#injected-context)) | CUDA (Nemotron) |
+| `inject_room` | Tokens of context the reply may take in while it runs ([Injected context](#injected-context)) | Nemotron (CUDA, Metal) |
 
 `n` must be 1; multiple choices receive HTTP 400.
 
@@ -345,7 +345,8 @@ The route answers `{"id", "object": "chat.completion.inject", "injected_tokens"}
 room is a 404, and context past the reply's room a 409. The room is held as cache rows past `max_tokens` from the
 reply's start, counts against the context window and against the engine's admission; it does not combine with
 structured output or a required tool call. Only engines whose backend reads context as a prompt pass take it: today
-Nemotron on one CUDA GPU (not with `--slide` or `--record`). Every other engine refuses `inject_room` with HTTP 400.
+Nemotron on one CUDA GPU (not with `--slide` or `--record`) and on Metal (not with `--slide` or saved lessons).
+Every other engine refuses `inject_room` with HTTP 400.
 
 ## Context and errors
 
