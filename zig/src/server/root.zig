@@ -85,6 +85,8 @@ test {
     _ = @import("cortheon/cortheon.zig");
     _ = @import("cortheon/cortheon_test.zig");
     _ = @import("recall_routes.zig");
+    _ = @import("inject_routes.zig");
+    _ = @import("inject_routes_test.zig");
     _ = @import("benchmark_suite.zig");
     _ = @import("benchmark_check.zig");
     _ = @import("benchmark_receipt_test.zig");

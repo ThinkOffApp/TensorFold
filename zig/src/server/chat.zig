@@ -14,6 +14,7 @@ const clock = @import("clock.zig");
 const Server = @import("server.zig").Server;
 const chunk_plan = @import("chunk_plan.zig");
 const Mailbox = @import("mailbox.zig").Mailbox;
+const inject_routes = @import("inject_routes.zig");
 const Value = json.Value;
 const Cx = errors.Cx;
 const Allocator = std.mem.Allocator;
@@ -88,6 +89,7 @@ pub const Prepared = struct {
     drafts: bool,
     stops: fields_mod.Stops,
     preparing: bool,
+    inject_room: u32 = 0, // rows held for context injected while the reply runs (inject_routes.zig)
 };
 
 /// Render ``input`` and run every check that can refuse it, before anything reaches the client or the engine.
@@ -113,8 +115,10 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
     if (rendered.ids.len == 0) return cx.refuse("rendered prompt is empty");
     const window: i64 = srv.info.context_window;
     const n: i64 = @intCast(rendered.ids.len);
+    const inject_room = try injectRoom(srv, cx, f);
     if (window > 0) {
-        const room = window - n;
+        if (inject_room > 0 and inject_room >= window - n) return cx.fail(.context_length, "{s} {d} tokens, but the rendered prompt has {d} tokens and inject_room holds {d} more, which leaves no room for a reply.", .{ errors.context_limit, window, n, inject_room });
+        const room = window - n - inject_room;
         if (room < 1) return cx.fail(.context_length, "{s} {d} tokens{s}, but the rendered prompt has {d} tokens and leaves no room for a reply, which exceeds the context window. Compact or shorten the conversation.", .{ errors.context_limit, window, if (srv.info.context_fitted) ", the most this server's memory budget fits" else "", n });
         if (input.max_tokens != null and limit > room) return cx.fail(.context_length, "{s} {d} tokens, but the rendered prompt has {d} tokens and requests {d} reply tokens, which exceeds the context window. Reduce the prompt to at most {d} prompt tokens or request at most {d} reply tokens, including chat template and thinking tokens.", .{ errors.context_limit, window, n, limit, @max(0, window - limit), room });
         limit = @min(limit, room);
@@ -145,6 +149,7 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
         .cache_key = rendered.cache_key,
     };
     try srv.checkFeatures(cx, f, input.tools.len > 0, thinking, rendered.ids, input.tools, &request);
+    if (!injectCombines(inject_room, &request)) return cx.refuse(inject_refusal);
     if (thinking) {
         const budget_field = f.get("thinking_budget");
         const budget: i64 = if (budget_field != null and budget_field.?.truthy()) budget_field.?.int64() orelse 0 else srv.config.thinking_budget;
@@ -159,7 +164,23 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
     }
     if (input.logprobs) |count| request.logprobs = try @import("logprobs.zig").admit(srv, cx, thinking, request.think_budget, count);
     request.prompt_logprobs = input.prompt_logprobs;
-    return .{ .input = input, .request = request, .prompt_len = rendered.ids.len, .received = received, .thinking = thinking, .effort = effort, .sampled = sampling != null, .drafts = drafts, .stops = stops_opt, .preparing = preparing };
+    return .{ .input = input, .request = request, .prompt_len = rendered.ids.len, .received = received, .thinking = thinking, .effort = effort, .sampled = sampling != null, .drafts = drafts, .stops = stops_opt, .preparing = preparing, .inject_room = @intCast(inject_room) };
+}
+
+pub const inject_refusal = "inject_room does not combine with structured output or a required tool call";
+
+/// Whether a request's ``inject_room`` goes with its other fields: a grammar or call gate reads every token.
+pub fn injectCombines(room: i64, r: *const api.Request) bool {
+    return room == 0 or (r.structure == null and r.call == null);
+}
+
+/// ``inject_room``: tokens the reply may take in while it runs, its rows held past max_tokens (0: not asked).
+fn injectRoom(srv: *const Server, cx: *Cx, f: Value) errors.Refused!i64 {
+    const v = f.get("inject_room") orelse return 0;
+    const n = v.int64() orelse return if (v == .null) 0 else cx.refuse("inject_room must be an integer");
+    if (n < 0 or n > std.math.maxInt(u32)) return cx.refuse("inject_room must be between 0 and 4294967295");
+    if (n > 0 and !srv.info.inject) return cx.refuse("inject_room is not supported by this native engine");
+    return n;
 }
 
 /// Submit a prepared request and collect its reply; ``sink`` hears the stream (null: not streamed).
@@ -189,6 +210,14 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
     if (stops_opt.strings.len > 0) request.stop = .{ .ctx = &stop_hook, .check = StopHook.check };
     var box: Mailbox = .{ .io = io, .gpa = srv.gpa };
     defer box.deinit();
+    // a reply that takes injected context: its queue lives here until the engine ends it, its id in srv.injects
+    var live: inject_routes.Live = .{ .inject = .{ .io = io, .gpa = srv.gpa, .room = prepared.inject_room }, .think_end = srv.think_close_end, .answering = .init(!thinking) };
+    defer live.inject.deinit();
+    if (prepared.inject_room > 0) {
+        request.inject = &live.inject;
+        try srv.injects.add(srv, input.id, &live);
+    }
+    defer if (prepared.inject_room > 0) srv.injects.remove(srv, input.id);
     const id = srv.next_id.fetchAdd(1, .monotonic);
     if (srv.keepalive) |k| k.begin(); // the GPU is busy: the idle ticker holds its commits
     defer if (srv.keepalive) |k| k.end();
@@ -200,7 +229,7 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
     };
     release(srv, preparing); // a background request waits only while a foreground one prepares
     preparing = false;
-    var gen: Generation = .{ .srv = srv, .a = a, .box = &box, .id = id, .reply_id = input.id, .sink = sink, .thinking = thinking or reply_text.isChannel(srv.markers), .stops = .{ .strings = stops_opt.strings }, .ignore_eos = stops_opt.ignore_eos, .max_tokens = request.max_tokens, .tools = input.tools, .lp = if (request.logprobs != null) .{} else null };
+    var gen: Generation = .{ .srv = srv, .a = a, .box = &box, .id = id, .reply_id = input.id, .sink = sink, .thinking = thinking or reply_text.isChannel(srv.markers), .stops = .{ .strings = stops_opt.strings }, .ignore_eos = stops_opt.ignore_eos, .max_tokens = request.max_tokens, .tools = input.tools, .lp = if (request.logprobs != null) .{} else null, .live = if (prepared.inject_room > 0) &live else null };
     defer srv.noteRequest(prepared.prompt_len, box.cached orelse 0, gen.collected.items.len, box.stats.drafted, box.stats.accepted, box.stats.rounds, received, gen.first_ns, gen.last_ns, box.stats.prefill_seconds);
     errdefer if (!gen.engine_done) gen.cancel(); // the engine writes to the mailbox until it says finished
     const result: Failure!Reply = blk: {
@@ -261,6 +290,7 @@ const Generation = struct {
     consumed: usize = 0,
     chunk_index: usize = 0,
     lp: ?@import("logprobs.zig").Stream = null, // the request asked for logprobs: its rows, copied with each round
+    live: ?*inject_routes.Live = null, // the reply takes injected context: it hears where the think block closes
 
     fn eos(g: *const Generation, t: u32) bool {
         return !g.ignore_eos and std.mem.indexOfScalar(u32, g.srv.eos, t) != null;
@@ -289,6 +319,7 @@ const Generation = struct {
         for (chunk) |t| {
             if (g.reason != null) break;
             try g.collected.append(g.a, t);
+            if (g.live) |l| l.saw(t);
             landed += 1;
             if (g.eos(t)) {
                 g.reason = "stop";
@@ -461,6 +492,7 @@ const Generation = struct {
         try runtime.put(a, "token_sha", .{ .string = try a.dupe(u8, &sha) });
         const sha256 = @import("tokens.zig").tokenSha256(g.collected.items);
         try runtime.put(a, "token_sha256", .{ .string = try a.dupe(u8, &sha256) });
+        if (g.live) |l| try runtime.put(a, "injected", try inject_routes.points(a, &l.inject));
         try runtime.put(a, "min_rows", try json.intValue(a, m.stats.min_rows));
         if (m.stats.loop_period) |period| {
             const loop_field = try json.newObject(a);
@@ -486,7 +518,7 @@ const Generation = struct {
             .reasoning = reasoning,
             .tool_calls_streamed = g.calls != null and g.calls.?.streamed,
             .finish_reason = reason,
-            .prompt_tokens = prompt_len,
+            .prompt_tokens = prompt_len + if (g.live) |l| l.inject.count() else 0, // injected context is read, not written
             .cached_tokens = m.cached orelse 0,
             .completion_tokens = g.collected.items.len,
             .reasoning_tokens = reply_text.reasoningCount(g.collected.items, think_end),

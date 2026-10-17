@@ -132,6 +132,7 @@ delete runs gets 503, an id that is not a number 400, and an id the graph does n
 | `reasoning_effort` | `none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max` | Both |
 | `thinking_budget` | Token-count limit inside reasoning | Both |
 | `priority` | `background` yields to foreground requests | Both |
+| `inject_room` | Tokens of context the reply may take in while it runs ([Injected context](#injected-context)) | CUDA (Nemotron) |
 
 `n` must be 1; multiple choices receive HTTP 400.
 
@@ -323,6 +324,28 @@ cycle of at most eight tokens after 256 predecessor matches, when the detected r
 in; the reply continues after the forced close, and reports `runtime.loop: {"period": N}` plus `loop=period:N` in the
 server log. The native engine refuses the flag on backends that do not enforce it, and prints that refusal as
 a startup error.
+
+## Injected context
+
+A chat or completion reply that asks for `inject_room: N` takes up to N tokens of context while it runs, with no
+restart: `POST /v1/chat/completions/{id}/inject`, behind the same key as every `/v1` route, names the reply by the `id`
+its chunks carry, with a body of `{"messages": [...]}` or `{"text": "..."}`. Messages are wrapped as the model's chat
+template writes them after an interrupted assistant turn: that turn closes, the messages follow, and the assistant turn
+reopens, thinking again only if the reply was still thinking. `text` goes in exactly as given, for a caller that writes
+its own wrapper. Between two decode rounds the engine reads the tokens as a prompt pass on the reply's own caches, and
+the reply goes on after them. They never appear in the reply's content, and its usage counts them as prompt tokens.
+
+Because the wrapper closes the reply's turn and opens a new one, the model usually starts a new answer where the
+context went in, so the reply's content holds the interrupted text and the new answer back to back, with no separator.
+The reply's runtime block (`tensorfold`, on the last streamed chunk too) lists each injection as
+`"injected": [{"at": K, "tokens": N}]`: `K` of the reply's own tokens (as `completion_tokens` counts them) came before
+the `N` context tokens. A client rebuilds the conversation by splitting the reply's tokens at `K`.
+
+The route answers `{"id", "object": "chat.completion.inject", "injected_tokens"}`; a reply that ended or asked for no
+room is a 404, and context past the reply's room a 409. The room is held as cache rows past `max_tokens` from the
+reply's start, counts against the context window and against the engine's admission; it does not combine with
+structured output or a required tool call. Only engines whose backend reads context as a prompt pass take it: today
+Nemotron on one CUDA GPU (not with `--slide` or `--record`). Every other engine refuses `inject_room` with HTTP 400.
 
 ## Context and errors
 

@@ -54,7 +54,7 @@ pub fn stopOptions(cx: *Cx, fields: Value) errors.Refused!Stops {
     return out;
 }
 
-const integer_fields = [_][]const u8{ "max_completion_tokens", "max_tokens", "seed", "thinking_budget", "top_k" };
+const integer_fields = [_][]const u8{ "max_completion_tokens", "max_tokens", "seed", "thinking_budget", "top_k", "inject_room" };
 
 /// ``parse_numbers``: the body with its numeric fields as numbers, or Python's refusal.
 pub fn parseNumbers(cx: *Cx, fields: Value) errors.Refused!Value {
