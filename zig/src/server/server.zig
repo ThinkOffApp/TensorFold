@@ -24,6 +24,7 @@ const slide_graph = @import("slide_graph.zig");
 const slide_lesson = @import("slide_lesson.zig");
 const cortheon = @import("cortheon/cortheon.zig");
 const notes_route = @import("notes_route.zig");
+const notes_promote = @import("notes_promote.zig");
 const Value = json.Value;
 const Cx = errors.Cx;
 const Allocator = std.mem.Allocator;
@@ -101,6 +102,8 @@ pub const Server = struct {
     cortheon: ?*cortheon.State = null,
     /// --notes: the note snapshot chat requests look up before their prompt renders; null without the flag.
     notes: ?*notes_route.Store = null,
+    /// --notes-promote-every: nightly promotion of the notes into the pocket; null without the flag.
+    promote: ?*notes_promote.Promoter = null,
 
     /// Reads what the template and tokenizer decide once: late system role, think markers, efforts, the forced close.
     pub fn init(gpa: Allocator, io: std.Io, engine: api.Engine, text: model_text.Text, config: Config, keys: ?*auth.Store) !*Server {

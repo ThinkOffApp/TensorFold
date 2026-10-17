@@ -10,6 +10,7 @@ const listener_mod = @import("listener.zig");
 const model_text = @import("model_text.zig");
 const server_mod = @import("server.zig");
 const notes_route = @import("notes_route.zig");
+const notes_promote = @import("notes_promote.zig");
 const Allocator = std.mem.Allocator;
 const posix = std.posix;
 
@@ -143,6 +144,30 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         var line_buf: [1024]u8 = undefined;
         log.line("{s}", .{srv.notes.?.startupLine(&line_buf, path)});
     }
+    if (args.notes_promote_every_ms) |every| {
+        const path = args.notes orelse {
+            std.debug.print("tensorfold: --notes-promote-every needs --notes SNAPSHOT\n", .{});
+            return 2;
+        };
+        if (!args.slide) {
+            std.debug.print("tensorfold: --notes-promote-every teaches the notes into the weights: serve with --slide\n", .{});
+            return 2;
+        }
+        var why: []const u8 = "";
+        srv.promote = notes_promote.Promoter.init(gpa, io, srv, srv.notes.?, path, .{ .every_ms = every, .settings = .{ .hold = args.notes_promote_hold, .alone = args.notes_promote_alone } }, &why) catch |e| {
+            std.debug.print("tensorfold: --notes-promote-every: {s} ({s})\n", .{ why, @errorName(e) });
+            return 2;
+        };
+        srv.promote.?.start() catch {
+            std.debug.print("tensorfold: --notes-promote-every: the night thread could not start\n", .{});
+            return 1;
+        };
+        log.line("notes promotion: a night every {d} s after the last ended (hold {d}, alone {d}); state in {s}.promote, {d} nights done", .{ @divTrunc(every, 1000), args.notes_promote_hold, args.notes_promote_alone, path, srv.promote.?.nights_done });
+    }
+    defer if (srv.promote) |p| {
+        srv.promote = null;
+        p.deinit();
+    };
     if (args.loop_guard and !srv.info.loop_guard) {
         std.debug.print("tensorfold: --loop-guard is not supported by this native engine\n", .{});
         return 2;

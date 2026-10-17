@@ -19,6 +19,7 @@ const Allocator = std.mem.Allocator;
 
 pub fn dispatch(srv: *Server, conn: *Conn, a: Allocator) void {
     const m = conn.method;
+    if (srv.promote) |p| if (std.mem.eql(u8, auth.routePath(conn.path), "/v1/promotion")) return p.handle(conn, a);
     if (notes_http.route(auth.routePath(conn.path))) |r| return notes_http.handle(srv, conn, a, r);
     if (std.mem.eql(u8, m, "GET")) return get(srv, conn, a);
     if (std.mem.eql(u8, m, "POST")) return post(srv, conn, a);

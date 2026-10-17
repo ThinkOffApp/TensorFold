@@ -106,4 +106,6 @@ test {
     _ = @import("notes_decode.zig");
     _ = @import("notes_decode_test.zig");
     _ = @import("notes_decode_more_test.zig");
+    _ = @import("notes_promote_test.zig");
+    _ = @import("notes_promote_rig_test.zig");
 }

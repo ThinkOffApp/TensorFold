@@ -116,6 +116,9 @@ pub const flags = [_]Flag{
     .{ .name = "--notes", .native = true },
     .{ .name = "--no-notes-write", .kind = .store_true, .native = true },
     .{ .name = "--notes-index", .choices = &.{ "postings", "sa" }, .native = true },
+    .{ .name = "--notes-promote-every", .native = true },
+    .{ .name = "--notes-promote-hold", .native = true },
+    .{ .name = "--notes-promote-alone", .native = true },
 };
 
 /// The variables this binary honours as the Python engine does, then the CUDA build's.
@@ -175,6 +178,9 @@ pub const Args = struct {
     notes: ?[]const u8 = null, // an LLWZ note snapshot for "notes": true requests; no named tokenizer hash: vocabulary-only check
     notes_write: bool = true, // a "notes": true request's last user message goes through the intake into the notes
     notes_index: []const u8 = "sa", // the notes' n-gram index: a suffix array, or LLWZ's posting lists ("postings")
+    notes_promote_every_ms: ?i64 = null, // nightly promotion of the notes into the pocket, a night this often (null: off)
+    notes_promote_hold: u32 = 1, // nights a used note stays unchanged before it is taught
+    notes_promote_alone: u32 = 2, // nights running a taught fact answers alone before its note leaves the prompt
     cortheon: bool = false, // Cortheon's program, research before building, and cortheon_search/cortheon_fetch run by the server
 };
 
@@ -254,7 +260,7 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
             return std.mem.eql(u8, x, y);
         }
     }.f;
-    if (try cudaFlag(a, out, name, v, u) or try gpuFlag(a, out, name, v, u)) return;
+    if (try cudaFlag(a, out, name, v, u) or try gpuFlag(a, out, name, v, u) or try promoteFlag(a, out, name, v, u)) return;
     if (is(name, "--chat-template")) {
         out.chat_template = v;
         return;
@@ -282,6 +288,18 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         if (n < 0) return fail(u, a, "argument --compact-keep: expected a token count from 0: '{s}'", .{v});
         out.compact_keep = @intCast(n);
     } else if (is(name, "--compact-memory")) out.compact_memory = v else if (is(name, "--slide")) out.slide = true else if (is(name, "--slide-graph")) out.slide_graph = v else if (is(name, "--parallel")) out.parallel = v else if (is(name, "--backend")) out.backend = v else if (is(name, "--cortheon")) out.cortheon = true else if (is(name, "--notes")) out.notes = v else if (is(name, "--no-notes-write")) out.notes_write = false else if (is(name, "--notes-index")) out.notes_index = v;
+}
+
+/// --notes-promote-every, --notes-promote-hold and --notes-promote-alone; false for any other flag.
+fn promoteFlag(a: Allocator, out: *Args, name: []const u8, v: []const u8, u: *Usage) error{ Usage, OutOfMemory }!bool {
+    if (std.mem.eql(u8, name, "--notes-promote-every")) {
+        out.notes_promote_every_ms = @import("notes_promote.zig").parseDuration(v) orelse return fail(u, a, "argument --notes-promote-every: a duration of a second or more, as 600, 600s, 10m or 24h: '{s}'", .{v});
+    } else if (std.mem.eql(u8, name, "--notes-promote-hold") or std.mem.eql(u8, name, "--notes-promote-alone")) {
+        const n = std.math.cast(u32, try int(u, a, name, v)) orelse return fail(u, a, "argument {s}: a count of nights from 1: '{s}'", .{ name, v });
+        if (n < 1) return fail(u, a, "argument {s}: a count of nights from 1: '{s}'", .{ name, v });
+        if (std.mem.eql(u8, name, "--notes-promote-hold")) out.notes_promote_hold = n else out.notes_promote_alone = n;
+    } else return false;
+    return true;
 }
 
 /// The CUDA build's --device and --segments; false for any other flag.

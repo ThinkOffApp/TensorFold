@@ -85,14 +85,18 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
     defer srv.teacher.learning.unlock(srv.io);
     sse.open(conn) catch return;
     var out: Out = .{ .conn = conn, .a = a };
+    teachText(srv, a, text, source, Gone{ .conn = conn }, &out);
+    sse.done(conn) catch {};
+}
+
+/// What one fact of a taught text came to: its graph id, and whether its change is kept.
+pub const Result = struct { id: u32, recalled: bool };
+
+/// The text's facts, each written into a lesson and learned in turn into the live weights (the learning lock held).
+pub fn teachText(srv: *Server, a: Allocator, text: []const u8, source: []const u8, gone: anytype, out: *Out) void {
     var cx: errors.Cx = .{ .a = a };
-    const gone: Gone = .{ .conn = conn };
     const facts = found.facts(srv, &cx, text, source, gone) catch |e| return out.fail(&cx, e);
-    if (facts.len == 0) {
-        out.event("failed", .{ .message = "no facts found in the text: nothing was learned" });
-        sse.done(conn) catch {};
-        return;
-    }
+    if (facts.len == 0) return out.event("failed", .{ .message = "no facts found in the text: nothing was learned" });
     const ids = a.alloc(u32, facts.len) catch return;
     for (facts, ids) |fact, *id| {
         id.* = srv.slide.add(fact, source, now(srv));
@@ -111,11 +115,11 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
         const document = !std.mem.eql(u8, source, "chat") or !wording.firstPerson(fact);
         const gave = if (document) &.{} else giveWay(srv, a, &cx, fact, id, gone);
         const plan = (teach.lesson(srv, &cx, &srv.teacher, &.{fact}, &kept, document, facts, gone) catch |e| {
-            missed(srv, &out, id, words(&cx, e));
+            missed(srv, out, id, words(&cx, e));
             putBack(srv, a, gave, id);
             continue;
         }) orelse {
-            missed(srv, &out, id, "too few clean answers to learn from");
+            missed(srv, out, id, "too few clean answers to learn from");
             putBack(srv, a, gave, id);
             continue;
         };
@@ -128,11 +132,21 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
         if (result.why) |why| srv.slide.note(id, why);
         srv.slide.mark(id, if (back) .learned else .missed);
         if (back and document) for (plan.held) |h| if (h.subject.len > 0) srv.teacher.remember(h.subject, h.question, h.answer) catch {};
+        out.add(id, back);
         if (result.why) |why| {
             out.event("learned", .{ .id = id, .recalled = back, .steps = result.steps, .message = why });
         } else out.event("learned", .{ .id = id, .recalled = back, .steps = result.steps });
     }
-    sse.done(conn) catch {};
+}
+
+/// Neurons zeroed in the live pocket and the pocket saved into the model's files; false when the learner refused.
+pub fn retire(srv: *Server, a: Allocator, neurons: []const api.Neuron) bool {
+    const ok = switch (run(srv, a, &.{ .retire = neurons }, 0)) {
+        .failed, .refused => false,
+        else => true,
+    };
+    if (ok) saveAll(srv, a);
+    return ok;
 }
 
 /// Rounds a lesson gets to bring its facts back when asked once, before it is given up.
@@ -142,7 +156,7 @@ const give_up = 5;
 const Rounds = struct { recalled: []bool, steps: u32 = 0, why: ?[]const u8 = null };
 
 /// A lesson in checked rounds until its fact comes back; a question it took is handed back (a few times at most).
-fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: Gone, id: u32) Rounds {
+fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: anytype, id: u32) Rounds {
     var out: Rounds = .{ .recalled = a.alloc(bool, plan.facts.len) catch &.{} };
     @memset(out.recalled, false);
     var routed: u32 = 0;
@@ -240,7 +254,7 @@ fn saveAll(srv: *Server, a: Allocator) void {
 }
 
 /// Earlier chat facts `fact` replaces ("I like blue." for "Now I like red."): their neurons zeroed, marked replaced.
-fn giveWay(srv: *Server, a: Allocator, cx: *errors.Cx, fact: []const u8, id: u32, gone: Gone) []const slide_graph.Fact {
+fn giveWay(srv: *Server, a: Allocator, cx: *errors.Cx, fact: []const u8, id: u32, gone: anytype) []const slide_graph.Fact {
     const olds = replace.replaced(srv, cx, fact, id, gone) catch return &.{};
     if (olds.len == 0) return &.{};
     var neurons: std.ArrayList(api.Neuron) = .empty;
@@ -276,6 +290,7 @@ fn putBack(srv: *Server, a: Allocator, olds: []const slide_graph.Fact, id: u32) 
 fn missed(srv: *Server, out: *Out, id: u32, why: []const u8) void {
     srv.slide.note(id, why);
     srv.slide.mark(id, .missed);
+    out.add(id, false);
     out.event("learned", .{ .id = id, .recalled = false, .message = why });
 }
 
@@ -319,13 +334,19 @@ fn run(srv: *Server, a: Allocator, request: *const api.LearnRequest, id: u32) Ou
     }
 }
 
-/// The learn stream: events while the client listens.
-const Out = struct {
-    conn: *Conn,
+/// The learn stream: events while the client listens (none without a client), and each fact's result.
+pub const Out = struct {
+    conn: ?*Conn,
     a: Allocator,
     open: bool = true,
+    results: std.ArrayList(Result) = .empty,
+
+    fn add(o: *Out, id: u32, recalled: bool) void {
+        o.results.append(o.a, .{ .id = id, .recalled = recalled }) catch {};
+    }
 
     fn event(o: *Out, kind: []const u8, fields: anytype) void {
+        const conn = o.conn orelse return;
         if (!o.open) return;
         const obj = json.newObject(o.a) catch return;
         inline for (@typeInfo(@TypeOf(fields)).@"struct".field_names) |name| {
@@ -337,14 +358,13 @@ const Out = struct {
             };
             obj.put(o.a, name, value) catch return;
         }
-        sse.event(o.conn, o.a, kind, .{ .object = obj }) catch {
+        sse.event(conn, o.a, kind, .{ .object = obj }) catch {
             o.open = false;
         };
     }
 
     fn fail(o: *Out, cx: *errors.Cx, e: anyerror) void {
         o.event("failed", .{ .message = words(cx, e) });
-        sse.done(o.conn) catch {};
     }
 };
 
