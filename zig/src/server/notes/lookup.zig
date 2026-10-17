@@ -321,7 +321,7 @@ pub fn lookup(idx: *const Index, sc: *Scratch, qids: []const u32, past: bool, ca
 
     // the candidate cut: the 4*room best when there are more than 8*room candidates (4 tokens a line or more)
     const room: usize = @intCast(@max(1, @divFloor(@as(i64, cap) - @as(i64, idx.fx_head), 4)));
-    for (sc.touched.items) |i| sc.keys.appendAssumeCapacity(orderKey(sc.slot[i].score, idx.trank[i], i));
+    for (sc.touched.items) |i| sc.keys.appendAssumeCapacity(orderKey(sc.slot[i].score, idx.rankAt(i), i));
     var direct = sc.keys.items;
     if (direct.len > 8 * room) {
         selectFirst(direct, 4 * room);
@@ -351,15 +351,15 @@ pub fn lookup(idx: *const Index, sc: *Scratch, qids: []const u32, past: bool, ca
         var near: [3][]const u32 = undefined;
         var nn: usize = 0;
         if (st.hop != .none) {
-            near[nn] = idx.ent_cur.of(idx.entity[i]);
+            near[nn] = idx.ent_cur.of(idx.entityAt(i));
             nn += 1;
-            if (st.hop == .subject_value and idx.value_ent[i] >= 0) {
-                near[nn] = idx.ent_cur.of(@intCast(idx.value_ent[i]));
+            if (st.hop == .subject_value and idx.valueEntityAt(i) >= 0) {
+                near[nn] = idx.ent_cur.of(@intCast(idx.valueEntityAt(i)));
                 nn += 1;
             }
         }
         if (past and st.hop_history) {
-            near[nn] = idx.pair_notes.of(idx.pair[i]);
+            near[nn] = idx.pair_notes.of(idx.pairAt(i));
             nn += 1;
         }
         for (near[0..nn]) |js| for (js) |j| {
@@ -374,7 +374,7 @@ pub fn lookup(idx: *const Index, sc: *Scratch, qids: []const u32, past: bool, ca
 
     // pack(): sorted a part at a time; the walk stops once no line could fit, where Python's walk only skips
     sc.keys.clearRetainingCapacity();
-    for (sc.pool.items) |i| sc.keys.appendAssumeCapacity(orderKey(sc.slot[i].score, idx.trank[i], i));
+    for (sc.pool.items) |i| sc.keys.appendAssumeCapacity(orderKey(sc.slot[i].score, idx.rankAt(i), i));
     var used: u32 = idx.fx_head;
     var has_cur = false;
     var has_hist = false;

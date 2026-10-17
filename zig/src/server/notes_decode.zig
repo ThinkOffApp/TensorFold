@@ -210,7 +210,7 @@ pub const Live = struct {
             for (got.chosen[0..n], ids, sh, ln) |p, *id, *x, *y| {
                 id.* = idx.idAt(p);
                 x.* = scoreOf(sc, p) / top;
-                y.* = std.mem.indexOfScalar(u32, names.all, idx.entity[p]) != null;
+                y.* = std.mem.indexOfScalar(u32, names.all, idx.entityAt(p)) != null;
             }
             first.ids = ids;
             first.shares = sh;
@@ -233,7 +233,7 @@ pub const Live = struct {
             if (std.mem.indexOfScalar(u32, l.exclude, id) != null or std.mem.indexOfScalar(u32, l.held.items, id) != null) continue;
             if (!l.past and idx.stateAt(kv.key_ptr.*) != .current) continue;
             if (kv.value_ptr.* < min_share * top) continue;
-            try keys.append(a, lookup.orderKey(kv.value_ptr.*, idx.trank[kv.key_ptr.*], kv.key_ptr.*));
+            try keys.append(a, lookup.orderKey(kv.value_ptr.*, idx.rankAt(kv.key_ptr.*), kv.key_ptr.*));
         }
         std.sort.pdq(u128, keys.items, {}, std.sort.asc(u128));
         const fresh = try a.alloc(u32, keys.items.len); // places, best first

@@ -192,6 +192,22 @@ pub const Index = struct {
         return self.note_id[place];
     }
 
+    pub fn rankAt(self: *const Index, place: u32) u32 {
+        return self.trank[place];
+    }
+
+    pub fn entityAt(self: *const Index, place: u32) u32 {
+        return self.entity[place];
+    }
+
+    pub fn pairAt(self: *const Index, place: u32) u32 {
+        return self.pair[place];
+    }
+
+    pub fn valueEntityAt(self: *const Index, place: u32) i32 {
+        return self.value_ent[place];
+    }
+
     /// A note id's place in the index, if the snapshot has that note.
     pub fn placeOfId(self: *const Index, id: u32) ?u32 {
         if (id >= self.id_place.len or self.id_place[id] == no_note) return null;
