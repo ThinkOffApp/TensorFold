@@ -72,7 +72,7 @@ pub const Taught = struct { kept: bool, neurons: []const Neuron = &.{}, question
 pub const Ask = struct { q: []const u8, exclude: ?[]const u32 = &.{} };
 
 /// regress_notes: current notes whose own question joins the regression set (null: all); retries: tries after a miss.
-pub const Settings = struct { hold: u32 = 1, alone: u32 = 2, tolerance: u32 = 0, probes_per_fact: usize = 4, regress_notes: ?u32 = null, retries: u32 = 1 };
+pub const Settings = struct { hold: u32 = 1, alone: u32 = 2, tolerance: u32 = 0, probes_per_fact: usize = 4, regress_notes: ?u32 = null, retries: u32 = 1, targeted: bool = true };
 
 /// Prompts that no lesson should change, asked before and after each night.
 pub const controls = [_][]const u8{ "What is the capital of France?", "How many legs does a spider have?", "Tell me something interesting about the ocean.", "What is my teacher's name?" };
@@ -275,11 +275,11 @@ fn runPlans(s: *State, a: Allocator, b: anytype, k: u32, notes: []const Note, st
     const excl = try idsOf(a, notes, try s.inWeights(a));
     const noted = try probes.sampleNotes(a, s, notes, s.settings.regress_notes);
     try probes.askOf(s, a, b, noted);
-    // the targeted probes: of the facts taught tonight and those in the pocket, written once
-    const targeted = try std.mem.concat(a, *Fact, &.{ keep, due });
+    // the targeted probes (neighbours, two-note, untold): of the facts taught tonight and in the pocket, unless off
+    const targeted: []const *Fact = if (s.settings.targeted) try std.mem.concat(a, *Fact, &.{ keep, due }) else &.{};
     try probes.askOf(s, a, b, targeted);
     try probes.build(s, a, b, targeted, notes);
-    var set = try probes.set(a, keep, noted, targeted, excl);
+    var set = try probes.set(a, keep, noted, targeted, excl, s.settings.targeted);
     try probes.before(b, &set, a, try b.askAll(a, set.asks));
     log.asks += @intCast(set.asks.len);
     const r = set;

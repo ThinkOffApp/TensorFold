@@ -121,7 +121,7 @@ pub fn build(s: *State, a: Allocator, b: anytype, facts: []const *Fact, notes: [
 }
 
 /// The regression set: pocket probes, notes' questions, neighbours, two-note, untold and control questions.
-pub fn set(a: Allocator, keep: []const *Fact, noted: []const *Fact, targeted: []const *Fact, excl: []const u32) !Regress {
+pub fn set(a: Allocator, keep: []const *Fact, noted: []const *Fact, targeted: []const *Fact, excl: []const u32, untold_on: bool) !Regress {
     var asks: std.ArrayList(Ask) = .empty;
     var kind: std.ArrayList(Kind) = .empty;
     var text: std.ArrayList([]const u8) = .empty;
@@ -141,7 +141,7 @@ pub fn set(a: Allocator, keep: []const *Fact, noted: []const *Fact, targeted: []
         for (f.neighbours) |q| try add(a, &asks, &kind, &text, &ref, q, .neighbour, "", "", excl);
         if (f.pair) |p| try add(a, &asks, &kind, &text, &ref, p.q, .pair, p.text, p.ref, excl);
     }
-    for (untold) |q| try add(a, &asks, &kind, &text, &ref, q, .neighbour, "", "", excl);
+    if (untold_on) for (untold) |q| try add(a, &asks, &kind, &text, &ref, q, .neighbour, "", "", excl);
     for (promote.controls) |q| try add(a, &asks, &kind, &text, &ref, q, .control, "", "", excl);
     return .{ .asks = asks.items, .kind = kind.items, .text = text.items, .ref = ref.items };
 }

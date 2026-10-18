@@ -561,3 +561,18 @@ test "promotion: the targeted probes reject a night that leaks a value to a neig
     _ = try promote.night(&back, arena.allocator(), &g);
     try testing.expectEqual(pairs, g.pairs); // the tent shares no words: no pair; the others' are kept
 }
+
+test "promotion: with the targeted probes off a night asks only the facts' and notes' own questions and the controls" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var f: Fake = .{ .a = arena.allocator(), .leaks = "cat eyes=green" };
+    _ = try f.add("w1", "cat eyes=green");
+    _ = try f.add("w2", "my eyes=green");
+    var s = promote.State.init(testing.allocator, .{ .targeted = false });
+    defer s.deinit();
+    const n = try run(&s, &f, &arena);
+    try testing.expectEqual(@as(u32, 2 + promote.controls.len), n.probes); // the two notes' questions, the controls
+    try testing.expectEqual(@as(u32, 0), n.rejected); // the leak to neighbours is not asked, so not seen
+    try testing.expectEqual(@as(u32, 0), f.pairs);
+    try testing.expectEqual(@as(usize, 0), s.find("w1").?.neighbours.len);
+}
