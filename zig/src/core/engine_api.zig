@@ -322,6 +322,8 @@ pub const Learner = struct {
     pub const Step = struct { done: bool, changed: bool };
 };
 
+pub const ForgetError = error{ Closed, Busy, Unsupported };
+
 pub const Engine = struct {
     ctx: *anyopaque,
     vtable: *const VTable,
@@ -340,6 +342,9 @@ pub const Engine = struct {
         score: ?*const fn (ctx: *anyopaque, prompt: []const u32, labels: []const u32, logits: []f64) error{Failed}!f64 = null,
         /// Queue `request` for the family's learner; it stays valid until `done`. Null: this engine does not learn.
         learn: ?*const fn (ctx: *anyopaque, request: *const LearnRequest, sink: LearnSink) LearnError!void = null,
+        /// Forget, between rounds, every kept prompt state and learned state on disk whose tokens hold `span` (an erased
+        /// note's tokens); returns once the engine thread ran it. Null: this engine cannot forget prompts.
+        forget_prompts: ?*const fn (ctx: *anyopaque, span: []const u32) ForgetError!prompt_cache.Forgotten = null,
     };
 
     pub fn info(e: Engine) Info {
@@ -368,6 +373,12 @@ pub const Engine = struct {
     pub fn score(e: Engine, prompt: []const u32, labels: []const u32, logits: []f64) error{ Failed, Unsupported }!f64 {
         const f = e.vtable.score orelse return error.Unsupported;
         return f(e.ctx, prompt, labels, logits);
+    }
+
+    /// Every kept and learned prompt state holding `span` forgotten (prompt_cache.Store.forgetSpan), or Unsupported.
+    pub fn forgetPrompts(e: Engine, span: []const u32) ForgetError!prompt_cache.Forgotten {
+        const f = e.vtable.forget_prompts orelse return error.Unsupported;
+        return f(e.ctx, span);
     }
 
     /// The Sliding Weights hook, or Unsupported when this engine does not learn.
@@ -402,6 +413,8 @@ pub const LaneHost = @import("lane_host.zig").LaneHost;
 
 /// Exact prompt reuse between requests, for any family (prompt_cache.zig).
 pub const prompt_cache = @import("prompt_cache.zig");
+/// Engine.forget_prompts' wait for an engine thread (prompt_forget.zig).
+pub const prompt_forget = @import("prompt_forget.zig");
 
 /// The same for a paged cache over the backend's own KV pages (prompt_radix.zig).
 pub const prompt_radix = @import("prompt_radix.zig");
@@ -420,8 +433,10 @@ test {
     _ = @import("lane_host_test.zig");
     _ = @import("lane_host_reuse_test.zig");
     _ = @import("lane_host_warm_test.zig");
+    _ = @import("lane_host_forget_test.zig");
     _ = @import("lane_host_fill_test.zig");
     _ = @import("prompt_cache.zig");
+    _ = @import("prompt_forget.zig");
     _ = @import("prompt_radix.zig");
     _ = @import("prompt_imprint.zig");
     _ = @import("keepalive.zig");

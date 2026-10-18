@@ -48,6 +48,7 @@ pub const Host = struct {
     prompt: []const u32 = &.{}, // the request in the engine (speed-up mode names kept states by its tokens)
     saved: std.ArrayList(u32) = .empty, // this request's marks the cache kept (speed-up: rank 1 drops the others)
     learned: ?api.prompt_imprint.Imprint = null, // --learn: shared states on disk, read back by later servers
+    forgets: api.prompt_forget.Queue = .{}, // forget_prompts calls waiting for the engine thread, run between replies
 
     const Mark = struct { at: i96, tokens: u64 };
     const window_ns: i96 = 2 * std.time.ns_per_s;
@@ -64,13 +65,47 @@ pub const Host = struct {
         h.unlock();
         if (h.thread) |t| t.join();
         h.thread = null;
+        h.lock();
+        h.forgets.close(h.gpa, h.io); // a forget asked after the thread's last pass: refused
+        h.unlock();
         h.queued.deinit(h.gpa);
         h.cancels.deinit(h.gpa);
         h.decoded.deinit(h.gpa);
     }
 
     pub fn engine(h: *Host) api.Engine {
-        return .{ .ctx = h, .vtable = &.{ .info = infoFn, .submit = submitFn, .cancel = cancelFn, .status = statusFn, .memory = memoryFn, .keepalive = keepaliveFn } };
+        return .{ .ctx = h, .vtable = &.{ .info = infoFn, .submit = submitFn, .cancel = cancelFn, .status = statusFn, .memory = memoryFn, .keepalive = keepaliveFn, .forget_prompts = forgetFn } };
+    }
+
+    /// Engine.forget_prompts: queued for the engine thread, which runs it before the next reply.
+    fn forgetFn(ctx: *anyopaque, span: []const u32) api.ForgetError!pc.Forgotten {
+        const h = self(ctx);
+        h.lock();
+        defer h.unlock();
+        if (h.closing) return error.Closed;
+        return h.forgets.ask(h.gpa, h.io, &h.mutex, &h.wake, span);
+    }
+
+    /// Runs the forgets asked since the last reply (engine thread, no reply running: no kept state is being restored).
+    fn takeForgets(h: *Host) void {
+        h.lock();
+        var asks = h.forgets.take();
+        for (asks.items) |ask| {
+            ask.out = .{};
+            for (h.queued.items) |job| if (api.prompt_forget.carries(job.request.prompt, ask.span)) {
+                ask.out.in_flight += 1;
+            };
+        }
+        h.unlock();
+        for (asks.items) |ask| {
+            const in_flight = ask.out.in_flight;
+            ask.out = if (h.cache) |*store| store.forgetSpan(ask.span, &.{}) else .{};
+            ask.out.in_flight = in_flight;
+        }
+        h.lock();
+        h.forgets.answer(h.io, asks.items);
+        h.unlock();
+        asks.deinit(h.gpa);
     }
 
     /// The engine's queue as a keepalive target: the ticker commits a tiny buffer on it while idle.
@@ -195,8 +230,13 @@ pub const Host = struct {
     fn run(h: *Host) void {
         while (true) {
             h.lock();
-            while (h.queued.items.len == 0 and !h.closing) {
+            while (h.queued.items.len == 0 and !h.closing and !h.forgets.pending()) {
                 h.wake.waitTimeout(h.io, &h.mutex, .{ .duration = .{ .raw = .fromMilliseconds(100), .clock = .awake } }) catch {};
+            }
+            if (h.forgets.pending()) { // between replies, before the next one is taken
+                h.unlock();
+                h.takeForgets();
+                continue;
             }
             if (h.closing) {
                 const left = h.gpa.dupe(*Job, h.queued.items) catch &.{};

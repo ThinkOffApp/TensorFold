@@ -111,6 +111,36 @@ fn unlearnChecked(s: *Store, im: *imprint.Imprint, key: u64) !void {
     if (s.family.vtable.forget_checked) |f| try f(s.family.ptr, im.dir, key) else if (s.family.vtable.forget) |f| f(s.family.ptr, im.dir, key);
     try im.remove(key);
 }
+/// Every learned state whose tokens hold `span`: its files, then its index record, removed; then the folder synced.
+pub fn forget(s: *Store, im: *imprint.Imprint, span: []const u32, out: *pc.Forgotten) void {
+    var i = im.metas.items.len;
+    var removed = false;
+    while (i > 0) {
+        i -= 1;
+        if (i >= im.metas.items.len) continue; // a failed removal's index rewrite may have shortened the list
+        const meta = im.metas.items[i];
+        if (std.mem.indexOf(u32, meta.tokens, span) == null) continue;
+        unlearnChecked(s, im, meta.key) catch |err| {
+            note("forgetting a learned state that holds an erased span failed ({s})", .{@errorName(err)});
+            out.failed += 1;
+            continue;
+        };
+        out.learned += 1;
+        removed = true;
+    }
+    if (removed) syncDir(im.dir) catch {
+        out.failed += 1;
+    };
+}
+
+/// The folder's entries made durable: removed files and the renamed index survive a power cut.
+fn syncDir(dir: [:0]const u8) !void {
+    const fd = std.c.open(dir, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
+    if (fd < 0) return error.SyncFailed;
+    defer _ = std.c.close(fd);
+    if (std.c.fsync(fd) != 0) return error.SyncFailed;
+}
+
 pub fn unlearn(s: *Store, im: *imprint.Imprint, key: u64) void {
     unlearnChecked(s, im, key) catch |err| note("forgetting a learned state failed ({s})", .{@errorName(err)});
 }
