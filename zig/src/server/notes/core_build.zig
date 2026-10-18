@@ -136,6 +136,7 @@ pub fn fromVersion(gpa: Allocator, v: *const Index) index.LoadError!*Index {
         }
     }
     if (old.notes != cn) return error.Unsupported;
+    self.retired = try index.retiredBits(a, n);
     self.base = try sa.merge(gpa, old, src, self.vwordy);
     self.side_keys = .{};
     self.grams = .empty;

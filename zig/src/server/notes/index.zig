@@ -43,6 +43,13 @@ pub const alias_gone: u32 = 0xFFFF_FFFE;
 pub const id_bits = 24;
 pub const told_span: i64 = (1 << 40) - 1;
 
+/// A core's retired bits, all clear.
+pub fn retiredBits(a: Allocator, n: usize) Allocator.Error![]std.atomic.Value(u64) {
+    const bits = try a.alloc(std.atomic.Value(u64), (n + 63) / 64);
+    for (bits) |*w| w.* = .init(0);
+    return bits;
+}
+
 /// Tests only: false makes every full build rank by the global sort (the old path, the differential test's oracle).
 pub threadlocal var rank_by_note_allowed: bool = true;
 
@@ -223,6 +230,7 @@ pub const Index = struct {
     n_phrases: u32 = 0, // the model's phrases it was built from (a layered version's side adds the rest)
     layer: @import("layer.zig").Layer = .{}, // a version layered on a core: the core and what changed since
     rank_by_note: bool = false, // rankAt() from each note's told and place (every one fits), else own_trank
+    retired: []std.atomic.Value(u64) = &.{}, // sa core: a bit per place some version on it overrides (overOf)
     lazy_value: std.AutoHashMapUnmanaged(u32, []const u32) = .empty, // sa: written notes no model value names: tokens
     names_from: [3]u32 = .{ 0, 0, 0 },
     reaper: ?*@import("bounded.zig").Reaper = null, // frees this layered version's core off the caller's thread
@@ -235,17 +243,32 @@ pub const Index = struct {
     // Version-local metadata: a layered version (layer.zig) reads places below core_n from its core, unless a
     // later write retired them (layer.over, layer.values), and its own columns from core_n on.
     pub inline fn stateAt(self: *const Index, place: u32) State {
-        if (place < self.layer.core_n) return if (self.layer.over.get(place)) |o| o.state else self.layer.core.?.state[place];
+        if (place < self.layer.core_n) return if (self.overOf(place)) |o| o.state else self.layer.core.?.state[place];
         return self.state[place - self.layer.core_n];
     }
 
+    /// A core place's override in this version, if a write since the core retired it. The core's `retired` bits
+    /// (set by the writer, never cleared) skip the table for the places no version on it has retired; a bit set by
+    /// a newer version only sends an older one to its own table, which then has no entry: the core's value stands.
+    inline fn overOf(self: *const Index, p: u32) ?@import("layer.zig").Over {
+        if (self.layer.over.count() == 0) return null;
+        const c = self.layer.core.?;
+        if (c.retired.len > 0 and c.retired[p >> 6].load(.monotonic) & (@as(u64, 1) << @intCast(p & 63)) == 0) return null;
+        return self.layer.over.get(p);
+    }
+
+    /// The writer marks a core place retired (layer.zig), before any version that overrides it is published.
+    pub fn markRetired(self: *const Index, p: u32) void {
+        if (self.retired.len > 0) _ = self.retired[p >> 6].fetchOr(@as(u64, 1) << @intCast(p & 63), .monotonic);
+    }
+
     pub fn lineAt(self: *const Index, p: u32) []const u8 {
-        if (p < self.layer.core_n) return if (self.layer.over.get(p)) |o| o.line else self.layer.core.?.own_line[p];
+        if (p < self.layer.core_n) return if (self.overOf(p)) |o| o.line else self.layer.core.?.own_line[p];
         return self.own_line[p - self.layer.core_n];
     }
 
     pub fn costAt(self: *const Index, p: u32) u32 {
-        if (p < self.layer.core_n) return if (self.layer.over.get(p)) |o| o.cost else self.layer.core.?.own_cost[p];
+        if (p < self.layer.core_n) return if (self.overOf(p)) |o| o.cost else self.layer.core.?.own_cost[p];
         return self.own_cost[p - self.layer.core_n];
     }
 
@@ -508,6 +531,8 @@ pub const Index = struct {
             for (m.notes.items, 0..) |*n, p| if (n.source() != null and n.value_ent < 0) self.lazy_value.putAssumeCapacity(@intCast(p), n.tokens());
         }
         self.side_keys = .{};
+        self.retired = &.{};
+        if (kind == .sa) self.retired = try retiredBits(self.arena.allocator(), raw.len);
         if (kind == .sa) self.base = try ib.baseOf(gpa, m, raw, prev);
         const first: usize = if (kind == .sa) raw.len else 0; // sa: the side buffer is empty
         try ib.buildPostings(self, gpa, raw[first..], first);

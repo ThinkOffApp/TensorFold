@@ -70,6 +70,7 @@ pub fn build(gpa: Allocator, m: *const Model, core: *Index, retired: []const u32
         const x = &m.notes.items[p];
         if (!self.layer.over.contains(p) and core.stateAt(p) == .current and x.state != .current) gone += 1;
         self.layer.over.putAssumeCapacity(p, .{ .state = x.state, .line = x.line(), .cost = x.cost });
+        core.markRetired(@intCast(p));
     };
     const side = m.notes.items[cn..];
     const raw = try gpa.alloc(index.Raw, side.len); // the build's own, freed when it returns
