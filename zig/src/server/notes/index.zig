@@ -156,6 +156,9 @@ pub const Index = struct {
     ent_cur: Groups, // entity -> places of its current notes (O.ent_cur)
     ent_keys: Groups, // entity -> its pairs (O.ent_keys)
     pair_notes: Groups, // pair -> places of its notes, every state, oldest first (O.by_key)
+    entity_names: []const []const u8,
+    attribute_names: []const []const u8,
+    pair_attributes: []const u32,
     kind: Kind = .postings,
     /// sa: the suffix arrays of places 0..base.notes-1, shared by the versions built on it (null: postings only)
     base: ?*sa.Base = null,
@@ -292,6 +295,16 @@ pub const Index = struct {
         for (m.notes.items, raw) |n, *r| r.* = .{ .id = n.id, .state = n.state, .entity = n.entity, .pair = n.pair, .value_ent = n.value_ent, .told = n.told, .line = n.line(), .cost = n.cost, .tokens = n.tokens() };
         try self.placeNotes(gpa, raw);
         try self.groupsOf(m);
+        const meta = self.arena.allocator();
+        const entities = try meta.alloc([]const u8, m.entities.items.len);
+        for (m.entities.items, entities) |name, *out| out.* = try meta.dupe(u8, name);
+        self.entity_names = entities;
+        const attributes = try meta.alloc([]const u8, m.attributes.items.len);
+        for (m.attributes.items, attributes) |name, *out| out.* = try meta.dupe(u8, name);
+        self.attribute_names = attributes;
+        const pair_attributes = try meta.alloc(u32, m.pairs.items.len);
+        for (m.pairs.items, pair_attributes) |p, *out| out.* = p.attribute;
+        self.pair_attributes = pair_attributes;
         self.phrases = .empty;
         self.phrase_max = 0;
         self.aliases = .empty;
