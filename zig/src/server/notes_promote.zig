@@ -47,6 +47,36 @@ pub fn parseDuration(text: []const u8) ?i64 {
     return n * unit;
 }
 
+/// Whether `reply` gives the fact as `ref` does: the reference's answer words, or a notable fact word ("Grey").
+pub fn agreesWith(fact: []const u8, question: []const u8, ref: []const u8, reply: []const u8) bool {
+    if (wording.recalls(fact, question, ref, reply)) return true;
+    // value words (in reference and fact, not fillers, not the question's): names and numbers said, half the rest
+    var n: usize = 0;
+    var said: usize = 0;
+    var first = true;
+    var it = std.mem.tokenizeAny(u8, ref, " \t\r\n.,;:!?\"'()*_");
+    while (it.next()) |w| : (first = false) {
+        if (w.len < 2 or wording.isFiller(w) or !hasStem(fact, w) or hasStem(question, w)) continue;
+        const there = hasStem(reply, w);
+        if ((!first and std.ascii.isUpper(w[0])) or std.ascii.isDigit(w[0])) if (!there) return false;
+        n += 1;
+        said += @intFromBool(there);
+    }
+    return n > 0 and 2 * said >= n;
+}
+
+/// Whether `text` has a word of `w`'s stem (case folded; a plural s and the last letters of a long word aside).
+fn hasStem(text: []const u8, w: []const u8) bool {
+    var buf: [64]u8 = undefined;
+    if (w.len > buf.len) return std.ascii.findIgnoreCase(text, w) != null;
+    const low = std.ascii.lowerString(&buf, w);
+    const base = if (low.len > 3 and low[low.len - 1] == 's') low[0 .. low.len - 1] else low;
+    const stem = base[0..@min(base.len, @max(4, base.len -| 2))];
+    var it = std.mem.tokenizeAny(u8, text, " \t\r\n.,;:!?\"'()*_");
+    while (it.next()) |t| if (t.len >= stem.len and std.ascii.eqlIgnoreCase(t[0..stem.len], stem)) return true;
+    return false;
+}
+
 /// A note's promotion key: its write's source, or "s<id>" for a snapshot's note.
 pub fn keyOf(a: Allocator, v: ops.View) Allocator.Error![]const u8 {
     return if (v.source) |s| a.dupe(u8, s) else std.fmt.allocPrint(a, "s{d}", .{v.id});
@@ -140,27 +170,38 @@ pub const Promoter = struct {
     }
 
     /// publish(), its failure kept in `publish_pending` (every caller goes through here, the test switch too).
-    fn tryPublish(p: *Promoter) bool {
+    pub fn tryPublish(p: *Promoter) bool {
         const ok = if (fail_publish) false else if (p.publish()) |_| true else |_| false;
         p.publish_pending = !ok;
         return ok;
     }
 
-    /// The report and the in-weights keys from the state, for the hooks and GET /v1/promotion.
+    /// Report and in-weights keys staged whole, swapped in with the generation bump; a failure changes nothing.
     fn publish(p: *Promoter) !void {
-        var arena: std.heap.ArenaAllocator = .init(p.gpa);
+        const g = p.gpa;
+        var arena: std.heap.ArenaAllocator = .init(g);
         defer arena.deinit();
-        const bytes = try p.gpa.dupe(u8, try pjson.encode(&p.state, arena.allocator()));
+        const bytes = try g.dupe(u8, try pjson.encode(&p.state, arena.allocator()));
+        errdefer g.free(bytes);
         const keys = try p.state.inWeights(arena.allocator());
+        var staged: std.ArrayList([]u8) = .empty;
+        errdefer {
+            for (staged.items) |k| g.free(k);
+            staged.deinit(g);
+        }
+        try staged.ensureTotalCapacityPrecise(g, keys.len);
+        for (keys) |k| staged.appendAssumeCapacity(try g.dupe(u8, k));
         p.mu.lockUncancelable(p.io);
-        defer p.mu.unlock(p.io);
-        p.gpa.free(p.report);
+        const old_report = p.report;
+        var old_weights = p.weights;
         p.report = bytes;
-        for (p.weights.items) |k| p.gpa.free(k);
-        p.weights.clearRetainingCapacity();
-        for (keys) |k| try p.weights.append(p.gpa, try p.gpa.dupe(u8, k));
+        p.weights = staged;
         p.gen += 1;
         p.nights_done = p.state.nights_done;
+        p.mu.unlock(p.io);
+        g.free(old_report);
+        for (old_weights.items) |k| g.free(k);
+        old_weights.deinit(g);
     }
 
     /// The note ids and keys at the store's version now (the writer's lock taken once after each write).
@@ -507,7 +548,7 @@ const Backend = struct {
     }
 
     pub fn agrees(_: *Backend, fact: []const u8, question: []const u8, ref: []const u8, reply: []const u8) bool {
-        return wording.recalls(fact, question, ref, reply);
+        return agreesWith(fact, question, ref, reply);
     }
 
     /// Whether a control's changed reply still says nothing new, as the learner's own judge decides.

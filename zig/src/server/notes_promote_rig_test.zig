@@ -342,3 +342,44 @@ test "promotion rig: an erase while the promoter's allocations fail is reported 
     try testing.expect(!p.publish_pending);
     try testing.expect(learner.zeroed.items.len >= 2); // zeroed at least once (again on a retry: the same)
 }
+
+test "promotion rig: a publish failing at any allocation leaves the old report and in-weights list whole" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const r = try rig.Rig.init(testing.allocator);
+    defer r.deinit();
+    var st = promote.State.init(testing.allocator, .{});
+    defer st.deinit();
+    try st.facts.append(st.alloc(), .{ .key = "w1", .text = "a", .status = .in_weights, .alone = 2 });
+    try pjson.writeFile(a, try std.fmt.allocPrint(a, "{s}.promote", .{r.snap}), try pjson.encode(&st, a));
+    var failing = std.testing.FailingAllocator.init(testing.allocator, .{});
+    var why: []const u8 = "";
+    const p = try notes_promote.Promoter.init(failing.allocator(), testing.io, r.srv, r.store(), r.snap, .{ .every_ms = 600_000 }, &why);
+    defer p.deinit();
+    try testing.expectEqual(@as(usize, 1), p.weights.items.len);
+    // the state changes (a second fact in weights); each publish fails from its k-th allocation on
+    try p.state.facts.append(p.state.alloc(), .{ .key = "w2", .text = "b", .status = .in_weights, .alone = 2 });
+    var k: usize = 0;
+    var failed: usize = 0;
+    while (k < 64) : (k += 1) {
+        const gen = p.gen;
+        const report = try a.dupe(u8, p.report);
+        failing.fail_index = failing.alloc_index + k;
+        const ok = p.tryPublish();
+        failing.fail_index = std.math.maxInt(usize);
+        if (ok) {
+            try testing.expectEqual(gen + 1, p.gen);
+            try testing.expectEqual(@as(usize, 2), p.weights.items.len);
+            break;
+        }
+        failed += 1;
+        try testing.expect(p.publish_pending);
+        try testing.expectEqual(gen, p.gen); // the cache is not told of a list it never got
+        try testing.expectEqual(@as(usize, 1), p.weights.items.len); // whole: the old list
+        try testing.expectEqualStrings("w1", p.weights.items[0]);
+        try testing.expectEqualStrings(report, p.report);
+    }
+    try testing.expect(failed >= 3 and k < 64); // the encode, the report copy and each key failed in turn
+    try testing.expect(!p.publish_pending);
+}

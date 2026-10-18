@@ -500,3 +500,18 @@ test "promotion: a night failing at any allocation leaves every live neuron reco
     }
     try testing.expect(points > 50); // 73 points failed a night when this was written
 }
+
+test "promotion: a terse right reply agrees with its reference, a wrong value does not" {
+    const np = @import("notes_promote.zig");
+    const fact = "My dog has grey eyes.";
+    const q = "What eye colour has my dog?";
+    const ref = "Your dog has grey eyes.";
+    try testing.expect(np.agreesWith(fact, q, ref, "Grey"));
+    try testing.expect(np.agreesWith(fact, q, ref, "Your dog has grey eyes."));
+    try testing.expect(!np.agreesWith(fact, q, ref, "Your dog has brown eyes."));
+    try testing.expect(!np.agreesWith(fact, q, ref, "I don't know your dog's eye colour."));
+    try testing.expect(!@import("slide_words.zig").recalls(fact, q, ref, "Grey")); // the learner's check alone refused it
+    const sis = "My sister's name is Ana.";
+    try testing.expect(np.agreesWith(sis, "What is my sister called?", "Your sister's name is Ana.", "Ana."));
+    try testing.expect(!np.agreesWith(sis, "What is my sister called?", "Your sister's name is Ana.", "Your sister is called Maria."));
+}

@@ -76,6 +76,17 @@ question is written once per note by the untaught model ("the one short question
 this again"), with its reference answer (the untaught model, the fact before it), and kept in the state. The night's
 log and state name every question that went worse (`worse_list`: question, new reply, old reply).
 
+**Right, without a key.** A probe agrees with its reference when the reply says every answer word the reference
+took from the fact (the learner's `wording.recalls`), or, for a terse reply, when it says the reference's value words
+(in the reference and the fact, not fillers, not the question's words by stem): every name and number among them and
+half of the rest. The GB10 rerun's night 2 was rejected on "What eye colour has my dog? -> Grey (was Your dog has grey
+eyes.)", a right reply the learner's check alone refuses ("eyes" not said); `agreesWith` takes it and still refuses
+"Your dog has brown eyes." and "Your sister is called Maria." for Ana (host test). The rerun itself runs `d660eac3`.
+
+**Publishing the in-weights list.** The report and every key are staged first, then swapped in under the lock with
+the cache generation bump; a failure at any allocation leaves the old report, list and generation whole (codexmb's
+review of `9cf5180e`; an allocation-failure sweep over the publish fails on the old code, with a leak).
+
 **Retry.** A missed or rejected fact is due once more the next night (`retries`, kept in the state); not a third time.
 
 **Alone.** On the accepted state each fact in the pocket is asked its probes with its own note left out (and the other
