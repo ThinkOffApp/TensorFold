@@ -126,7 +126,7 @@ test "a layered version equals the full build of its notes after every write: re
 }
 
 /// The current version against a full build of the store's notes.
-fn sameAsFull(s: anytype, a: std.mem.Allocator) !void {
+pub fn sameAsFull(s: anytype, a: std.mem.Allocator) !void {
     const v = s.acquire();
     defer s.release(v);
     const full = try Index.buildKind(testing.allocator, s.model, .sa);
