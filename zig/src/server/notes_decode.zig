@@ -264,7 +264,10 @@ pub const Live = struct {
         // the block that would hold them, counted by the model's tokenizer: the lowest goes while it is over the cap
         const kept = try placesOf(a, idx, if (l.place == .first) l.held.items else l.late.items);
         var n = fresh.len;
-        while (n > 0) : (n -= 1) {
+        // Failed prefixes shrink geometrically: total rendered note volume is
+        // below twice the initial pool, rather than every descending prefix.
+        // This may leave spare room; the exact tokenizer still enforces cap.
+        while (n > 0) : (n = nextFitPrefix(n)) {
             // Failed fits must not accumulate in the request arena. This
             // bounds temporary memory, independently of how many fits fail.
             var fit_arena = std.heap.ArenaAllocator.init(s.gpa);
@@ -491,6 +494,25 @@ pub const Live = struct {
         return fields.value(l, a);
     }
 };
+
+/// A failed exact fit retains the higher-scoring half, bounding repeated rendering work.
+fn nextFitPrefix(n: usize) usize {
+    return n / 2;
+}
+
+test "failed live fits visit less than twice the initial candidate volume" {
+    for ([_]usize{ 1, 2, 3, 500, 50_000 }) |initial| {
+        var n = initial;
+        var volume: usize = 0;
+        var attempts: usize = 0;
+        while (n > 0) : (n = nextFitPrefix(n)) {
+            volume += n;
+            attempts += 1;
+        }
+        try std.testing.expect(volume < 2 * initial);
+        try std.testing.expect(attempts <= @bitSizeOf(usize) - @clz(initial));
+    }
+}
 
 /// Sets up the decode-time lookup of a chat request that asked for notes (`used`); null when it asked for none.
 pub fn setup(srv: *const Server, cx: *Cx, body: Value, used: ?*const notes_route.Used, messages: Value, shape: notes_route.Shape) errors.Refused!?*Live {
