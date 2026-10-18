@@ -543,6 +543,27 @@ test "a thinking reply is read whole: a name in its reasoning brings the note in
     try testing.expectEqualStrings("Her name is Anna. What does she drive? Anna drives a red Volvo.", reasoning);
 }
 
+test "unknown note request is opt in and requires notes" {
+    var r: Rig = .{};
+    try r.init(&answers);
+    defer r.deinit();
+    for ([_][]const u8{
+        ",\"notes_unknown\":false",
+        ",\"notes_subjects\":true,\"notes_unknown\":true",
+    }) |extra| {
+        const got = try r.ask(&.{answers[0]}, extra);
+        try testing.expectEqual(@as(u16, 200), got.status);
+        if (std.mem.indexOf(u8, extra, "\"notes_unknown\":true") != null) {
+            try testing.expectEqualStrings("unknown-note blocks currently support prefetch only", decodeOf(got.value).strField("stopped").?);
+        }
+    }
+    const a = r.arena.allocator();
+    const got = try rig.request(r.srv, a, "POST", "/v1/chat/completions",
+        "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"notes_unknown\":true}");
+    try testing.expectEqual(@as(u16, 400), got.status);
+    try testing.expectEqualStrings("notes_unknown needs notes: true", got.value.get("error").?.strField("message").?);
+}
+
 test "the request fields: wrong types and the decode fields without notes are refused" {
     var r: Rig = .{};
     try r.init(&answers);
@@ -554,6 +575,8 @@ test "the request fields: wrong types and the decode fields without notes are re
         .{ .extra = ",\"notes_decode_place\":\"middle\"", .message = "notes_decode_place must be \"first\", \"turn\" or \"user\"" },
         .{ .extra = ",\"notes_decode_names\":\"yes\"", .message = "notes_decode_names must be a boolean" },
         .{ .extra = ",\"notes_value_hop\":1", .message = "notes_value_hop must be a boolean" },
+        .{ .extra = ",\"notes_unknown\":1", .message = "notes_unknown must be a boolean" },
+        .{ .extra = ",\"notes_unknown\":true", .message = "notes_unknown needs notes_subjects: true" },
         .{ .extra = ",\"notes_position\":\"last\"", .message = "notes_position must be \"first\" or \"user\"" },
         .{ .extra = ",\"notes_decode_checks\":-1", .message = "notes_decode_checks must be a whole number, 0 or more" },
         .{ .extra = ",\"notes_decode_checks\":1.5", .message = "notes_decode_checks must be a whole number, 0 or more" },

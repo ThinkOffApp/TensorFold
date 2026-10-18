@@ -129,6 +129,12 @@ pub const Live = struct {
     /// Binds the reply about to be submitted; null when its engine state could not be restarted (then nothing runs).
     pub fn bind(l: *Live, srv: *const Server, prepared: *const chat.Prepared, base: *const api.Request, box: *Mailbox) ?*Live {
         if (!l.on) return null;
+        // A live replacement currently renders note ids only and would drop
+        // uncertainty annotations. Keep this experimental shape prefetch-only.
+        if (l.shape.unknown) {
+            l.stop("unknown-note blocks currently support prefetch only");
+            return null;
+        }
         l.prepared = prepared;
         l.base = base;
         l.first = box;

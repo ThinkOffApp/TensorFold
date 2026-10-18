@@ -10,6 +10,30 @@ const Bytes = notes_test.Bytes;
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
 
+test "missing note prefetch is opt in and fits the exact token cap" {
+    var text: Bytes = .{};
+    const store = try openSa(text.text(), notes_test.snapshot);
+    defer store.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const q = try text.text().encode(a, "Who is my cat's owner?", false);
+    const off = try store.retrieveQuestion(a, text.text(), q, false, 4096, &.{}, null, true, false);
+    const on = try store.retrieveQuestion(a, text.text(), q, false, 4096, &.{}, null, true, true);
+    try testing.expect(std.mem.indexOf(u8, off.block, "No note about") == null);
+    try testing.expect(std.mem.indexOf(u8, on.block, "No note about my cat's owner.") != null);
+    // The experimental block may drop unrelated subjects; every retained id
+    // still came from the original retrieval, never an invented note.
+    for (on.ids) |id| try testing.expect(std.mem.indexOfScalar(u32, off.ids, id) != null);
+    try testing.expectEqual((try text.text().encode(a, on.block, false)).len, on.tokens);
+    const capped = try store.retrieveQuestion(a, text.text(), q, false, 1, &.{}, null, true, true);
+    try testing.expect(capped.tokens <= 1);
+    try testing.expect(std.mem.indexOf(u8, capped.block, "No note about") == null);
+    const unresolved = try text.text().encode(a, "Who is my sister's owner?", false);
+    const guarded = try store.retrieveQuestion(a, text.text(), unresolved, false, 4096, &.{}, null, true, true);
+    try testing.expect(std.mem.indexOf(u8, guarded.block, "No note about me's") == null);
+}
+
 test "subject aliases contain only current names and first person words" {
     var text: Bytes = .{};
     const store = try openSa(text.text(), notes_test.snapshot);
@@ -20,6 +44,10 @@ test "subject aliases contain only current names and first person words" {
     try testing.expect(store.model.entities.items[0].ptr != idx.entity_names[0].ptr);
     try testing.expectEqual(store.model.attributes.items.len, idx.attribute_names.len);
     for (store.model.pairs.items, idx.pair_attributes) |p, attribute| try testing.expectEqual(p.attribute, attribute);
+    for (store.model.notes.items) |n| {
+        const place = idx.placeOfId(n.id).?;
+        try testing.expectEqual(n.kind == .tombstone and !n.multi, idx.single_takeback[place]);
+    }
     for ([_][]const u8{ "Ana", "Bruno", "Milo", "Otto", "my", "me", "I" }) |name| {
         const spaced = try std.mem.concat(testing.allocator, u8, &.{ " ", name });
         defer testing.allocator.free(spaced);

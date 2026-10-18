@@ -39,7 +39,9 @@ pub fn shapeAsked(cx: *Cx, body: Value) errors.Refused!notes_route.Shape {
     const hop = body.field("notes_value_hop");
     const position = body.field("notes_position");
     const subjects = body.field("notes_subjects");
+    const unknown = body.field("notes_unknown");
     if (!on) {
+        if (unknown != null) return cx.refuse("notes_unknown needs notes: true");
         if (hop != null or position != null or subjects != null) return cx.refuse("notes_value_hop, notes_position and notes_subjects need \"notes\": true");
         return .{};
     }
@@ -58,7 +60,13 @@ pub fn shapeAsked(cx: *Cx, body: Value) errors.Refused!notes_route.Shape {
         if (v != .bool) return cx.refuse("notes_subjects must be a boolean");
         resolve_subjects = v.bool;
     }
-    return .{ .hop = if (value_hop) .subject_value else null, .before_user = before, .resolve_subjects = resolve_subjects };
+    var show_unknown = false;
+    if (unknown) |v| {
+        if (v != .bool) return cx.refuse("notes_unknown must be a boolean");
+        show_unknown = v.bool;
+    }
+    if (show_unknown and !resolve_subjects) return cx.refuse("notes_unknown needs notes_subjects: true");
+    return .{ .hop = if (value_hop) .subject_value else null, .before_user = before, .resolve_subjects = resolve_subjects, .unknown = show_unknown };
 }
 
 /// The decode fields of a request; `notes_on`: it asked for notes, which they need.

@@ -285,6 +285,10 @@ pub const Store = struct {
     }
 
     pub fn retrieveSubjects(s: *Store, a: Allocator, text: model_text.Text, qids: []const u32, past: bool, cap: u32, exclude: []const u32, hop: ?index.Hop, resolve_subjects: bool) Failure!Found {
+        return s.retrieveQuestion(a, text, qids, past, cap, exclude, hop, resolve_subjects, false);
+    }
+
+    pub fn retrieveQuestion(s: *Store, a: Allocator, text: model_text.Text, qids: []const u32, past: bool, cap: u32, exclude: []const u32, hop: ?index.Hop, resolve_subjects: bool, unknown: bool) Failure!Found {
         const v = s.acquire();
         defer s.release(v);
         var view: index.Index = undefined; // a shallow copy: the same notes and maps, read only
@@ -300,7 +304,35 @@ pub const Store = struct {
         const io = s.io;
         const t0 = clock.nowNs(io);
         const packed_notes = try lookup.lookup(idx, sc, qids, past, cap, exclude, s.long);
-        const chosen = try a.dupe(u32, packed_notes.chosen);
+        var chosen = try a.dupe(u32, packed_notes.chosen);
+        if (unknown and resolve_subjects and !past) {
+            var subjects: std.ArrayList(u32) = .empty;
+            for (sc.found.items, sc.found_weights.items) |entity, weight| {
+                if (idx.self_entity == entity or weight != 1) continue;
+                try subjects.append(a, entity);
+            }
+            // Keep linked subjects already reached by retrieval, but do not
+            // expand unbounded groups or invent an unresolved relation.
+            if (subjects.items.len > 0) {
+                for (0..2) |_| {
+                    const before = subjects.items.len;
+                    for (chosen) |place| {
+                        if (std.mem.indexOfScalar(u32, subjects.items[0..before], idx.entityAt(place)) == null) continue;
+                        const target = idx.valueEntityAt(place);
+                        if (target < 0) continue;
+                        const entity: u32 = @intCast(target);
+                        if (std.mem.indexOfScalar(u32, subjects.items, entity) == null) try subjects.append(a, entity);
+                    }
+                }
+                var keep: usize = 0;
+                for (chosen) |place| {
+                    if (std.mem.indexOfScalar(u32, subjects.items, idx.entityAt(place)) == null) continue;
+                    chosen[keep] = place;
+                    keep += 1;
+                }
+                chosen = chosen[0..keep];
+            }
+        }
         var shown = try lookup.render(idx, sc, chosen);
         const t1 = clock.nowNs(io);
         // fit(): the whole block counted by the model's tokenizer; the lowest ranked note goes while it is over the cap
@@ -320,9 +352,32 @@ pub const Store = struct {
             shown = try lookup.render(idx, sc, chosen[0..n]);
         }
         const t2 = clock.nowNs(io);
+        var block = shown.block;
+        if (unknown and resolve_subjects and !past) {
+            var resolved: std.ArrayList(u32) = .empty;
+            for (sc.found.items, sc.found_weights.items) |entity, weight| {
+                // A bare possessive can refer to an unrecognized relation
+                // ("my sister"), not the user. Do not invent self absences.
+                if (idx.self_entity == entity) continue;
+                if (weight == 1.0) try resolved.append(a, entity);
+            }
+            const question = try text.decode(a, qids);
+            const missing = try @import("notes/question_attribute.zig").missingBlock(a, idx, resolved.items, question);
+            if (missing.len > 0) {
+                const combined = try std.mem.concat(a, u8, &.{ block, if (block.len > 0) "\n" else "", missing });
+                const encoded = text.encode(a, combined, false) catch |e| switch (e) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return error.Tokenizer,
+                };
+                if (encoded.len <= cap) {
+                    block = combined;
+                    tokens = encoded.len;
+                }
+            }
+        }
         return .{
             .ids = try a.dupe(u32, shown.ids),
-            .block = try a.dupe(u8, shown.block),
+            .block = try a.dupe(u8, block),
             .tokens = tokens,
             .pack_tokens = packed_notes.tokens,
             .dropped = chosen.len - n,
