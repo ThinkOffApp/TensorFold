@@ -81,7 +81,13 @@ took from the fact (the learner's `wording.recalls`), or, for a terse reply, whe
 (in the reference and the fact, not fillers, not the question's words by stem): every name and number among them and
 half of the rest. The GB10 rerun's night 2 was rejected on "What eye colour has my dog? -> Grey (was Your dog has grey
 eyes.)", a right reply the learner's check alone refuses ("eyes" not said); `agreesWith` takes it and still refuses
-"Your dog has brown eyes." and "Your sister is called Maria." for Ana (host test). The rerun itself runs `d660eac3`.
+"Your dog has brown eyes." and "Your sister is called Maria." for Ana (host test). The rerun itself runs `d660eac3`. Since `6cc520f8`'s review (codexmb: "Not grey." and "I do not know whether grey." passed): a
+reply with a denying, doubting or choice word (not, no, n't, never, maybe, perhaps, possibly, probably, might, whether,
+or, either, neither, nor) never agrees, by either path; the terse path takes at most 8 words and refuses a reply naming
+a word of another current note that this fact and question lack ("Grey or brown.", "Brown, not grey."). This changes
+the night's acceptance judge. On the stored night-2 probe of the rerun (its only worse one) the new judge accepts
+"Grey", so that night flips to accepted (INFERRED: the probes' before replies are not stored, so whether another probe
+would then count as worse is not known).
 
 **Publishing the in-weights list.** The report and every key are staged first, then swapped in under the lock with
 the cache generation bump; a failure at any allocation leaves the old report, list and generation whole (codexmb's

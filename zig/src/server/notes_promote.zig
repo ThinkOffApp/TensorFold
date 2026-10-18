@@ -47,35 +47,7 @@ pub fn parseDuration(text: []const u8) ?i64 {
     return n * unit;
 }
 
-/// Whether `reply` gives the fact as `ref` does: the reference's answer words, or a notable fact word ("Grey").
-pub fn agreesWith(fact: []const u8, question: []const u8, ref: []const u8, reply: []const u8) bool {
-    if (wording.recalls(fact, question, ref, reply)) return true;
-    // value words (in reference and fact, not fillers, not the question's): names and numbers said, half the rest
-    var n: usize = 0;
-    var said: usize = 0;
-    var first = true;
-    var it = std.mem.tokenizeAny(u8, ref, " \t\r\n.,;:!?\"'()*_");
-    while (it.next()) |w| : (first = false) {
-        if (w.len < 2 or wording.isFiller(w) or !hasStem(fact, w) or hasStem(question, w)) continue;
-        const there = hasStem(reply, w);
-        if ((!first and std.ascii.isUpper(w[0])) or std.ascii.isDigit(w[0])) if (!there) return false;
-        n += 1;
-        said += @intFromBool(there);
-    }
-    return n > 0 and 2 * said >= n;
-}
-
-/// Whether `text` has a word of `w`'s stem (case folded; a plural s and the last letters of a long word aside).
-fn hasStem(text: []const u8, w: []const u8) bool {
-    var buf: [64]u8 = undefined;
-    if (w.len > buf.len) return std.ascii.findIgnoreCase(text, w) != null;
-    const low = std.ascii.lowerString(&buf, w);
-    const base = if (low.len > 3 and low[low.len - 1] == 's') low[0 .. low.len - 1] else low;
-    const stem = base[0..@min(base.len, @max(4, base.len -| 2))];
-    var it = std.mem.tokenizeAny(u8, text, " \t\r\n.,;:!?\"'()*_");
-    while (it.next()) |t| if (t.len >= stem.len and std.ascii.eqlIgnoreCase(t[0..stem.len], stem)) return true;
-    return false;
-}
+pub const agreesWith = @import("notes/promote_judge.zig").agreesWith;
 
 /// A note's promotion key: its write's source, or "s<id>" for a snapshot's note.
 pub fn keyOf(a: Allocator, v: ops.View) Allocator.Error![]const u8 {
@@ -273,7 +245,7 @@ pub const Promoter = struct {
         }
     }
 
-    /// One night under the learner's lock; on failure the state goes back to the file (an open night: a rebuild next).
+    /// One night under the learner's lock; on failure the state is marked to rebuild (nothing is reloaded).
     pub fn runNight(p: *Promoter) void {
         p.running.store(true, .release);
         defer p.running.store(false, .release);
@@ -281,7 +253,7 @@ pub const Promoter = struct {
         defer p.srv.teacher.learning.unlock(p.io);
         var arena: std.heap.ArenaAllocator = .init(p.gpa);
         defer arena.deinit();
-        var b: Backend = .{ .p = p };
+        var b: Backend = .{ .p = p, .arena = arena.allocator() };
         p.drainPending();
         log.line("notes promotion: night {d} begins", .{p.state.nights_done + 1});
         const n = promote.nightOrRebuild(&p.state, arena.allocator(), &b) catch |e| {
@@ -364,7 +336,7 @@ pub const Promoter = struct {
             f.alone = 0;
         }
         s.pocket = left.items;
-        var b: Backend = .{ .p = p };
+        var b: Backend = .{ .p = p, .arena = a };
         if (fail_persist) {
             out.failed = "the neurons are zeroed in the model's files but the state file was not written: the next try writes it";
         } else b.persist(s) catch {
@@ -427,6 +399,8 @@ fn clockMs(io: std.Io) i64 {
 /// The night's learner, notes and questions: the server's own (slide.teachText, slide_ask, the store's lookup).
 const Backend = struct {
     p: *Promoter,
+    arena: Allocator, // the night's
+    others: ?[]const []const u8 = null,
 
     fn srv(b: *Backend) *Server {
         return b.p.srv;
@@ -547,8 +521,21 @@ const Backend = struct {
         return if (q.len > 0 and q.len < 200 and q[q.len - 1] == '?' and std.mem.indexOfScalar(u8, q, '\n') == null) q else "";
     }
 
-    pub fn agrees(_: *Backend, fact: []const u8, question: []const u8, ref: []const u8, reply: []const u8) bool {
-        return agreesWith(fact, question, ref, reply);
+    pub fn agrees(b: *Backend, fact: []const u8, question: []const u8, ref: []const u8, reply: []const u8) bool {
+        return agreesWith(fact, question, ref, reply, b.othersOf(fact));
+    }
+
+    /// The other current notes' texts (listed once a night): a reply naming their words is not this fact's.
+    fn othersOf(b: *Backend, fact: []const u8) []const []const u8 {
+        if (b.others == null) {
+            const list = ops.list(b.p.store, b.arena, false) catch return &.{};
+            var out: std.ArrayList([]const u8) = .empty;
+            for (list) |v| out.append(b.arena, v.text) catch return &.{};
+            b.others = out.items;
+        }
+        var out: std.ArrayList([]const u8) = .empty;
+        for (b.others.?) |t| if (!std.mem.eql(u8, t, fact)) out.append(b.arena, t) catch return b.others.?;
+        return out.items;
     }
 
     /// Whether a control's changed reply still says nothing new, as the learner's own judge decides.
