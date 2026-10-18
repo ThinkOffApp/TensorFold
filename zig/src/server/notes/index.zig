@@ -225,6 +225,7 @@ pub const Index = struct {
     rank_by_note: bool = false, // rankAt() from each note's told and place (every one fits), else own_trank
     lazy_value: std.AutoHashMapUnmanaged(u32, []const u32) = .empty, // sa: written notes no model value names: tokens
     names_from: [3]u32 = .{ 0, 0, 0 },
+    reaper: ?*@import("bounded.zig").Reaper = null, // frees this layered version's core off the caller's thread
     alias_candidates_off: bool = false, // a lookup view that reads no alias candidates (notes_decode.zig's) // entity_names, attribute_names, pair_attributes start at these numbers
 
     pub fn notes(self: *const Index) usize {
@@ -352,8 +353,15 @@ pub const Index = struct {
     /// Drops one reference; the last frees the index (a layered version's core goes with its last version).
     pub fn deinit(self: *Index) void {
         if (self.refs.fetchSub(1, .acq_rel) != 1) return;
+        self.destroy();
+    }
+
+    /// Frees it now (its last reference gone); a layered version's core goes to `reaper` when it has one.
+    pub fn destroy(self: *Index) void {
         const gpa = self.arena.child;
-        if (self.layer.core) |c| c.deinit() else if (self.base) |b| b.release();
+        if (self.layer.core) |c| {
+            if (self.reaper) |r| r.drop(c) else c.deinit();
+        } else if (self.base) |b| b.release();
         self.arena.deinit();
         if (self.owned) |m| m.deinit();
         gpa.destroy(self);

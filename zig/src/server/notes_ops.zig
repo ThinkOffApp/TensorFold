@@ -231,6 +231,7 @@ pub fn erase(s: *Store, a: Allocator, id: u32, why: *Refusal) Error!Erased {
         return .{ .removed = removed.items, .moved = moved.items };
     }
     s.reclaim(true);
+    s.bw.reaper.join(); // an old core is freed (zeroed) on its own thread: done before the erase answers
     old.deinit();
     s.sweep();
     s.text.forget(); // the tokenizer's kept encodes: a block or a prompt that quoted it

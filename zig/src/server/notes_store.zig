@@ -175,7 +175,9 @@ pub const Store = struct {
             return e;
         };
         errdefer idx.deinit();
-        try @import("notes/alias.zig").populate(idx, m, text);
+        s.bw.alias_memo.gpa = s.gpa;
+        errdefer s.bw.alias_memo.deinit(s.gpa);
+        try @import("notes/alias.zig").populateMemo(idx, m, text, &s.bw.alias_memo); // read once, kept for writes
         const v = try gpa.create(Version);
         v.* = .{ .idx = idx };
         s.current = v;
@@ -208,6 +210,7 @@ pub const Store = struct {
         for (s.retired.items) |v| freeVersion(s.gpa, v);
         s.retired.deinit(s.gpa);
         freeVersion(s.gpa, s.current);
+        s.bw.reaper.join(); // the cores those versions let go, freed on their own threads
         for (s.parked.items) |m| m.deinit();
         s.parked.deinit(s.gpa);
         s.log.deinit();
@@ -392,6 +395,7 @@ pub const Store = struct {
         s.bw.core_retired.clearRetainingCapacity();
         if (s.parked.items.len > 0) { // what a deferred erase left: freed as an erase frees it
             s.reclaim(true);
+            s.bw.reaper.join();
             for (s.parked.items) |m| m.deinit();
             s.parked.clearRetainingCapacity();
             s.sweep();

@@ -217,7 +217,7 @@ fn walkIndex(r: *Report, idx: *const index.Index, m: *const model_mod.Model) !vo
     const n = idx.notes();
     const ne = m.entities.items.len;
     const u = exactUse(idx.arena);
-    const cols = n * (@sizeOf(u32) * 5 + @sizeOf(index.State) + @sizeOf(i64) + @sizeOf(i32));
+    const cols = n * (@sizeOf(u32) * 4 + @sizeOf(index.State) + @sizeOf(i64) + @sizeOf(i32)) + idx.own_trank.len * 4; // the tie rank: by the note itself unless the store is out of its range
     const lines: usize = n * @sizeOf([]const u8); // slices of the model's lines: the bytes are counted there
     const id_place = idx.own_id_place.len * 4;
     try r.add("notes", "index: per-note columns (id, state, told, rank, entity, pair, value, cost)", cols, "measured");

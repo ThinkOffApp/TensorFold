@@ -56,15 +56,18 @@ pub const Memo = struct {
     by_key: std.AutoHashMapUnmanaged(Key, std.ArrayList(u32)) = .empty, // alias keys -> indexes into names, ascending
     by_place: std.AutoHashMapUnmanaged(u32, u32) = .empty, // a name fact's place -> its index into names
     temp: bool = false, // populate()'s own, for one build
+    gpa: ?std.mem.Allocator = null, // what its lists are made with (the first caller's index allocator unless set)
 
-    pub fn deinit(m: *Memo, g: std.mem.Allocator) void {
+    pub fn deinit(m: *Memo, g0: std.mem.Allocator) void {
+        const g = m.gpa orelse g0;
+        const keep = m.gpa;
         m.self.deinit(g);
         m.names.deinit(g);
         var it = m.by_key.valueIterator();
         while (it.next()) |l| l.deinit(g);
         m.by_key.deinit(g);
         m.by_place.deinit(g);
-        m.* = .{ .temp = m.temp };
+        m.* = .{ .temp = m.temp, .gpa = keep };
     }
 
     fn reset(m: *Memo, g: std.mem.Allocator, model: *const anyopaque) void {
@@ -111,7 +114,8 @@ pub fn populate(idx: anytype, model: anytype, text: anytype) !void {
 /// A layered version (idx.layer.core set) gets only the keys its delta touched: the name facts written or retired
 /// since its core, and the first-person words when "me" came after the core; the rest it reads from its core.
 pub fn populateMemo(idx: anytype, model: anytype, text: anytype, memo: *Memo) !void {
-    const g = idx.arena.child;
+    if (memo.gpa == null) memo.gpa = idx.arena.child;
+    const g = memo.gpa.?;
     const a = idx.arena.allocator();
     if (memo.model != @as(*const anyopaque, model)) memo.reset(g, model);
     const n_notes = model.notes.items.len;

@@ -11,6 +11,34 @@ const merge_mod = @import("merge.zig");
 const alias = @import("alias.zig");
 const clock = @import("../clock.zig");
 
+/// Frees a core whose last version went, on a thread of its own: a core is the whole store's columns and suffix
+/// arrays, and the store's allocator zeroes what it frees, so freeing one in a write would write out the store.
+pub const Reaper = struct {
+    gpa: std.mem.Allocator = undefined,
+    live: std.atomic.Value(u32) = .init(0), // frees under way
+
+    /// One reference of `c` dropped; the last frees it on a new (detached) thread, inline if none can be made.
+    pub fn drop(r: *Reaper, c: *index.Index) void {
+        if (c.refs.fetchSub(1, .acq_rel) != 1) return;
+        _ = r.live.fetchAdd(1, .acq_rel);
+        const t = std.Thread.spawn(.{}, free, .{ r, c }) catch {
+            _ = r.live.fetchSub(1, .acq_rel);
+            return c.destroy();
+        };
+        t.detach();
+    }
+
+    fn free(r: *Reaper, c: *index.Index) void {
+        c.destroy();
+        _ = r.live.fetchSub(1, .acq_rel);
+    }
+
+    /// Waits until every free begun is done (an erase that must say the old versions are gone; the store's end).
+    pub fn join(r: *Reaper) void {
+        while (r.live.load(.acquire) != 0) std.Thread.yield() catch {};
+    }
+};
+
 /// A merge's core, not yet read by any version, and how many retired places were listed when the merge began.
 const Pending = struct { core: *index.Index, mark: usize };
 
@@ -24,7 +52,9 @@ pub const Writes = struct {
     waits: u64 = 0, // writes that waited at the hard limit, and their wait in all
     wait_ns: u64 = 0,
     alias_memo: alias.Memo = .{}, // the name facts' encoded aliases, kept between versions
+    reaper: Reaper = .{}, // frees retired cores off the writer's thread
 
+    /// The store's end: the merge stopped first; the reaper waited for at the very end (finish()).
     pub fn deinit(w: *Writes, s: anytype) void {
         w.stop();
         w.core_retired.deinit(s.gpa);
@@ -98,6 +128,10 @@ pub fn full(s: anytype) !*@TypeOf(s.*.current.*) {
 
 fn wrap(s: anytype, idx: *index.Index) !*@TypeOf(s.*.current.*) {
     errdefer idx.deinit();
+    if (idx.layer.core != null) {
+        s.bw.reaper.gpa = s.gpa;
+        idx.reaper = &s.bw.reaper;
+    }
     try alias.populateMemo(idx, s.model, s.text, &s.bw.alias_memo);
     const v = try s.gpa.create(@TypeOf(s.*.current.*));
     v.* = .{ .idx = idx };

@@ -106,6 +106,7 @@ pub fn main(init: std.process.Init) !u8 {
         var merge_write_ns: std.ArrayList(u64) = .empty; // a write whose version is on a new core (made here or on a thread)
         var start_ns: std.ArrayList(u64) = .empty; // a write that began a merge on its own thread
         var during_ns: std.ArrayList(u64) = .empty; // a write made while a merge ran on its thread
+        var slow: [5][3]u64 = @splat(.{ 0, 0, 0 }); // the slowest writes: ns, index, merges before it
         var all_ns: std.ArrayList(u64) = .empty;
         var vbuild_ns: std.ArrayList(u64) = .empty;
         var why: ops.Refusal = .{};
@@ -127,6 +128,14 @@ pub fn main(init: std.process.Init) !u8 {
             const ns = now(io) - t0;
             try all_ns.append(a, ns);
             if (was_merging) try during_ns.append(a, ns);
+            if (ns > slow[4][0]) {
+                slow[4] = .{ ns, k, merges };
+                std.sort.insertion([3]u64, &slow, {}, struct {
+                    fn gt(_: void, x: [3]u64, y: [3]u64) bool {
+                        return x[0] > y[0];
+                    }
+                }.gt);
+            }
             try (if (store.merges != merges) &merge_write_ns else if (!was_merging and store.bw.merging != null) &start_ns else &write_ns).append(a, ns);
             if (k % 50 == 25) { // the version build alone, at this point (the write's own share of its time)
                 const t1 = now(io);
@@ -172,6 +181,7 @@ pub fn main(init: std.process.Init) !u8 {
         try o.print(",\"lookup_us\":{{\"p50\":{d:.1},\"p95\":{d:.1},\"inner_p50\":{d:.1},\"inner_p95\":{d:.1},\"n\":{d},\"digest\":\"{x}\"}}", .{ pct(t_load.items, 50), pct(t_load.items, 95), pct(i_load.items, 50), pct(i_load.items, 95), t_load.items.len, d_load });
         try o.print(",\"write_ms\":{{\"p50\":{d:.2},\"p95\":{d:.2},\"n\":{d}}},\"merge_write_ms\":{{\"p50\":{d:.2},\"max\":{d:.2},\"n\":{d}}}", .{ pct(write_ns.items, 50) / 1e3, pct(write_ns.items, 95) / 1e3, write_ns.items.len, pct(merge_write_ns.items, 50) / 1e3, pct(merge_write_ns.items, 100) / 1e3, merge_write_ns.items.len });
         try o.print(",\"during_merge_ms\":{{\"p50\":{d:.2},\"p99\":{d:.2},\"max\":{d:.2},\"n\":{d}}}", .{ pct(during_ns.items, 50) / 1e3, pct(during_ns.items, 99) / 1e3, pct(during_ns.items, 100) / 1e3, during_ns.items.len });
+        try o.print(",\"slowest\":[[{d:.2},{d},{d}],[{d:.2},{d},{d}],[{d:.2},{d},{d}]]", .{ @as(f64, @floatFromInt(slow[0][0])) / 1e6, slow[0][1], slow[0][2], @as(f64, @floatFromInt(slow[1][0])) / 1e6, slow[1][1], slow[1][2], @as(f64, @floatFromInt(slow[2][0])) / 1e6, slow[2][1], slow[2][2] });
         try o.print(",\"merge_start_ms\":{{\"p50\":{d:.2},\"max\":{d:.2},\"n\":{d}}}", .{ pct(start_ns.items, 50) / 1e3, pct(start_ns.items, 100) / 1e3, start_ns.items.len });
         try o.print(",\"all_writes_ms\":{{\"p50\":{d:.2},\"p95\":{d:.2},\"p99\":{d:.2},\"max\":{d:.2},\"n\":{d}}}", .{ pct(all_ns.items, 50) / 1e3, pct(all_ns.items, 95) / 1e3, pct(all_ns.items, 99) / 1e3, pct(all_ns.items, 100) / 1e3, all_ns.items.len });
         try o.print(",\"version_build_ms\":{{\"p50\":{d:.2},\"p95\":{d:.2},\"n\":{d}}}", .{ pct(vbuild_ns.items, 50) / 1e3, pct(vbuild_ns.items, 95) / 1e3, vbuild_ns.items.len });

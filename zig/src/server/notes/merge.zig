@@ -1,6 +1,8 @@
 //! A merge off the writer's path: a new suffix-array core built on its own thread from one published version.
-//! The version is immutable and held (its readers count, as a lookup holds one), so the merge reads a consistent
-//! snapshot while writes go on; nothing of the writer's model is copied or read (core_build.zig).
+//! The version is immutable and its index held (a reference, as a layered version holds its core), so the merge
+//! reads a consistent snapshot while writes go on; nothing of the writer's model is copied or read
+//! (core_build.zig). The version itself is not held: the lines it replaced may go with it as usual, since the new
+//! core keeps only their slices for places retired since, which the versions on it read from their own overrides.
 const std = @import("std");
 const index = @import("index.zig");
 const core_build = @import("core_build.zig");
@@ -12,20 +14,18 @@ pub var hold: std.atomic.Value(bool) = .init(false);
 /// One merge in flight: the version it reads, and the core it made once `done`.
 pub const Job = struct {
     gpa: Allocator,
-    from: *const index.Index, // the version merged: held through `readers` until finish()
-    readers: *std.atomic.Value(u32),
+    from: *index.Index, // the version's index, retained until finish()
     mark: usize, // how many retired places the store had listed then: the ones after it are the new core's
     thread: std.Thread = undefined,
     done: std.atomic.Value(bool) = .init(false),
     result: ?*index.Index = null,
 
-    /// Starts a merge of version `v` (a layered one), held by one reader taken here. O(1) for the caller.
+    /// Starts a merge of version `v` (a layered one), its index retained here. O(1) for the caller.
     pub fn start(gpa: Allocator, v: anytype, mark: usize) !*Job {
         const j = try gpa.create(Job);
         errdefer gpa.destroy(j);
-        _ = v.readers.fetchAdd(1, .acquire);
-        errdefer _ = v.readers.fetchSub(1, .release);
-        j.* = .{ .gpa = gpa, .from = v.idx, .readers = &v.readers, .mark = mark };
+        j.* = .{ .gpa = gpa, .from = v.idx.retain(), .mark = mark };
+        errdefer j.from.deinit();
         j.thread = try std.Thread.spawn(.{}, run, .{j});
         return j;
     }
@@ -44,7 +44,7 @@ pub const Job = struct {
     pub fn finish(j: *Job) ?*index.Index {
         j.thread.join();
         const r = j.result;
-        _ = j.readers.fetchSub(1, .release);
+        j.from.deinit();
         j.gpa.destroy(j);
         return r;
     }
