@@ -5,6 +5,7 @@ const http_body = @import("http_body.zig");
 const ops = @import("notes_ops.zig");
 const write = @import("notes/write.zig");
 const index = @import("notes/index.zig");
+const places = @import("notes_erase_places.zig");
 const Server = @import("server.zig").Server;
 const Conn = @import("http_conn.zig").Conn;
 const Value = json.Value;
@@ -192,15 +193,25 @@ fn erasedValue(srv: *Server, a: Allocator, id: u32, e: ops.Erased) Allocator.Err
         slot.* = .{ .object = x };
     }
     try o.put(a, "renumbered", .{ .array = moved });
-    // the store's own structures and the journal hold it no more; the engine's prompt cache is out of its reach
-    const cached = srv.info.prompt_cache;
-    try o.put(a, "complete", .{ .bool = !cached });
-    var remaining: []Value = &.{};
-    if (cached) {
-        remaining = try a.alloc(Value, 1);
-        remaining[0] = .{ .string = "the engine's prompt cache may still hold prompts that carried this note's block; serve with --prompt-cache-gib 0 for an erase that reaches every cache" };
+    // the store's own structures and the journal hold it no more; every other place that may is named, and only
+    // when none may is the erase complete
+    const status = places.check(srv, places.forget(srv, a, e.texts));
+    var remaining: std.ArrayList(Value) = .empty;
+    var names: std.ArrayList(Value) = .empty;
+    const checked = try json.newObject(a);
+    for (std.enums.values(places.Place)) |p| {
+        const st = status.get(p);
+        try checked.put(a, @tagName(p), .{ .string = @tagName(st) });
+        if (st != .may_hold) continue;
+        try remaining.append(a, .{ .string = p.why() });
+        try names.append(a, .{ .string = @tagName(p) });
     }
-    try o.put(a, "remaining", .{ .array = remaining });
+    // complete only when every place is shown clear; else pending, with each place that is not named
+    try o.put(a, "complete", .{ .bool = remaining.items.len == 0 });
+    try o.put(a, "state", .{ .string = if (remaining.items.len == 0) "complete" else "pending" });
+    try o.put(a, "remaining", .{ .array = remaining.items });
+    try o.put(a, "remaining_places", .{ .array = names.items });
+    try o.put(a, "places", .{ .object = checked });
     return .{ .object = o };
 }
 

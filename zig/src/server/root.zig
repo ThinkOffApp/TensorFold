@@ -100,6 +100,9 @@ test {
     _ = @import("notes_live_test.zig");
     _ = @import("notes_http_test.zig");
     _ = @import("notes_erase_test.zig");
+    _ = @import("notes_erase_places_test.zig");
+    _ = @import("notes_erase_cache_test.zig");
+    _ = @import("notes_erase_span_test.zig");
     _ = @import("notes_alloc_test.zig");
     _ = @import("notes_journal_test.zig");
     _ = @import("notes_auto_test.zig");

@@ -110,6 +110,22 @@ pub const Entry = struct {
     branched: bool = false, // resumed again after a later prompt kept a longer state extending it: never superseded
 };
 
+/// What a forget of a token span did: the kept and learned states it removed, and what it could not reach.
+pub const Forgotten = struct {
+    states: u32 = 0, // kept states whose tokens held the span: dropped, their tokens zeroed
+    scrubbed: u32 = 0, // kept states that did not, but whose last prompt did: that prompt replaced by their own tokens
+    learned: u32 = 0, // learned states on disk (--learn) whose tokens held it: files and index records removed
+    held: u32 = 0, // kept states a running prompt pass is restoring: left in place, a later forget takes them
+    failed: u32 = 0, // learned states whose files or index record could not be removed, or a folder sync that failed
+    in_flight: u32 = 0, // requests queued or running whose prompt holds the span (the engine counts them)
+    disk: bool = false, // the learned states' index (--learn) was searched: false when this store keeps none on disk
+
+    /// Nothing the engine keeps holds the span any more, and no request carrying it is still running.
+    pub fn complete(f: Forgotten) bool {
+        return f.held == 0 and f.failed == 0 and f.in_flight == 0;
+    }
+};
+
 pub const Counts = struct { hits: u64 = 0, misses: u64 = 0, kept: u64 = 0, evicted: u64 = 0, refused: u64 = 0, failed: u64 = 0 };
 
 /// Where a prompt pass starts and where it stops to keep its state (marks sorted, in `a`).
@@ -311,6 +327,42 @@ pub const Store = struct {
             s.counts.failed += 1;
             return s.remove(i);
         };
+    }
+
+    /// Every kept state whose tokens hold `span` dropped (but `held`), every last prompt holding it replaced, and every
+    /// learned state on disk whose tokens hold it removed: an erased note's tokens, out of the cache. An empty span
+    /// forgets nothing.
+    pub fn forgetSpan(s: *Store, span: []const u32, held: []const *const Entry) Forgotten {
+        var out: Forgotten = .{};
+        if (span.len == 0) return out;
+        var i = s.entries.items.len;
+        while (i > 0) {
+            i -= 1;
+            const e = s.entries.items[i];
+            if (std.mem.indexOf(u32, e.tokens, span) == null) {
+                if (std.mem.indexOf(u32, e.last, span) == null) continue;
+                const own = s.gpa.dupe(u32, e.tokens) catch @constCast(@as([]const u32, &.{})); // out of memory: an empty last prompt only loses a mark
+                std.crypto.secureZero(u32, e.last);
+                s.gpa.free(e.last);
+                e.last = own;
+                out.scrubbed += 1;
+                continue;
+            }
+            if (std.mem.indexOfScalar(*const Entry, held, e) != null) {
+                out.held += 1;
+                continue;
+            }
+            if (std.mem.indexOfScalar(u64, s.shared_keys.items, sharedKey(e.tokens))) |k| _ = s.shared_keys.orderedRemove(k);
+            std.crypto.secureZero(u32, e.tokens);
+            std.crypto.secureZero(u32, e.last);
+            s.remove(i);
+            out.states += 1;
+        }
+        if (s.imprint) |im| {
+            learned.forget(s, im, span, &out);
+            out.disk = true;
+        }
+        return out;
     }
 
     fn sharedKey(tokens: []const u32) u64 {
@@ -581,6 +633,7 @@ test {
     _ = @import("prompt_cache_rewind_test.zig");
     _ = @import("prompt_cache_branch_test.zig");
     _ = @import("prompt_cache_give_test.zig");
+    _ = @import("prompt_cache_forget_test.zig");
     _ = @import("learned_fault_test.zig");
     _ = modes;
 }

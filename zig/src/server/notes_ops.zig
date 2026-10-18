@@ -145,6 +145,9 @@ pub fn perform(s: *Store, a: Allocator, ask: Ask, why: *Refusal) Error!Written {
 pub const Erased = struct {
     removed: []const []const u8,
     moved: []const [2]u32,
+    /// The text of every note the removed writes made, copied out before the old model was freed: what the engine's
+    /// prompt cache is told to forget, as the notes block quoted it.
+    texts: []const []const u8 = &.{},
 };
 
 /// Erase = never taught: the store rebuilt from the snapshot and the journal without the note's write (LLWZ 4.5).
@@ -206,6 +209,11 @@ pub fn erase(s: *Store, a: Allocator, id: u32, why: *Refusal) Error!Erased {
     for (old.notes.items[old.base_notes..]) |*n| if (fresh.placeOfSource(n.source().?)) |q| {
         if (fresh.notes.items[q].id != n.id) try moved.append(a, .{ n.id, fresh.notes.items[q].id });
     };
+    var texts: std.ArrayList([]const u8) = .empty;
+    for (old.notes.items[old.base_notes..]) |*n| for (removed.items) |src| if (std.mem.eql(u8, n.source().?, src)) {
+        try texts.append(a, try a.dupe(u8, n.text()));
+        break;
+    };
     var unsynced = false;
     s.journal.?.rewrite(a, kept.items, log.next_source) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -228,7 +236,7 @@ pub fn erase(s: *Store, a: Allocator, id: u32, why: *Refusal) Error!Erased {
         // the negative control of the erase tests: the note hidden now, its bytes left to a later merge
         s.parked.append(s.gpa, old) catch old.deinit();
         if (unsynced) return refuse(why, 500, erase_unsynced); // as below: applied, the disk state unknown
-        return .{ .removed = removed.items, .moved = moved.items };
+        return .{ .removed = removed.items, .moved = moved.items, .texts = texts.items };
     }
     s.reclaim(true);
     s.bw.reaper.join(); // an old core is freed (zeroed) on its own thread: done before the erase answers
@@ -236,7 +244,7 @@ pub fn erase(s: *Store, a: Allocator, id: u32, why: *Refusal) Error!Erased {
     s.sweep();
     s.text.forget(); // the tokenizer's kept encodes: a block or a prompt that quoted it
     if (unsynced) return refuse(why, 500, erase_unsynced); // the journal is poisoned: writes stop until a restart
-    return .{ .removed = removed.items, .moved = moved.items };
+    return .{ .removed = removed.items, .moved = moved.items, .texts = texts.items };
 }
 
 /// The snapshot as at startup: its file read again (and checked against the journal's hash), or the kept bytes.

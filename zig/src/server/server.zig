@@ -56,6 +56,10 @@ pub const Config = struct {
     compact_keep: ?u32 = null,
     /// Directory of the stored note, or null when notes are not stored.
     compact_memory: ?[]const u8 = null,
+    /// --learn (or --learn-dir, --learn-gib): the engine keeps shared prompt states on disk.
+    learn: bool = false,
+    /// --slide: Sliding Weights learns what it is taught into the served weights.
+    slide: bool = false,
     /// --slide-graph: the file holding the Sliding Weights fact graph; null keeps the graph in memory.
     slide_graph: ?[]const u8 = null,
     /// --cortheon: Cortheon's program and server-run web research for chat requests; off changes no reply.

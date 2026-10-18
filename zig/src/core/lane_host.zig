@@ -8,6 +8,7 @@ const learn = @import("lane_host_learn.zig");
 const lone = @import("lane_host_lone.zig");
 const fill = @import("lane_host_fill.zig");
 const admit = @import("lane_host_admit.zig");
+const prompt_forget = @import("prompt_forget.zig");
 const Allocator = std.mem.Allocator;
 const Id = api.Id;
 const Request = api.Request;
@@ -47,6 +48,7 @@ pub const LaneHost = struct {
     explain: ?api.Explain = null, // the backend's words for a request it refuses; null: the error's name
     learner: ?api.Learner = null, // the family's Sliding Weights learner; null: learn requests are refused
     lessons: std.ArrayList(Lesson) = .empty, // learn requests waiting for an idle engine
+    forgets: prompt_forget.Queue = .{}, // forget_prompts calls waiting for the engine thread, run between rounds
     lesson_open: bool = false, // the learner holds a begun job (engine thread only)
     admissions: u64 = 0, // jobs admitted so far: each job's `seq`
     memory_lanes: ?usize = null, // lanes the backend had memory for at its last LaneMemory, until a job ends
@@ -109,6 +111,9 @@ pub const LaneHost = struct {
         h.mutex.unlock(h.io);
         if (h.thread) |t| t.join();
         h.thread = null;
+        h.lock();
+        h.forgets.close(h.gpa, h.io); // a forget asked after the thread's last pass: refused
+        h.unlock();
         const closed: api.LearnEvent = .{ .done = .{ .message = "the engine closed" } };
         for (h.lessons.items) |l| l.sink.event(l.sink.ctx, &closed);
         h.lessons.deinit(h.gpa);
@@ -121,7 +126,47 @@ pub const LaneHost = struct {
     }
 
     pub fn engine(h: *LaneHost) Engine {
-        return .{ .ctx = h, .vtable = &.{ .info = infoFn, .submit = submitFn, .cancel = cancelFn, .status = status.read, .memory = memoryFn, .keepalive = keepaliveFn, .learn = learn.submit } };
+        return .{ .ctx = h, .vtable = &.{ .info = infoFn, .submit = submitFn, .cancel = cancelFn, .status = status.read, .memory = memoryFn, .keepalive = keepaliveFn, .learn = learn.submit, .forget_prompts = forgetFn } };
+    }
+
+    /// Engine.forget_prompts: queued for the engine thread, which runs it before its next round.
+    fn forgetFn(ctx: *anyopaque, span: []const u32) api.ForgetError!pc.Forgotten {
+        const h = self(ctx);
+        h.lock();
+        defer h.unlock();
+        if (h.closing) return error.Closed;
+        return h.forgets.ask(h.gpa, h.io, &h.mutex, &h.wake, span);
+    }
+
+    /// Runs the forgets asked since the last round (engine thread): a state a prompt pass still restores stays, counted.
+    fn takeForgets(h: *LaneHost) void {
+        h.lock();
+        if (!h.forgets.pending()) return h.unlock();
+        var asks = h.forgets.take();
+        var held: std.ArrayList(*const pc.Entry) = .empty;
+        const room = if (held.ensureTotalCapacity(h.gpa, h.admitted.items.len)) |_| true else |_| false;
+        if (room) for (h.admitted.items) |job| if (job.entry) |e| held.appendAssumeCapacity(e);
+        for (asks.items) |ask| {
+            ask.out = .{};
+            for (h.queued.items) |job| if (prompt_forget.carries(job.request.prompt, ask.span)) {
+                ask.out.in_flight += 1;
+            };
+            for (h.admitted.items) |job| if (prompt_forget.carries(job.request.prompt, ask.span)) {
+                ask.out.in_flight += 1;
+            };
+        }
+        h.unlock();
+        for (asks.items) |ask| {
+            const in_flight = ask.out.in_flight;
+            // without room for the held list nothing is dropped: a state being restored must not be freed
+            ask.out = if (!room) .{ .held = 1 } else if (h.cache) |store| store.forgetSpan(ask.span, held.items) else .{};
+            ask.out.in_flight = in_flight;
+        }
+        h.lock();
+        h.forgets.answer(h.io, asks.items);
+        h.unlock();
+        asks.deinit(h.gpa);
+        held.deinit(h.gpa);
     }
 
     /// The family's queue as a keepalive target, when it set one.
@@ -494,6 +539,7 @@ pub const LaneHost = struct {
     fn run(h: *LaneHost) void {
         while (true) {
             h.takeCancels();
+            h.takeForgets();
             while (h.admitOne()) {}
             h.fillOne();
             status.noteLive(h);
@@ -519,7 +565,7 @@ pub const LaneHost = struct {
                     learn.step(h);
                     continue;
                 }
-                if (h.cancels.items.len == 0 and (h.queued.items.len == 0 or h.admitted.items.len >= h.info_.lanes))
+                if (h.cancels.items.len == 0 and !h.forgets.pending() and (h.queued.items.len == 0 or h.admitted.items.len >= h.info_.lanes))
                     h.wake.waitTimeout(h.io, &h.mutex, .{ .duration = .{ .raw = .fromMilliseconds(100), .clock = .awake } }) catch {};
                 h.unlock();
                 continue;
@@ -564,6 +610,25 @@ pub const LaneHost = struct {
         h.takeCancels();
     }
 };
+
+test "forget with an active cache entry and no memory for held entries stays incomplete" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var h: LaneHost = .{ .gpa = failing.allocator(), .io = std.testing.io, .core = undefined, .info_ = .{} };
+    const request: Request = .{ .prompt = &.{ 50, 51 }, .max_tokens = 1 };
+    var entry: pc.Entry = undefined;
+    var job: LaneHost.Job = .{ .host = &h, .id = 1, .request = &request, .sink = undefined, .entry = &entry };
+    try h.admitted.append(std.testing.allocator, &job);
+    defer h.admitted.deinit(std.testing.allocator);
+    var ask: prompt_forget.Ask = .{ .span = &.{ 50, 51 } };
+    try h.forgets.asks.append(std.testing.allocator, &ask);
+    defer h.forgets.close(std.testing.allocator, std.testing.io);
+    h.takeForgets();
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expect(ask.done);
+    try std.testing.expectEqual(@as(u32, 1), ask.out.held);
+    try std.testing.expectEqual(@as(u32, 1), ask.out.in_flight);
+    try std.testing.expect(!ask.out.complete());
+}
 
 /// The prompt length a request's kept states count as: its own, or for a warm pass the request whose reply it prefills.
 fn born(r: *const Request) u32 {
