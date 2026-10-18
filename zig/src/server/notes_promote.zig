@@ -84,6 +84,7 @@ pub const Promoter = struct {
     running: std.atomic.Value(bool) = .init(false),
     thread: ?std.Thread = null,
     last_end_ms: i64 = 0,
+    publish_pending: bool = false, // the in-weights list and report lag the state: refreshed at the next try
 
     /// The promoter for `store`, its state read from SNAPSHOT.promote when there is one; the thread not started.
     pub fn init(gpa: Allocator, io: std.Io, srv: *Server, store: *Store, snapshot: []const u8, o: Options, problem: *[]const u8) !*Promoter {
@@ -104,7 +105,7 @@ pub const Promoter = struct {
             return e;
         }
         p.* = .{ .gpa = gpa, .io = io, .srv = srv, .store = store, .path = path, .every_ms = o.every_ms, .state = state, .nights_done = state.nights_done, .last_end_ms = clockMs(io) };
-        try p.publish();
+        _ = p.tryPublish(); // a failure leaves it marked: the start's first step refreshes it
         return p;
     }
 
@@ -136,6 +137,13 @@ pub const Promoter = struct {
         while (it.next()) |k| p.gpa.free(k.*);
         p.cache_keys.clearRetainingCapacity();
         p.cache_excl.clearRetainingCapacity();
+    }
+
+    /// publish(), its failure kept in `publish_pending` (every caller goes through here, the test switch too).
+    fn tryPublish(p: *Promoter) bool {
+        const ok = if (fail_publish) false else if (p.publish()) |_| true else |_| false;
+        p.publish_pending = !ok;
+        return ok;
     }
 
     /// The report and the in-weights keys from the state, for the hooks and GET /v1/promotion.
@@ -244,7 +252,7 @@ pub const Promoter = struct {
         if (n.worse_list.len > 0) log.line("notes promotion: night {d}: worse: {s}", .{ n.night, n.worse_list });
         log.line("notes promotion: night {d}: {d} due, {d} stale, plan {s} ({d} tried, {d} rejected), {d} taught ({d} kept, {d} missed), {d} worse of {d} probes; alone {d} of {d} right, {d} left the prompt, {d} back; {d} in weights, {d} in the pocket; {d} asks in {d:.1} s", .{ n.night, n.due, n.stale, n.plan, n.tries, n.rejected, n.taught, n.kept, n.missed, n.worse, n.probes, n.alone_right, n.alone_asked, n.left_prompt, n.back_to_prompt, n.in_weights, n.pocket, n.asks, n.secs });
         p.compact();
-        p.publish() catch {};
+        _ = p.tryPublish();
         p.drainPending();
     }
 
@@ -288,7 +296,11 @@ pub const Promoter = struct {
             gone.appendSlice(a, f.neurons) catch return .{ .failed = "out of memory" };
             targets.append(a, f) catch return .{ .failed = "out of memory" };
         };
-        if (targets.items.len == 0) return out;
+        if (targets.items.len == 0) {
+            // nothing left to zero, but an in-weights list an earlier try could not refresh is refreshed now
+            if (p.publish_pending and !p.tryPublish()) out.failed = "the in-weights list could not be refreshed: the next try refreshes it";
+            return out;
+        }
         out.facts = targets.items.len;
         out.neurons = gone.items.len;
         if (gone.items.len > 0 and !slide.retire(p.srv, a, gone.items)) {
@@ -296,9 +308,12 @@ pub const Promoter = struct {
             log.line("notes promotion: {s}", .{out.failed.?});
             return out;
         }
-        // zeroed and saved in the model's files: now the state lets them go
+        // zeroed and saved in the model's files: now the state lets them go, the old values kept to put back
         var left: std.ArrayList(promote.Neuron) = .empty;
         for (s.pocket) |n| if (!promote.has(gone.items, n)) left.append(s.alloc(), n) catch return .{ .failed = "out of memory" };
+        var was: std.ArrayList(promote.Fact) = .empty;
+        for (targets.items) |f| was.append(a, f.*) catch return .{ .failed = "out of memory" };
+        const old_pocket = s.pocket;
         for (targets.items) |f| {
             f.status = .freed;
             f.why = "erased: the note is gone and its neurons were zeroed";
@@ -313,16 +328,14 @@ pub const Promoter = struct {
         } else b.persist(s) catch {
             out.failed = "the neurons are zeroed in the model's files but the state file was not written: the next try writes it";
         };
-        if (out.failed == null) {
-            if (fail_publish) {
-                out.failed = "the state is written but the in-weights list was not refreshed: the next try refreshes it";
-            } else p.publish() catch {
-                out.failed = "the state is written but the in-weights list was not refreshed: the next try refreshes it";
-            };
-        }
         if (out.failed != null) {
-            // not durable: the state on file, still holding these facts, comes back for the next try
-            p.reload();
+            // not durable: the facts and the pocket as the file still has them, put back without allocating
+            for (targets.items, was.items) |f, w| f.* = w;
+            s.pocket = old_pocket;
+            log.line("notes promotion: {s}", .{out.failed.?});
+        } else if (!p.tryPublish()) {
+            // durable on file; only the in-memory list lags, and it stays marked until a refresh succeeds
+            out.failed = "the state is written but the in-weights list was not refreshed: the next try refreshes it";
             log.line("notes promotion: {s}", .{out.failed.?});
         }
         out.ms = clockMs(p.io) - t0;
@@ -353,7 +366,7 @@ pub const Promoter = struct {
         const back = pjson.decode(p.gpa, bytes, p.state.settings) catch return;
         p.state.deinit();
         p.state = back;
-        p.publish() catch {};
+        _ = p.tryPublish();
     }
 
     /// GET /v1/promotion: the state as last written, and whether a night runs; POST: a night now.
@@ -365,7 +378,7 @@ pub const Promoter = struct {
             return conn.sendJson(202, "{\"started\": true}");
         }
         p.mu.lockUncancelable(p.io);
-        const body = std.fmt.allocPrint(a, "{{\"running\": {s}, \"every_s\": {d}, \"state\": {s}}}", .{ if (p.running.load(.acquire)) "true" else "false", @divTrunc(p.every_ms, 1000), p.report }) catch {
+        const body = std.fmt.allocPrint(a, "{{\"running\": {s}, \"every_s\": {d}, \"state\": {s}}}", .{ if (p.running.load(.acquire)) "true" else "false", @divTrunc(p.every_ms, 1000), if (p.report.len > 0) p.report else "null" }) catch {
             p.mu.unlock(p.io);
             return;
         };

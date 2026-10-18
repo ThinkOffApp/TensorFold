@@ -97,7 +97,12 @@ the state file is written and the in-weights list refreshed is the erase reporte
 write that fails or a refresh that fails is reported `pending: true` with `failed`, and is done again after the next
 night, before the next one, and at the next start (codexmb's review of `b40461d0`: the first version marked the fact
 freed and dropped its neurons even when the learner refused, and reported done without the state written). While the
-learner is busy (a night or a lesson) the erase is `pending` and done when it is free. Zeroing one fact's neurons removes their output exactly (READ `pocket.retire`:
+learner is busy (a night or a lesson) the erase is `pending` and done when it is free. Every refresh of the in-weights
+list goes through one path that marks a failure (`publish_pending`); a later try refreshes it even when nothing is
+left to zero, and a start with a failing refresh starts marked (codexmb's review of `d660eac3`: the reload's refresh
+bypassed the test switch, and a try with nothing to zero never refreshed). A state write that fails puts the facts
+and the pocket back as the file has them, without allocating (an allocation-failure test found the first version of
+this relied on a reload that itself allocates). Zeroing one fact's neurons removes their output exactly (READ `pocket.retire`:
 input and output weights set to zero); what it cannot undo is a later lesson's refit of an earlier neuron (question 1).
 Take-backs and changes do not zero anything at once: the note answers, and the next night rebuilds the pocket.
 

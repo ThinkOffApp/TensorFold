@@ -263,3 +263,82 @@ test "promotion rig: an erase whose zeroing is refused, or whose state is not wr
         try testing.expectEqual(promote.Status.freed, back.facts.items[0].status);
     }
 }
+
+test "promotion rig: a publish that keeps failing keeps the erase pending across retries and a restart, then completes" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const r = try rig.Rig.init(testing.allocator);
+    defer r.deinit();
+    var learner: Learner = .{};
+    defer learner.zeroed.deinit(testing.allocator);
+    r.srv.engine = learner.engine();
+    const w = try rig.request(r.srv, a, "POST", "/v1/notes", "{\"text\": \"My kite is orange.\", \"subject\": \"my kite\"}");
+    const key = w.value.strField("source").?;
+    try inWeights(a, r, key, 0);
+    var why: []const u8 = "";
+    var p = try notes_promote.Promoter.init(testing.allocator, testing.io, r.srv, r.store(), r.snap, .{ .every_ms = 600_000 }, &why);
+    r.srv.promote = p;
+    notes_promote.Promoter.fail_publish = true;
+    defer notes_promote.Promoter.fail_publish = false;
+    const er = try rig.request(r.srv, a, "DELETE", try std.fmt.allocPrint(a, "/v1/notes/{d}?erase=true", .{w.value.get("id").?.int64().?}), null);
+    try testing.expect(er.value.get("promotion").?.get("pending").?.bool);
+    try testing.expect(p.publish_pending);
+    try testing.expectEqual(@as(usize, 1), p.weights.items.len); // the list still holds the erased fact's key
+    for (0..2) |_| { // retries while it keeps failing: never done, the flag kept
+        r.srv.teacher.learning.lockUncancelable(testing.io);
+        p.drainPending();
+        r.srv.teacher.learning.unlock(testing.io);
+        try testing.expect(p.publish_pending);
+    }
+    try testing.expectEqual(@as(usize, 2), learner.zeroed.items.len); // zeroed once; the retries only refresh
+    r.srv.promote = null;
+    p.deinit();
+    p = try notes_promote.Promoter.init(testing.allocator, testing.io, r.srv, r.store(), r.snap, .{ .every_ms = 600_000 }, &why);
+    defer p.deinit();
+    try testing.expect(p.publish_pending); // still failing at the start
+    try testing.expectEqual(promote.Status.freed, p.state.facts.items[0].status); // the state file was written
+    notes_promote.Promoter.fail_publish = false;
+    r.srv.teacher.learning.lockUncancelable(testing.io);
+    p.drainPending();
+    r.srv.teacher.learning.unlock(testing.io);
+    try testing.expect(!p.publish_pending);
+    try testing.expectEqual(@as(usize, 0), p.weights.items.len);
+}
+
+test "promotion rig: an erase while the promoter's allocations fail is reported pending, and completes once memory is back" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const r = try rig.Rig.init(testing.allocator);
+    defer r.deinit();
+    var learner: Learner = .{};
+    defer learner.zeroed.deinit(testing.allocator);
+    r.srv.engine = learner.engine();
+    const w = try rig.request(r.srv, a, "POST", "/v1/notes", "{\"text\": \"My kite is orange.\", \"subject\": \"my kite\"}");
+    try inWeights(a, r, w.value.strField("source").?, 0);
+    // the note erased from the store with no promoter attached: its fact is in the pocket, its note gone
+    const er = try rig.request(r.srv, a, "DELETE", try std.fmt.allocPrint(a, "/v1/notes/{d}?erase=true", .{w.value.get("id").?.int64().?}), null);
+    try testing.expectEqual(@as(u16, 200), er.status);
+    var failing = std.testing.FailingAllocator.init(testing.allocator, .{});
+    var why: []const u8 = "";
+    const p = try notes_promote.Promoter.init(failing.allocator(), testing.io, r.srv, r.store(), r.snap, .{ .every_ms = 600_000 }, &why);
+    defer p.deinit();
+    // every allocation of the promoter from the k-th on fails: pending each time until k passes all of them
+    var pending_seen: usize = 0;
+    var k: usize = 0;
+    while (k < 256) : (k += 1) {
+        failing.fail_index = failing.alloc_index + k;
+        const v = try p.erased(a, &.{}); // as the erase route calls it: it takes the learner's lock itself
+        failing.fail_index = std.math.maxInt(usize);
+        if (!v.get("pending").?.bool) break;
+        pending_seen += 1;
+        try testing.expect(v.get("failed") != null);
+        // never reported done while the fact is not out of the state and the list refreshed
+        try testing.expect(promote.active(p.state.facts.items[0].status) or p.publish_pending);
+    }
+    try testing.expect(pending_seen >= 1 and k < 256);
+    try testing.expectEqual(promote.Status.freed, p.state.facts.items[0].status);
+    try testing.expect(!p.publish_pending);
+    try testing.expect(learner.zeroed.items.len >= 2); // zeroed at least once (again on a retry: the same)
+}
