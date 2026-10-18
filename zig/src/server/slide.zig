@@ -74,6 +74,11 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
     };
     const text = body.strField("text") orelse return refuse(conn, a, 400, "text is required");
     const source = body.strField("source") orelse "chat";
+    // "context": a system block (the notes a chat request carries) every lesson prompt and check of this request holds
+    const context = switch (contextOf(body)) {
+        .ok => |c| c,
+        .bad => |why| return refuse(conn, a, 400, why),
+    };
     switch (run(srv, a, &.{}, 0)) {
         .refused => |e| return switch (e) {
             error.Unsupported => refuse(conn, a, 501, "this engine does not learn: serve its model with --slide"),
@@ -85,6 +90,13 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
     srv.teacher.learning.lockUncancelable(srv.io);
     defer srv.teacher.learning.unlock(srv.io);
     if (!keepOriginals(srv, conn, a)) return;
+    // the teacher's kept answers were read without this context (or with another): read again, and again after
+    if (context != null) forgetRead(srv);
+    srv.teacher.context = context;
+    defer if (context != null) {
+        srv.teacher.context = null;
+        forgetRead(srv);
+    };
     sse.open(conn) catch return;
     var out: Out = .{ .conn = conn, .a = a };
     var cx: errors.Cx = .{ .a = a };
@@ -160,6 +172,23 @@ pub fn keepOriginals(srv: *Server, conn: *Conn, a: Allocator) bool {
     const matched = "slide: {s}'s snapshot in {s} matches its manifest: {d} files, {d:.1} GB hashed in {d:.1} s";
     if (kept.checked) log.line(matched, .{ dir, at, kept.files, gb, kept.seconds });
     return true;
+}
+
+/// The longest context block a learn request may send.
+pub const context_limit = 16 << 10;
+
+/// A learn request's "context": absent (null), or 1 byte to 16 KiB of text; anything else refused, saying why.
+pub fn contextOf(body: json.Value) union(enum) { ok: ?[]const u8, bad: []const u8 } {
+    const c = body.field("context") orelse return .{ .ok = null };
+    const text = c.str() orelse return .{ .bad = "context must be a string" };
+    if (text.len == 0 or text.len > context_limit) return .{ .bad = "context must be 1 byte to 16 KiB of text" };
+    return .{ .ok = text };
+}
+
+/// The teacher's kept and bank answers dropped, to be read again as the next lesson's prompts carry them.
+fn forgetRead(srv: *Server) void {
+    srv.teacher.forgetAnswers(srv.io);
+    srv.teacher.forgetBank(srv.io);
 }
 
 /// Rounds a lesson gets to bring its facts back when asked once, before it is given up.

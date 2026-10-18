@@ -29,7 +29,7 @@ pub fn ending(reply: chat.Reply, end: []const u32) []const u32 {
 pub fn example(srv: *Server, cx: *Cx, keep: Allocator, system: ?[]const u8, question: []const u8, answer: []const u8, end: []const u32) !api.Example {
     const a = cx.a;
     var asked: std.ArrayList(Value) = .empty;
-    if (system) |s| try asked.append(a, try message(a, "system", s));
+    if (try withContext(srv, a, system)) |s| try asked.append(a, try message(a, "system", s));
     try asked.append(a, try message(a, "user", question));
     const head = try prompt.renderIds(srv, cx, .{ .array = asked.items }, &.{}, false, null, true);
     const body = srv.text.encode(a, answer, false) catch |e| return if (e == error.OutOfMemory) error.OutOfMemory else cx.refuse("the tokenizer cannot encode an answer");
@@ -40,7 +40,7 @@ pub fn example(srv: *Server, cx: *Cx, keep: Allocator, system: ?[]const u8, ques
 pub fn promptOnly(srv: *Server, cx: *Cx, keep: Allocator, system: ?[]const u8, question: []const u8) !api.Example {
     const a = cx.a;
     var asked: std.ArrayList(Value) = .empty;
-    if (system) |s| try asked.append(a, try message(a, "system", s));
+    if (try withContext(srv, a, system)) |s| try asked.append(a, try message(a, "system", s));
     try asked.append(a, try message(a, "user", question));
     const head = try prompt.renderIds(srv, cx, .{ .array = asked.items }, &.{}, false, null, true);
     if (head.len < 3) return cx.refuse("a question renders too short to route");
@@ -50,8 +50,10 @@ pub fn promptOnly(srv: *Server, cx: *Cx, keep: Allocator, system: ?[]const u8, q
 /// `question` as a router reads it after an unrelated exchange (`before`: the user's turn and the reply).
 pub fn promptAfter(srv: *Server, cx: *Cx, keep: Allocator, before: [2][]const u8, question: []const u8) !api.Example {
     const a = cx.a;
-    const asked = [_]Value{ try message(a, "user", before[0]), try message(a, "assistant", before[1]), try message(a, "user", question) };
-    const head = try prompt.renderIds(srv, cx, .{ .array = @constCast(&asked) }, &.{}, false, null, true);
+    var asked: std.ArrayList(Value) = .empty;
+    if (srv.teacher.context) |c| try asked.append(a, try message(a, "system", c));
+    try asked.appendSlice(a, &.{ try message(a, "user", before[0]), try message(a, "assistant", before[1]), try message(a, "user", question) });
+    const head = try prompt.renderIds(srv, cx, .{ .array = asked.items }, &.{}, false, null, true);
     if (head.len < 3) return cx.refuse("a question renders too short to route");
     return .{ .ids = try keep.dupe(u32, head), .start = @intCast(head.len - 1), .decide = prompt.decideOf(srv, head) };
 }
@@ -60,7 +62,7 @@ pub fn promptAfter(srv: *Server, cx: *Cx, keep: Allocator, before: [2][]const u8
 pub fn ask(srv: *Server, cx: *Cx, system: ?[]const u8, user: []const u8, max_tokens: i64, gone: anytype) chat.Failure!chat.Reply {
     const a = cx.a;
     var list: std.ArrayList(Value) = .empty;
-    if (system) |s| try list.append(a, try message(a, "system", s));
+    if (try withContext(srv, a, system)) |s| try list.append(a, try message(a, "system", s));
     try list.append(a, try message(a, "user", user));
     const fields = try json.newObject(a);
     try fields.put(a, "enable_thinking", .{ .bool = false });
@@ -78,7 +80,7 @@ pub fn askBase(srv: *Server, cx: *Cx, system: ?[]const u8, user: []const u8, max
 pub fn askBaseAt(srv: *Server, cx: *Cx, system: ?[]const u8, user: []const u8, max_tokens: i64, temperature: f64, gone: anytype) chat.Failure!chat.Reply {
     const a = cx.a;
     var list: std.ArrayList(Value) = .empty;
-    if (system) |s| try list.append(a, try message(a, "system", s));
+    if (try withContext(srv, a, system)) |s| try list.append(a, try message(a, "system", s));
     try list.append(a, try message(a, "user", user));
     const fields = try json.newObject(a);
     try fields.put(a, "enable_thinking", .{ .bool = false });
@@ -101,7 +103,10 @@ pub fn askThinkingBase(srv: *Server, cx: *Cx, user: []const u8, gone: anytype) c
 
 fn thinkingFrom(srv: *Server, cx: *Cx, user: []const u8, shipped: bool, gone: anytype) chat.Failure!chat.Reply {
     const a = cx.a;
-    const asked = try a.dupe(Value, &.{try message(a, "user", user)});
+    var list: std.ArrayList(Value) = .empty;
+    if (srv.teacher.context) |c| try list.append(a, try message(a, "system", c));
+    try list.append(a, try message(a, "user", user));
+    const asked = list.items;
     const fields = try json.newObject(a);
     try fields.put(a, "enable_thinking", .{ .bool = true });
     try fields.put(a, "temperature", .{ .float = 0 });
@@ -121,6 +126,13 @@ pub fn continueIds(srv: *Server, cx: *Cx, ids: []const u32, max_tokens: i64, gon
     try fields.put(a, "temperature", .{ .float = 0 });
     const prepared = try chat.prepare(srv, cx, .{ .prompt = .{ .ids = ids }, .fields = .{ .object = fields }, .max_tokens = max_tokens, .temperature = 0 }, gone);
     return chat.generate(srv, cx, prepared, null, gone);
+}
+
+/// A lesson prompt's system message: the learn request's context block (when sent), then the prompt's own note.
+pub fn withContext(srv: *const Server, a: Allocator, system: ?[]const u8) Allocator.Error!?[]const u8 {
+    const c = srv.teacher.context orelse return system;
+    const s = system orelse return c;
+    return try std.mem.concat(a, u8, &.{ c, "\n\n", s });
 }
 
 pub fn message(a: Allocator, role: []const u8, content: []const u8) !Value {

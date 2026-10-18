@@ -37,6 +37,7 @@ pub const Teacher = struct {
     thinks: ?bool = null, // whether the template opens the model's reasoning in its prompt
     languages: std.StringHashMapUnmanaged(Local) = .empty, // keep and personal prompts in each other language told so far
     lessons: usize = 0, // lessons kept so far, which picks the questions about the user a check asks
+    context: ?[]const u8 = null, // the learn request's context block: every lesson prompt and check carries it
     told: std.ArrayList(Told) = .empty, // learned document facts' answers, which later lessons on their subject keep
 
     pub fn init(gpa: Allocator) Teacher {

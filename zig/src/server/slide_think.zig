@@ -32,7 +32,10 @@ pub const think_rows = 240; // a thinking answer's tokens at most (the trainer r
 pub fn thinkingHead(srv: *Server, cx: *Cx, question: []const u8) !?[]const u32 {
     if (srv.markers.open.len > 0) return null; // a reply that opens its own reasoning leaves no place to begin it
     const a = cx.a;
-    const asked = try a.dupe(Value, &.{try message(a, "user", question)});
+    var list: std.ArrayList(Value) = .empty;
+    if (srv.teacher.context) |c| try list.append(a, try message(a, "system", c));
+    try list.append(a, try message(a, "user", question));
+    const asked = list.items;
     const head = try prompt.renderIds(srv, cx, .{ .array = asked }, &.{}, true, null, true);
     if (head.len == 0) return null;
     const tail = try srv.text.decode(a, head[head.len - @min(head.len, 3) ..]);
