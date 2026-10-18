@@ -36,16 +36,19 @@ pub const max_n = 4;
 /// subjects() looks for entity phrases of 2 to 8 keys.
 pub const max_phrase = 8;
 pub const no_note: u32 = 0xFFFF_FFFF;
-/// rankAt() by the note itself: an id below 2^24 and a told tick in 0..told_span (2^40 ticks: past the year 3000).
+/// A layered version's alias override for a key that names nobody now.
+pub const alias_gone: u32 = 0xFFFF_FFFE;
+/// rankAt() by the note itself: a place below 2^24 and a told tick in 0..told_span (2^40 ticks: past the year 3000);
+/// ids ascend with places (model.zig's placeOf relies on it too), so a tie by place is Python's tie by id.
 pub const id_bits = 24;
 pub const told_span: i64 = (1 << 40) - 1;
 
 /// Tests only: false makes every full build rank by the global sort (the old path, the differential test's oracle).
 pub threadlocal var rank_by_note_allowed: bool = true;
 
-/// Whether a note's own id and told make its rankAt() key.
-pub fn rankFits(id: u32, told: i64) bool {
-    return id < (1 << id_bits) and told >= 0 and told <= told_span;
+/// Whether a note's place and told make its rankAt() key.
+pub fn rankFits(place: usize, told: i64) bool {
+    return place < (1 << id_bits) and told >= 0 and told <= told_span;
 }
 
 pub const State = enum(u8) { current = 0, superseded = 1, tombstoned = 2 };
@@ -204,7 +207,9 @@ pub const Index = struct {
     own_phrases: std.HashMapUnmanaged(Phrase, u32, PhraseCtx, 80), // layered: the phrases the side buffer added
     own_phrase_max: usize,
     own_names: std.AutoHashMapUnmanaged(u32, u32), // one-key entity phrases: key -> entity (the decode check's)
-    aliases: std.HashMapUnmanaged(Phrase, u32, PhraseCtx, 80), // every version's whole map (alias.zig)
+    // aliases (alias.zig): a full build's whole tables; a layered version's hold only the keys a write touched since
+    // its core (alias_gone: no alias now), read before the core's by aliasOf() and aliasCandidates()
+    aliases: std.HashMapUnmanaged(Phrase, u32, PhraseCtx, 80),
     alias_entities: std.HashMapUnmanaged(Phrase, std.ArrayList(u32), PhraseCtx, 80),
     alias_max: usize,
     self_entity: ?u32,
@@ -217,9 +222,10 @@ pub const Index = struct {
     max_told: i64 = std.math.minInt(i64), // the latest told of its notes
     n_phrases: u32 = 0, // the model's phrases it was built from (a layered version's side adds the rest)
     layer: @import("layer.zig").Layer = .{}, // a version layered on a core: the core and what changed since
-    rank_by_note: bool = false, // rankAt() from each note's told and id (every told and id fit), else own_trank
+    rank_by_note: bool = false, // rankAt() from each note's told and place (every one fits), else own_trank
     lazy_value: std.AutoHashMapUnmanaged(u32, []const u32) = .empty, // sa: written notes no model value names: tokens
-    names_from: [3]u32 = .{ 0, 0, 0 }, // entity_names, attribute_names, pair_attributes start at these numbers
+    names_from: [3]u32 = .{ 0, 0, 0 },
+    alias_candidates_off: bool = false, // a lookup view that reads no alias candidates (notes_decode.zig's) // entity_names, attribute_names, pair_attributes start at these numbers
 
     pub fn notes(self: *const Index) usize {
         return self.n_notes;
@@ -270,17 +276,35 @@ pub const Index = struct {
     }
 
     /// Python's tie order after the score, (-told, id), as a key that sorts ascending. By the note itself when its
-    /// told and id fit (rank_by_note: `(told_span - told) << 24 | id`, no pass over the other notes, so a layered
-    /// version needs none either); else the full build's rank of every note, `trank << 32 | place`.
+    /// told and place fit (rank_by_note: `(told_span - told) << 24 | place`; ids ascend with places), so no write
+    /// sorts the other notes; else the full build's rank of every note, `trank << 32 | place`.
     pub inline fn rankAt(self: *const Index, p: u32) u64 {
-        if (self.rank_by_note) return (@as(u64, @intCast(told_span - self.toldAt(p))) << id_bits) | self.idAt(p);
+        if (self.rank_by_note) return (@as(u64, @intCast(told_span - self.toldAt(p))) << id_bits) | p;
         return (@as(u64, self.own_trank[p]) << 32) | p;
     }
 
     /// The place a rankAt() key was made from.
     pub inline fn placeOfRank(self: *const Index, r: u64) u32 {
-        if (self.rank_by_note) return self.placeOfId(@intCast(r & ((1 << id_bits) - 1))).?;
+        if (self.rank_by_note) return @intCast(r & ((1 << id_bits) - 1));
         return @truncate(r);
+    }
+
+    /// The entity an alias names (no_note: several do), or null.
+    pub fn aliasOf(self: *const Index, p: Phrase) ?u32 {
+        if (self.aliases.get(p)) |e| return if (e == alias_gone) null else e;
+        return if (self.layer.core) |c| c.aliases.get(p) else null;
+    }
+
+    /// Every entity an alias names, in the order their name facts were written, or null.
+    pub fn aliasCandidates(self: *const Index, p: Phrase) ?[]const u32 {
+        if (self.alias_candidates_off) return null;
+        if (self.alias_entities.get(p)) |l| return if (l.items.len == 0) null else l.items;
+        return if (self.layer.core) |c| if (c.alias_entities.get(p)) |l| l.items else null else null;
+    }
+
+    /// The longest alias, in keys (at least the longest: only a bound for the lookups' loops).
+    pub fn aliasMax(self: *const Index) usize {
+        return @max(self.alias_max, if (self.layer.core) |c| c.alias_max else 0);
     }
 
     /// The entities this version knows (entity numbers below it).

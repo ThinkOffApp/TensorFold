@@ -199,6 +199,7 @@ pub const Store = struct {
 
     pub fn deinit(s: *Store) void {
         const parent = s.zeroing.child;
+        s.bw.deinit(s); // first: a merge in flight reads a version freed below
         for (s.free.items) |k| {
             k.sc.deinit();
             s.gpa.destroy(k);
@@ -209,7 +210,6 @@ pub const Store = struct {
         freeVersion(s.gpa, s.current);
         for (s.parked.items) |m| m.deinit();
         s.parked.deinit(s.gpa);
-        s.bw.deinit(s);
         s.log.deinit();
         if (s.journal) |*j| j.deinit();
         if (s.snapshot_path) |p| s.gpa.free(p);

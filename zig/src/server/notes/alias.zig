@@ -1,5 +1,6 @@
 //! Conservative name-value extraction; callers must require a current name fact.
 const std = @import("std");
+const index = @import("index.zig");
 
 pub fn nameValue(subject: []const u8, text: []const u8) ?[]const u8 {
     if (text.len <= subject.len or !std.ascii.eqlIgnoreCase(text[0..subject.len], subject)) return null;
@@ -42,28 +43,45 @@ pub var plant_stale: bool = false;
 /// One encoded alias: the keys of " I", " my", " me" (place: none) or of a name fact's value (its place).
 const Entry = struct { place: u32, keys: [8]u32, len: u8 };
 
+const Key = [8]u32;
+
 /// What populate() encoded, kept by the store between versions: each name fact is encoded once, when written,
-/// not again for every version (a write's cost then grows with the store's name facts, not with every note).
+/// and indexed by its alias keys and its place, so that a layered version recomputes only the keys a write touched.
 pub const Memo = struct {
     model: ?*const anyopaque = null, // the model it was made for: another (an erase's, a load's) starts it again
     scanned: usize = 0, // the notes before this place were looked at
     self: std.ArrayList(Entry) = .empty,
     self_done: bool = false,
     names: std.ArrayList(Entry) = .empty, // name facts by place, whatever their state now
+    by_key: std.AutoHashMapUnmanaged(Key, std.ArrayList(u32)) = .empty, // alias keys -> indexes into names, ascending
+    by_place: std.AutoHashMapUnmanaged(u32, u32) = .empty, // a name fact's place -> its index into names
     temp: bool = false, // populate()'s own, for one build
 
     pub fn deinit(m: *Memo, g: std.mem.Allocator) void {
         m.self.deinit(g);
         m.names.deinit(g);
+        var it = m.by_key.valueIterator();
+        while (it.next()) |l| l.deinit(g);
+        m.by_key.deinit(g);
+        m.by_place.deinit(g);
         m.* = .{ .temp = m.temp };
     }
 
-    fn reset(m: *Memo, model: *const anyopaque) void {
-        m.self.clearRetainingCapacity();
-        m.names.clearRetainingCapacity();
-        m.self_done = false;
-        m.scanned = 0;
+    fn reset(m: *Memo, g: std.mem.Allocator, model: *const anyopaque) void {
+        const temp = m.temp;
+        m.deinit(g);
+        m.temp = temp;
         m.model = model;
+    }
+
+    fn add(m: *Memo, g: std.mem.Allocator, x: Entry) !void {
+        try m.names.ensureUnusedCapacity(g, 1);
+        try m.by_place.ensureUnusedCapacity(g, 1);
+        const r = try m.by_key.getOrPut(g, x.keys);
+        if (!r.found_existing) r.value_ptr.* = .empty;
+        try r.value_ptr.append(g, @intCast(m.names.items.len));
+        m.by_place.putAssumeCapacity(x.place, @intCast(m.names.items.len));
+        m.names.appendAssumeCapacity(x);
     }
 };
 
@@ -90,15 +108,14 @@ pub fn populate(idx: anytype, model: anytype, text: anytype) !void {
 }
 
 /// populate() with the encodes of earlier calls for the same model kept in `memo` (the writer's, under its lock).
+/// A layered version (idx.layer.core set) gets only the keys its delta touched: the name facts written or retired
+/// since its core, and the first-person words when "me" came after the core; the rest it reads from its core.
 pub fn populateMemo(idx: anytype, model: anytype, text: anytype, memo: *Memo) !void {
     const g = idx.arena.child;
     const a = idx.arena.allocator();
-    if (memo.model != @as(*const anyopaque, model)) memo.reset(model);
+    if (memo.model != @as(*const anyopaque, model)) memo.reset(g, model);
     const n_notes = model.notes.items.len;
-    if (memo.scanned > n_notes) { // a write reverted: its notes are gone
-        memo.scanned = n_notes;
-        while (memo.names.items.len > 0 and memo.names.items[memo.names.items.len - 1].place >= n_notes) _ = memo.names.pop();
-    }
+    if (memo.scanned > n_notes) memo.reset(g, model); // fewer notes than it read: start again
     if (!memo.self_done) if (model.entityOf("me")) |_| {
         for ([_][]const u8{ " I", " my", " me" }) |word| if (try encodeKeys(idx, text, word, 0)) |x| try memo.self.append(g, x);
         memo.self_done = true;
@@ -108,10 +125,38 @@ pub fn populateMemo(idx: anytype, model: anytype, text: anytype, memo: *Memo) !v
     const stale = plant_stale and !memo.temp;
     const limit = if (stale) @min(n_notes, model.base_notes + 1) else n_notes; // stale: the snapshot's names only
     while (memo.scanned + 1 < limit) : (memo.scanned += 1) {
-        if (try nameEntry(idx, model, text, @intCast(memo.scanned))) |x| try memo.names.append(g, x);
+        if (try nameEntry(idx, model, text, @intCast(memo.scanned))) |x| try memo.add(g, x);
     }
     const last: ?Entry = if (n_notes > memo.scanned and !stale) try nameEntry(idx, model, text, @intCast(n_notes - 1)) else null;
-    if (model.entityOf("me")) |entity| for (memo.self.items) |x| {
+    const me = model.entityOf("me");
+    if (idx.layer.core) |core| {
+        var touched: std.AutoArrayHashMapUnmanaged(Key, u8) = .empty;
+        defer touched.deinit(g);
+        const cn = idx.layer.core_n;
+        for (cn..n_notes) |p| {
+            if (last) |x| if (x.place == p) try touched.put(g, x.keys, x.len);
+            if (memo.by_place.get(@intCast(p))) |k| try touched.put(g, memo.names.items[k].keys, memo.names.items[k].len);
+        }
+        var ov = idx.layer.over.keyIterator();
+        while (ov.next()) |p| if (memo.by_place.get(p.*)) |k| try touched.put(g, memo.names.items[k].keys, memo.names.items[k].len);
+        if (core.self_entity == null and me != null) for (memo.self.items) |x| try touched.put(g, x.keys, x.len);
+        for (touched.keys(), touched.values()) |key, len| {
+            var val: ?u32 = null;
+            if (me) |e| for (memo.self.items) |x| if (std.mem.eql(u32, &x.keys, &key)) {
+                val = e;
+            };
+            var cands: std.ArrayList(u32) = .empty;
+            const from: []const u32 = if (memo.by_key.get(key)) |l| l.items else &.{};
+            const tail: []const Entry = if (last) |*x| if (std.mem.eql(u32, &x.keys, &key)) x[0..1] else &.{} else &.{};
+            for (from) |k| try contribute(a, model, memo.names.items[k], &val, &cands);
+            for (tail) |x| try contribute(a, model, x, &val, &cands);
+            try idx.aliases.put(a, key, val orelse index.alias_gone);
+            try idx.alias_entities.put(a, key, cands); // empty: no name fact names it now
+            idx.alias_max = @max(idx.alias_max, len);
+        }
+        return;
+    }
+    if (me) |entity| for (memo.self.items) |x| {
         try idx.aliases.put(a, x.keys, entity);
         idx.alias_max = @max(idx.alias_max, x.len);
     };
@@ -126,6 +171,16 @@ pub fn populateMemo(idx: anytype, model: anytype, text: anytype, memo: *Memo) !v
         if (std.mem.indexOfScalar(u32, candidates.value_ptr.items, n.entity) == null) try candidates.value_ptr.append(a, n.entity);
         idx.alias_max = @max(idx.alias_max, x.len);
     };
+}
+
+/// One name fact's part in its key's alias, as the full build's loop takes it (current ones only, by place).
+fn contribute(a: std.mem.Allocator, model: anytype, x: Entry, val: *?u32, cands: *std.ArrayList(u32)) !void {
+    const n = &model.notes.items[x.place];
+    if (n.state != .current) return;
+    if (val.*) |v| {
+        if (v != n.entity) val.* = 0xffff_ffff;
+    } else val.* = n.entity;
+    if (std.mem.indexOfScalar(u32, cands.items, n.entity) == null) try cands.append(a, n.entity);
 }
 
 fn nameEntry(idx: anytype, model: anytype, text: anytype, place: u32) !?Entry {

@@ -56,19 +56,32 @@ fn answers(a: Allocator, idx: *const index.Index, qs: []const Q) ![]u64 {
     return out.items;
 }
 
-/// The alias tables of `got` against `want`'s: every key's entity and candidates (a lookup reads them by key).
+/// The alias tables of `got` (read through its accessors: a layered version's overrides, then its core's)
+/// against `want`'s: every key either names, in both, the same entity and candidates, or names nothing in both.
 fn aliasDiff(got: *const index.Index, want: *const index.Index) usize {
-    var bad: usize = @intFromBool(got.aliases.count() != want.aliases.count() or got.alias_entities.count() != want.alias_entities.count() or got.alias_max != want.alias_max);
+    var bad: usize = @intFromBool(got.aliasMax() < want.alias_max);
     var it = want.aliases.iterator();
-    while (it.next()) |kv| bad += @intFromBool(got.aliases.get(kv.key_ptr.*) != kv.value_ptr.*);
+    while (it.next()) |kv| bad += @intFromBool(got.aliasOf(kv.key_ptr.*) != kv.value_ptr.*);
     var ie = want.alias_entities.iterator();
     while (ie.next()) |kv| {
-        const g = got.alias_entities.get(kv.key_ptr.*) orelse {
+        const g = got.aliasCandidates(kv.key_ptr.*) orelse {
             bad += 1;
             continue;
         };
-        bad += @intFromBool(!std.mem.eql(u32, g.items, kv.value_ptr.items));
+        bad += @intFromBool(!std.mem.eql(u32, g, kv.value_ptr.items));
     }
+    // and nothing more: every key got's tables hold names nothing that want's do not
+    for ([2]?*const index.Index{ got, got.layer.core }) |x| if (x) |t| {
+        var kt = t.aliases.keyIterator();
+        while (kt.next()) |k| {
+            if (got.aliasOf(k.*) != null and want.aliases.get(k.*) == null) bad += 1;
+            if (got.aliasCandidates(k.*) != null and want.alias_entities.get(k.*) == null) bad += 1;
+        }
+        var ke = t.alias_entities.keyIterator();
+        while (ke.next()) |k| if (got.aliasCandidates(k.*) != null and want.alias_entities.get(k.*) == null) {
+            bad += 1;
+        };
+    };
     return bad;
 }
 

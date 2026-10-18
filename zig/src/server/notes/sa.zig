@@ -85,6 +85,7 @@ pub const Rank = struct {
 };
 
 /// One note's folded keys and token ids for the builder; `cur`: its suffixes go to the current view's array.
+/// In a merge (sa.merge) an old note may come without ids: its keys' wordiness is the old base's.
 pub const Source = struct { keys: []const u32, ids: []const u32, cur: bool };
 
 pub const BuildError = error{ OutOfMemory, Unsupported };
@@ -224,6 +225,28 @@ pub fn merge(gpa: Allocator, old: *const Base, notes: []const Source, vwordy: []
     return buildOn(gpa, old, notes, vwordy);
 }
 
+/// Every note's keys as `b` holds them (its text decoded by the dictionary), flat, with each note's start: what a
+/// merge reads the old notes from, so that it needs no copy of the writer's notes.
+pub fn noteKeys(gpa: Allocator, b: *const Base) Allocator.Error!struct { keys: []u32, off: []u32 } {
+    const keys = try gpa.alloc(u32, b.tokens);
+    errdefer gpa.free(keys);
+    const off = try gpa.alloc(u32, @as(usize, b.notes) + 1);
+    var at: usize = 0;
+    var note: usize = 0;
+    off[0] = 0;
+    for (0..b.tokens + b.notes) |pos| {
+        const c = b.text.get(pos);
+        if (c == sep) {
+            note += 1;
+            off[note] = @intCast(at);
+        } else {
+            keys[at] = b.dict[c - 1];
+            at += 1;
+        }
+    }
+    return .{ .keys = keys, .off = off };
+}
+
 /// Tests only: a merge that keeps each old note in the view the old base had it in (the bug its test must catch).
 pub var merge_plant_stale_views: bool = false;
 
@@ -274,12 +297,21 @@ fn buildOn(gpa: Allocator, old_in: ?*const Base, notes: []const Source, vwordy: 
     const known = try gpa.alloc(u64, b.wordy.len);
     defer gpa.free(known);
     @memset(known, 0);
+    if (old) |o| for (o.dict, 1..) |k, oc| { // the old notes' wordiness, as the old base checked it
+        const c = codes.get(k).?;
+        const bit = @as(u64, 1) << @intCast(c & 63);
+        known[c >> 6] |= bit;
+        if (o.wordyCode(@intCast(oc))) b.wordy[c >> 6] |= bit;
+    };
     at = 0;
     for (notes) |n| {
-        for (n.keys, n.ids) |k, t| {
+        if (n.ids.len != n.keys.len and (old == null or n.ids.len != 0)) return error.Unsupported;
+        for (n.keys, 0..) |k, j| {
             const c = codes.get(k).?;
             text[at] = c;
             at += 1;
+            if (n.ids.len == 0) continue; // an old note's (merge): its wordiness is the old base's
+            const t = n.ids[j];
             const w = t < vwordy.len and vwordy[t];
             const bit = @as(u64, 1) << @intCast(c & 63);
             if (known[c >> 6] & bit != 0) {
@@ -566,22 +598,39 @@ test "a merge of an old base and newer notes is the base built from nothing, bit
         }
         var src = try a.alloc(Source, n);
         defer a.free(src);
-        const ids: [16]u32 = @splat(0);
+        var vw: [301]bool = undefined;
+        for (&vw) |*x| x.* = r.boolean(); // a key's id is the key: one wordiness each
         const vocab: u32 = if (round % 2 == 0) 4 else 300; // few keys (long equal runs) or many
         for (keys, src) |*k, *s| {
             k.* = try a.alloc(u32, r.uintLessThan(usize, 12));
             for (k.*) |*x| x.* = 1 + r.uintLessThan(u32, vocab);
-            s.* = .{ .keys = k.*, .ids = ids[0..k.len], .cur = r.boolean() };
+            s.* = .{ .keys = k.*, .ids = k.*, .cur = r.boolean() };
         }
-        const old = try build(a, src[0..keep], &.{});
+        const old = try build(a, src[0..keep], &vw);
         defer old.release();
         for (src[0..keep]) |*s| if (r.uintLessThan(u8, 4) == 0) {
             s.cur = !s.cur; // retired (or, in this test, back again) since the old base
         };
-        const want = try build(a, src, &.{});
+        const want = try build(a, src, &vw);
         defer want.release();
-        const got = try merge(a, old, src, &.{});
+        const got = try merge(a, old, src, &vw);
         defer got.release();
+        // the same from the old notes' keys as the old base decodes them, without their ids
+        const dec = try noteKeys(a, old);
+        defer a.free(dec.keys);
+        defer a.free(dec.off);
+        const bare = try a.dupe(Source, src);
+        defer a.free(bare);
+        for (bare[0..keep], 0..) |*x, k| {
+            try std.testing.expectEqualSlices(u32, x.keys, dec.keys[dec.off[k]..dec.off[k + 1]]);
+            x.* = .{ .keys = dec.keys[dec.off[k]..dec.off[k + 1]], .ids = &.{}, .cur = x.cur };
+        }
+        const got2 = try merge(a, old, bare, &vw);
+        try std.testing.expectEqualSlices(u64, want.wordy, got2.wordy);
+        defer got2.release();
+        try std.testing.expectEqualSlices(u8, want.sa_cur.bytes, got2.sa_cur.bytes);
+        try std.testing.expectEqualSlices(u8, want.sa_hist.bytes, got2.sa_hist.bytes);
+        try std.testing.expectEqualSlices(u8, want.text.bytes, got2.text.bytes);
         try std.testing.expectEqualSlices(u32, want.dict, got.dict);
         try std.testing.expectEqualSlices(u8, want.text.bytes, got.text.bytes);
         try std.testing.expectEqualSlices(u8, want.sa_cur.bytes, got.sa_cur.bytes);

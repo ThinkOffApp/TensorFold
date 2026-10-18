@@ -161,17 +161,17 @@ pub const Live = struct {
         if (idx.ver != l.ver) return false;
         var keys: [index.max_phrase]u32 = undefined;
         var n: usize = 1;
-        const maximum = if (l.shape.resolve_subjects) @max(idx.phraseMax(), idx.alias_max) else idx.phraseMax();
+        const maximum = if (l.shape.resolve_subjects) @max(idx.phraseMax(), idx.aliasMax()) else idx.phraseMax();
         while (n <= @min(collected.len, @max(maximum, 1))) : (n += 1) {
             for (collected[collected.len - n ..], keys[0..n]) |t, *k| k.* = idx.keyOf(t);
             const ordinary = if (n == 1) idx.nameOf(keys[0]) else idx.phraseOf(index.packPhrase(keys[0..n]));
-            const alias = if (l.shape.resolve_subjects) idx.aliases.get(index.packPhrase(keys[0..n])) else null;
-            const candidates = if (l.shape.resolve_subjects and ordinary == null) idx.alias_entities.get(index.packPhrase(keys[0..n])) else null;
+            const alias = if (l.shape.resolve_subjects) idx.aliasOf(index.packPhrase(keys[0..n])) else null;
+            const candidates = if (l.shape.resolve_subjects and ordinary == null) idx.aliasCandidates(index.packPhrase(keys[0..n])) else null;
             // An unresolved common name is not sufficient live-fetch evidence.
             // Expanding hundreds of entities also makes fitting unbounded work.
-            if (candidates) |cs| if (cs.items.len > 1) continue;
+            if (candidates) |cs| if (cs.len > 1) continue;
             const single = [1]u32{ordinary orelse alias orelse index.no_note};
-            const entities = if (candidates) |cs| cs.items else &single;
+            const entities = if (candidates) |cs| cs else &single;
             for (entities) |e| {
                 if (e == index.no_note) continue;
                 if (l.shape.resolve_subjects and idx.self_entity == e) continue; // the assistant's "my" is not the user's
@@ -195,7 +195,7 @@ pub const Live = struct {
         view.settings.resolve_subjects = l.shape.resolve_subjects;
         // Until relation disambiguation is available, live checks consume only
         // unique aliases. The unique map marks collisions with no_note.
-        view.alias_entities = .empty;
+        view.alias_candidates_off = true;
         if (l.shape.resolve_subjects) view.settings.resolve_self = false; // first-person aliases belong to the question-only prefetch
         const idx = &view;
         if (idx.ver != l.ver) {

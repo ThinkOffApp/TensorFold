@@ -111,4 +111,6 @@ test {
     _ = @import("notes_decode_more_test.zig");
     _ = @import("notes_layer_test.zig");
     _ = @import("notes_delta_test.zig");
+    _ = @import("notes/core_build.zig");
+    _ = @import("notes/bounded.zig");
 }

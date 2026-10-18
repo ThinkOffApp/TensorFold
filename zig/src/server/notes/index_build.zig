@@ -104,7 +104,7 @@ pub fn placeNotes(self: *Index, gpa: Allocator, raw: []const Raw) LoadError!void
         cost[k] = x.cost;
     }
     var fits = index.rank_by_note_allowed;
-    for (raw) |x| fits = fits and index.rankFits(x.id, x.told);
+    for (raw, 0..) |x, k| fits = fits and index.rankFits(k, x.told) and (k == 0 or x.id > raw[k - 1].id);
     self.rank_by_note = fits;
     if (fits) { // rankAt() reads each note's own told and id: no global order to make
         self.own_trank = &.{};

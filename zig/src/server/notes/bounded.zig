@@ -1,7 +1,8 @@
 //! Bounded writes (docs/NOTES-WRITE-ERASE-DESIGN.md, Gate 1): a version is a core (a full suffix-array index,
 //! shared by reference count) plus a delta of the notes written since it (layer.zig). A delta past the soft limit
-//! (Store.side_max) starts a merge on its own thread (merge.zig: the suffix arrays merged linearly, sa.merge); the
-//! writes go on against the old core meanwhile. Past the hard limit a write waits for that merge (back-pressure):
+//! (Store.side_max) starts a merge on its own thread from the version just published (merge.zig, core_build.zig:
+//! the suffix arrays merged linearly, sa.merge; nothing copied under the writer's lock); the writes go on against
+//! the old core meanwhile. Past the hard limit a write waits for that merge (back-pressure):
 //! the only place a write waits for merge work. The journal is untouched: everything here is derived state.
 const std = @import("std");
 const index = @import("index.zig");
@@ -130,5 +131,6 @@ pub fn maybeMerge(s: anytype) void {
     const cur = s.current.idx;
     const core = cur.layer.core orelse cur;
     if (s.model.notes.items.len -| core.notes() <= s.side_max) return;
-    w.merging = merge_mod.Job.start(s.gpa, s.model, w.core_retired.items.len, core.base) catch null; // else the next write
+    // the merge reads the version just published, held as a lookup holds one: no copy under this lock
+    w.merging = merge_mod.Job.start(s.gpa, s.current, w.core_retired.items.len) catch null; // else the next write
 }

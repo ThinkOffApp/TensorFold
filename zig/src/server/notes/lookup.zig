@@ -161,15 +161,15 @@ fn selectFirst(ks: []u128, k: usize) void {
 fn subjects(idx: *const Index, sc: *Scratch) Allocator.Error!void {
     const q = sc.qkeys.items;
     if (idx.phraseCount() == 0 and !idx.settings.resolve_subjects) return;
-    const maximum = if (idx.settings.resolve_subjects) @max(idx.phraseMax(), idx.alias_max) else idx.phraseMax();
+    const maximum = if (idx.settings.resolve_subjects) @max(idx.phraseMax(), idx.aliasMax()) else idx.phraseMax();
     var n: usize = @min(q.len, index.max_phrase, maximum);
     while (n >= 1) : (n -= 1) {
         var j: usize = 0;
         while (j + n <= q.len) : (j += 1) {
             const phrase = index.packPhrase(q[j..][0..n]);
             const ordinary = if (n >= 2) idx.phraseOf(phrase) else null;
-            const alias = if (idx.settings.resolve_subjects) idx.aliases.get(phrase) else null;
-            const candidates = if (idx.settings.resolve_subjects and ordinary == null) idx.alias_entities.get(phrase) else null;
+            const alias = if (idx.settings.resolve_subjects) idx.aliasOf(phrase) else null;
+            const candidates = if (idx.settings.resolve_subjects and ordinary == null) idx.aliasCandidates(phrase) else null;
             if (ordinary == null and alias == null and candidates == null) continue;
             var inside = false;
             for (sc.spans.items) |sp| {
@@ -183,11 +183,11 @@ fn subjects(idx: *const Index, sc: *Scratch) Allocator.Error!void {
             if (candidates) |cs| {
                 // Normalized entity IDF: a unique alias has full strength;
                 // common names retain all candidates with weaker evidence.
-                const entities: f64 = @floatFromInt(@max(idx.entityCount(), cs.items.len));
-                const count: f64 = @floatFromInt(cs.items.len);
+                const entities: f64 = @floatFromInt(@max(idx.entityCount(), cs.len));
+                const count: f64 = @floatFromInt(cs.len);
                 const weight = idx.log(1.0 + (entities - count + 0.5) / (count + 0.5)) /
                     idx.log(1.0 + (entities - 0.5) / 1.5);
-                for (cs.items) |e| {
+                for (cs) |e| {
                     if (!idx.settings.resolve_self and idx.self_entity == e) continue;
                     try sc.found.append(sc.gpa, e);
                     try sc.found_weights.append(sc.gpa, weight);

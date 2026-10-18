@@ -27,13 +27,13 @@ test "subject aliases contain only current names and first person words" {
         defer testing.allocator.free(ids);
         var keys: [index.max_phrase]u32 = @splat(index.none_key);
         for (ids, keys[0..ids.len]) |id, *key| key.* = idx.keyOf(id);
-        try testing.expect(idx.aliases.get(keys) != null);
+        try testing.expect(idx.aliasOf(keys) != null);
     }
     const old_name = try text.text().encode(testing.allocator, " Luna", false);
     defer testing.allocator.free(old_name);
     var keys: [index.max_phrase]u32 = @splat(index.none_key);
     for (old_name, keys[0..old_name.len]) |id, *key| key.* = idx.keyOf(id);
-    try testing.expect(idx.aliases.get(keys) == null);
+    try testing.expect(idx.aliasOf(keys) == null);
     try testing.expect(!idx.settings.resolve_subjects);
 }
 
@@ -48,11 +48,11 @@ test "subject aliases reject ambiguous names and recover after take back" {
     const ids = try store.text.encode(a, " Ana", false);
     var keys: [index.max_phrase]u32 = @splat(index.none_key);
     for (ids, keys[0..ids.len]) |id, *key| key.* = store.current.idx.keyOf(id);
-    const sister = store.current.idx.aliases.get(keys).?;
+    const sister = store.current.idx.aliasOf(keys).?;
     const reply = try rig.request(r.srv, a, "PUT", "/v1/notes/16", "{\"text\":\"My brother's name is Ana.\"}");
     try testing.expectEqual(@as(u16, 201), reply.status);
-    try testing.expectEqual(index.no_note, store.current.idx.aliases.get(keys).?);
-    const candidates = store.current.idx.alias_entities.get(keys).?.items;
+    try testing.expectEqual(index.no_note, store.current.idx.aliasOf(keys).?);
+    const candidates = store.current.idx.aliasCandidates(keys).?;
     try testing.expectEqual(@as(usize, 2), candidates.len);
     try testing.expect(std.mem.indexOfScalar(u32, candidates, sister) != null);
     try testing.expect(std.mem.indexOfScalar(u32, candidates, store.model.entityOf("my brother").?) != null);
@@ -84,8 +84,8 @@ test "subject aliases reject ambiguous names and recover after take back" {
     const path = try std.fmt.allocPrint(a, "/v1/notes/{d}", .{newest});
     const withdrawn = try rig.request(r.srv, a, "DELETE", path, "{}");
     try testing.expectEqual(@as(u16, 201), withdrawn.status);
-    try testing.expectEqual(sister, store.current.idx.aliases.get(keys).?);
-    try testing.expectEqualSlices(u32, &.{sister}, store.current.idx.alias_entities.get(keys).?.items);
+    try testing.expectEqual(sister, store.current.idx.aliasOf(keys).?);
+    try testing.expectEqualSlices(u32, &.{sister}, store.current.idx.aliasCandidates(keys).?);
 }
 
 test "subject aliases are consulted only by the opt in lookup view" {
@@ -121,14 +121,14 @@ test "subject aliases survive erasing an unrelated note" {
     const ids = try r.store().text.encode(a, " Ana", false);
     var keys: [index.max_phrase]u32 = @splat(index.none_key);
     for (ids, keys[0..ids.len]) |id, *key| key.* = r.store().current.idx.keyOf(id);
-    const before = r.store().current.idx.aliases.get(keys).?;
+    const before = r.store().current.idx.aliasOf(keys).?;
     const added = try rig.request(r.srv, a, "POST", "/v1/notes", "{\"text\":\"An unrelated bicycle is silver.\"}");
     try testing.expectEqual(@as(u16, 201), added.status);
     const id = r.store().model.notes.items[r.store().model.notes.items.len - 1].id;
     const path = try std.fmt.allocPrint(a, "/v1/notes/{d}?erase=true", .{id});
     const reply = try rig.request(r.srv, a, "DELETE", path, "{}");
     try testing.expectEqual(@as(u16, 200), reply.status);
-    try testing.expectEqual(before, r.store().current.idx.aliases.get(keys).?);
+    try testing.expectEqual(before, r.store().current.idx.aliasOf(keys).?);
 }
 
 test "version metadata accessors keep a held reader unchanged across a replacement" {

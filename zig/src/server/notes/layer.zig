@@ -24,6 +24,8 @@ pub const Layer = struct {
     side_keys_of: std.AutoHashMapUnmanaged(u32, []const u32) = .empty, // entity -> the pairs made since the core
     side_pairs: std.AutoHashMapUnmanaged(u32, []const u32) = .empty, // pair -> its side notes, by place
     more_entities: u32 = 0, // entities made since the core
+    side_tokens: []const []const u32 = &.{}, // each side note's token ids (the model's bodies): a merge reads them
+    side_unvalued: []const bool = &.{}, // a side note written with no value entity given (value.ofWrites names it)
 
     pub fn sidePlaceOfId(l: *const Layer, idx: *const Index, id: u32) ?u32 {
         if (id < l.first_id) return null;
@@ -42,8 +44,10 @@ pub fn build(gpa: Allocator, m: *const Model, core: *Index, retired: []const u32
     const cn: usize = core.n_notes;
     if (core.layer.core != null or core.kind != .sa or core.base == null or n < cn or !core.rank_by_note) return null;
     var last = core.max_told;
-    for (m.notes.items[cn..]) |*x| { // the tie rank is each note's own (index.zig rankAt): no order to keep
-        if (!index.rankFits(x.id, x.told)) return null;
+    var prev_id: u32 = if (cn > 0) core.idAt(@intCast(cn - 1)) else 0;
+    for (m.notes.items[cn..], cn..) |*x, p| { // the tie rank is each note's own (index.zig rankAt): no order to keep
+        if (!index.rankFits(p, x.told) or (p > 0 and x.id <= prev_id)) return null;
+        prev_id = x.id;
         last = @max(last, x.told);
     }
     const self = try gpa.create(Index);
@@ -75,6 +79,14 @@ pub fn build(gpa: Allocator, m: *const Model, core: *Index, retired: []const u32
         state[p - cn] = x.state;
     }
     self.state = state;
+    const toks = try a.alloc([]const u32, side.len);
+    const unvalued = try a.alloc(bool, side.len);
+    for (side, toks, unvalued) |*x, *t, *u| {
+        t.* = x.tokens();
+        u.* = x.source() != null and x.value_ent < 0;
+    }
+    self.layer.side_tokens = toks;
+    self.layer.side_unvalued = unvalued;
     try sideColumns(self, a, raw);
     var cur: u32 = 0;
     for (raw) |r| cur += @intFromBool(r.state == .current);
