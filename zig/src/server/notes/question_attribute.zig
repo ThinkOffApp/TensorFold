@@ -12,16 +12,46 @@ pub fn matches(attribute: []const u8, question: []const u8) bool {
     return false;
 }
 
+// Require every stored name word, and prefer more specific names. No
+// morphology or unstored synonyms are guessed by this conservative helper.
+fn specificity(attribute: []const u8, question: []const u8) usize {
+    var names = std.mem.tokenizeAny(u8, attribute, "_ -");
+    var count: usize = 0;
+    while (names.next()) |name| {
+        if (!matches(name, question)) return 0;
+        count += 1;
+    }
+    return count;
+}
+
 /// Missing pairs only, for already resolved subject ids. Existing current
 /// notes (including take-backs) are never replaced by a fabricated value.
 pub fn missingBlock(a: std.mem.Allocator, idx: anytype, subjects: []const u32, question: []const u8) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(a);
+    var subject: ?u32 = null;
+    for (subjects) |entity| {
+        if (entity >= idx.entity_names.len) continue;
+        if (subject) |previous| {
+            // Without span binding, do not assign one attribute to several subjects.
+            if (previous != entity) return out.toOwnedSlice(a);
+        } else subject = entity;
+    }
+    var selected: ?usize = null;
+    var best: usize = 0;
+    for (idx.attribute_names, 0..) |attribute, attr| {
+        const score = specificity(attribute, question);
+        if (score > best) {
+            best = score;
+            selected = attr;
+        } else if (score == best) selected = null;
+    }
+    const selected_attr = selected orelse return out.toOwnedSlice(a);
     for (subjects, 0..) |entity, at| {
         if (entity >= idx.entity_names.len) continue;
         if (std.mem.indexOfScalar(u32, subjects[0..at], entity) != null) continue;
         for (idx.attribute_names, 0..) |attribute, attr| {
-            if (!matches(attribute, question)) continue;
+            if (attr != selected_attr) continue;
             var current = false;
             var taken_back = false;
             var known = false;
@@ -36,6 +66,17 @@ pub fn missingBlock(a: std.mem.Allocator, idx: anytype, subjects: []const u32, q
                 continue;
             }
             if (current) continue;
+            // A known, differently named attribute sharing a question word
+            // makes a generic absence claim unsafe (colour vs eye_colour).
+            var related = false;
+            for (idx.ent_cur.of(entity)) |place| {
+                const other = idx.pair_attributes[idx.pairAt(place)];
+                if (matches(idx.attribute_names[other], question)) {
+                    related = true;
+                    break;
+                }
+            }
+            if (related) continue;
             // A relation may supply the value through another entity. Until
             // relation semantics are resolved, absence of a direct pair is
             // not enough evidence that the answer is unknown.
@@ -62,7 +103,7 @@ test "question attributes use stored name words only and keep ambiguity" {
     try std.testing.expect(!matches("home_city", "Where does she live?"));
 }
 
-test "missing pairs preserve known pairs and list every attribute tie once" {
+test "missing pairs suppress attribute ties and unbound multiple subjects" {
     const Groups = struct {
         pub fn of(_: @This(), entity: u32) []const u32 {
             return if (entity == 0) &.{0} else &.{};
@@ -85,12 +126,13 @@ test "missing pairs preserve known pairs and list every attribute tie once" {
     const a = std.testing.allocator;
     const got = try missingBlock(a, Fixture{}, &.{ 0, 0, 1 }, "What colour?");
     defer a.free(got);
-    try std.testing.expectEqualStrings(
-        "No note about my dog's fav_colour. If asked, say you don't know.\n" ++
-            "No note about my cat's eye_colour. If asked, say you don't know.\n" ++
-            "No note about my cat's fav_colour. If asked, say you don't know.\n",
-        got,
-    );
+    try std.testing.expectEqualStrings("", got);
+    const positive = try missingBlock(a, Fixture{}, &.{1}, "What eye colour?");
+    defer a.free(positive);
+    try std.testing.expectEqualStrings("No note about my cat's eye_colour. If asked, say you don't know.\n", positive);
+    const tie = try missingBlock(a, Fixture{}, &.{1}, "What colour?");
+    defer a.free(tie);
+    try std.testing.expectEqualStrings("", tie);
     const none = try missingBlock(a, Fixture{}, &.{}, "What colour?");
     defer a.free(none);
     try std.testing.expectEqual(@as(usize, 0), none.len);
