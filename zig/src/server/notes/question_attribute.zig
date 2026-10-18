@@ -36,6 +36,17 @@ pub fn missingBlock(a: std.mem.Allocator, idx: anytype, subjects: []const u32, q
                 continue;
             }
             if (current) continue;
+            // A relation may supply the value through another entity. Until
+            // relation semantics are resolved, absence of a direct pair is
+            // not enough evidence that the answer is unknown.
+            var linked = false;
+            for (idx.ent_cur.of(entity)) |place| {
+                if (idx.valueEntityAt(place) >= 0) {
+                    linked = true;
+                    break;
+                }
+            }
+            if (linked) continue;
             try out.print(a, "No note about {s}'s {s}. If asked, say you don't know.\n", .{ idx.entity_names[entity], attribute });
         }
     }
@@ -63,6 +74,10 @@ test "missing pairs preserve known pairs and list every attribute tie once" {
         pair_attributes: []const u32 = &.{0},
         single_takeback: []const bool = &.{false},
         ent_cur: Groups = .{},
+        link: i32 = -1,
+        pub fn valueEntityAt(f: @This(), _: u32) i32 {
+            return f.link;
+        }
         pub fn pairAt(_: @This(), _: u32) u32 {
             return 0;
         }
@@ -83,6 +98,9 @@ test "missing pairs preserve known pairs and list every attribute tie once" {
     defer a.free(withdrawn);
     try std.testing.expect(std.mem.indexOf(u8, withdrawn, "The current eye_colour of my dog is not known: the earlier value was taken back.") != null);
     try std.testing.expect(std.mem.indexOf(u8, withdrawn, "No note about my dog's eye_colour") == null);
+    const linked = try missingBlock(a, Fixture{ .link = 1 }, &.{0}, "What name?");
+    defer a.free(linked);
+    try std.testing.expectEqual(@as(usize, 0), linked.len);
 }
 
 test "a current value wins over a takeback and set takebacks do not erase an attribute" {
@@ -97,6 +115,9 @@ test "a current value wins over a takeback and set takebacks do not erase an att
         pair_attributes: []const u32 = &.{ 0, 0 },
         single_takeback: []const bool = &.{ true, false },
         ent_cur: Groups = .{},
+        pub fn valueEntityAt(_: @This(), _: u32) i32 {
+            return -1;
+        }
         pub fn pairAt(_: @This(), place: u32) u32 {
             return place;
         }
