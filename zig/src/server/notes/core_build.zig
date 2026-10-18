@@ -39,6 +39,7 @@ pub fn fromVersion(gpa: Allocator, v: *const Index) index.LoadError!*Index {
     // the notes by place
     const id = try a.alloc(u32, n);
     const state = try a.alloc(index.State, n);
+    const single_takeback = try a.alloc(bool, n);
     const told = try a.alloc(i64, n);
     const entity = try a.alloc(u32, n);
     const pair = try a.alloc(u32, n);
@@ -50,6 +51,7 @@ pub fn fromVersion(gpa: Allocator, v: *const Index) index.LoadError!*Index {
         const p: u32 = @intCast(k);
         id[k] = v.idAt(p);
         state[k] = v.stateAt(p);
+        single_takeback[k] = v.singleTakebackAt(p);
         told[k] = v.toldAt(p);
         entity[k] = v.entityAt(p);
         pair[k] = v.pairAt(p);
@@ -63,6 +65,7 @@ pub fn fromVersion(gpa: Allocator, v: *const Index) index.LoadError!*Index {
     for (id, 0..) |x, k| id_place[x] = @intCast(k);
     self.own_id = id;
     self.state = state;
+    self.own_single_takeback = single_takeback;
     self.own_told = told;
     self.own_entity = entity;
     self.own_pair = pair;

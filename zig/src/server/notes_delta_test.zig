@@ -96,6 +96,15 @@ fn oracleChecked(a: Allocator, r: *rig.Rig, qs: []const Q, bad: *usize) ![]u64 {
     const v = s.acquire();
     defer s.release(v);
     bad.* += aliasDiff(v.idx, full);
+    // Check immutable take-back metadata through both full and layered paths
+    // after every write, erase, background merge and restart.
+    for (s.model.notes.items) |n| {
+        const want = n.kind == .tombstone and !n.multi;
+        const got_place = v.idx.placeOfId(n.id).?;
+        const full_place = full.placeOfId(n.id).?;
+        bad.* += @intFromBool(v.idx.singleTakebackAt(got_place) != want);
+        bad.* += @intFromBool(full.singleTakebackAt(full_place) != want);
+    }
     return answers(a, full, qs);
 }
 

@@ -76,7 +76,7 @@ pub fn build(gpa: Allocator, m: *const Model, core: *Index, retired: []const u32
     const raw = try gpa.alloc(index.Raw, side.len); // the build's own, freed when it returns
     defer gpa.free(raw);
     for (side, raw, cn..) |*x, *r, p| {
-        r.* = .{ .id = x.id, .state = x.state, .entity = x.entity, .pair = x.pair, .value_ent = x.value_ent, .told = x.told, .line = x.line(), .cost = x.cost, .tokens = x.tokens() };
+        r.* = .{ .id = x.id, .state = x.state, .entity = x.entity, .pair = x.pair, .value_ent = x.value_ent, .told = x.told, .line = x.line(), .cost = x.cost, .tokens = x.tokens(), .single_takeback = x.kind == .tombstone and !x.multi };
         state[p - cn] = x.state;
     }
     self.state = state;
@@ -107,6 +107,7 @@ pub fn build(gpa: Allocator, m: *const Model, core: *Index, retired: []const u32
 fn sideColumns(self: *Index, a: Allocator, raw: []const index.Raw) Allocator.Error!void {
     const k = raw.len;
     const id = try a.alloc(u32, k);
+    const single_takeback = try a.alloc(bool, k);
     const told = try a.alloc(i64, k);
     const entity = try a.alloc(u32, k);
     const pair = try a.alloc(u32, k);
@@ -115,6 +116,7 @@ fn sideColumns(self: *Index, a: Allocator, raw: []const index.Raw) Allocator.Err
     const cost = try a.alloc(u32, k);
     for (raw, 0..) |r, j| {
         id[j] = r.id;
+        single_takeback[j] = r.single_takeback;
         told[j] = r.told;
         entity[j] = r.entity;
         pair[j] = r.pair;
@@ -128,6 +130,7 @@ fn sideColumns(self: *Index, a: Allocator, raw: []const index.Raw) Allocator.Err
     @memset(id_place, index.no_note);
     for (raw, 0..) |r, j| id_place[r.id - self.layer.first_id] = self.layer.core_n + @as(u32, @intCast(j));
     self.own_id = id;
+    self.own_single_takeback = single_takeback;
     self.own_told = told;
     self.own_entity = entity;
     self.own_pair = pair;

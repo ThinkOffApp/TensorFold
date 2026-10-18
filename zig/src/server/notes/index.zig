@@ -167,7 +167,7 @@ pub const Iter = struct {
 };
 
 /// One note as the snapshot gives it.
-pub const Raw = struct { id: u32, state: State, entity: u32, pair: u32, value_ent: i32, told: i64, line: []const u8, cost: u32, tokens: []const u32 };
+pub const Raw = struct { id: u32, state: State, entity: u32, pair: u32, value_ent: i32, told: i64, line: []const u8, cost: u32, tokens: []const u32, single_takeback: bool = false };
 
 pub const Index = struct {
     arena: exact.Exact, // every array at its exact size: no arena node grown 1.5 times past the postings
@@ -194,6 +194,7 @@ pub const Index = struct {
     own_value: []const i32,
     own_line: []const []const u8,
     own_cost: []const u32,
+    own_single_takeback: []const bool = &.{}, // this version's own note places
     min_line: i64, // the least any line can add in pack(): its cost and a line break (a layered version's: at most it)
     own_id_place: []const u32, // a note id (layered: less first_id) -> its place, or no_note
     own_ent_cur: Groups, // entity -> places of its current notes (O.ent_cur)
@@ -332,6 +333,11 @@ pub const Index = struct {
     }
 
     /// The entities this version knows (entity numbers below it).
+    pub fn singleTakebackAt(self: *const Index, p: u32) bool {
+        if (p < self.layer.core_n) return self.layer.core.?.singleTakebackAt(p);
+        return self.own_single_takeback[p - self.layer.core_n];
+    }
+
     pub fn entityCount(self: *const Index) usize {
         if (self.layer.core) |c| return c.own_ent_cur.len() + self.layer.more_entities;
         return self.own_ent_cur.len();
@@ -506,7 +512,7 @@ pub const Index = struct {
         self.vwordy = m.vwordy;
         const raw = try gpa.alloc(Raw, m.notes.items.len); // the build's own: freed when it returns
         defer gpa.free(raw);
-        for (m.notes.items, raw) |n, *r| r.* = .{ .id = n.id, .state = n.state, .entity = n.entity, .pair = n.pair, .value_ent = n.value_ent, .told = n.told, .line = n.line(), .cost = n.cost, .tokens = n.tokens() };
+        for (m.notes.items, raw) |n, *r| r.* = .{ .id = n.id, .state = n.state, .entity = n.entity, .pair = n.pair, .value_ent = n.value_ent, .told = n.told, .line = n.line(), .cost = n.cost, .tokens = n.tokens(), .single_takeback = n.kind == .tombstone and !n.multi };
         try ib.placeNotes(self, gpa, raw);
         try ib.groupsOf(self, m);
         self.own_phrases = .empty;

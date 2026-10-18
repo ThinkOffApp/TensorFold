@@ -78,6 +78,7 @@ pub fn placeNotes(self: *Index, gpa: Allocator, raw: []const Raw) LoadError!void
     const n = raw.len;
     const note_id = try a.alloc(u32, n);
     const state = try a.alloc(State, n);
+    const single_takeback = try a.alloc(bool, n);
     const told = try a.alloc(i64, n);
     const entity = try a.alloc(u32, n);
     const pair = try a.alloc(u32, n);
@@ -95,6 +96,7 @@ pub fn placeNotes(self: *Index, gpa: Allocator, raw: []const Raw) LoadError!void
         id_place[x.id] = @intCast(k);
         note_id[k] = x.id;
         state[k] = x.state;
+        single_takeback[k] = x.single_takeback;
         if (x.state == .current) n_cur += 1 else n_hist += 1;
         told[k] = x.told;
         entity[k] = x.entity;
@@ -111,6 +113,7 @@ pub fn placeNotes(self: *Index, gpa: Allocator, raw: []const Raw) LoadError!void
     } else try trankOf(self, gpa, a, told, note_id);
     self.own_id = note_id;
     self.state = state;
+    self.own_single_takeback = single_takeback;
     self.own_told = told;
     self.own_entity = entity;
     self.own_pair = pair;

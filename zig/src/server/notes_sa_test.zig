@@ -53,14 +53,14 @@ test "subject aliases contain only current names and first person words" {
     const store = try openSa(text.text(), notes_test.snapshot);
     defer store.deinit();
     const idx = store.current.idx;
-    try testing.expectEqual(store.model.entities.items.len, idx.entity_names.len);
-    try testing.expectEqualStrings(store.model.entities.items[0], idx.entity_names[0]);
-    try testing.expect(store.model.entities.items[0].ptr != idx.entity_names[0].ptr);
-    try testing.expectEqual(store.model.attributes.items.len, idx.attribute_names.len);
-    for (store.model.pairs.items, idx.pair_attributes) |p, attribute| try testing.expectEqual(p.attribute, attribute);
+    try testing.expectEqual(store.model.entities.items.len, idx.entityCount());
+    try testing.expectEqualStrings(store.model.entities.items[0], idx.entityName(0));
+    try testing.expect(store.model.entities.items[0].ptr != idx.entityName(0).ptr);
+    try testing.expectEqual(store.model.attributes.items.len, idx.attributeCount());
+    for (store.model.pairs.items, 0..) |p, k| try testing.expectEqual(p.attribute, idx.pairAttribute(@intCast(k)));
     for (store.model.notes.items) |n| {
         const place = idx.placeOfId(n.id).?;
-        try testing.expectEqual(n.kind == .tombstone and !n.multi, idx.single_takeback[place]);
+        try testing.expectEqual(n.kind == .tombstone and !n.multi, idx.singleTakebackAt(place));
     }
     for ([_][]const u8{ "Ana", "Bruno", "Milo", "Otto", "my", "me", "I" }) |name| {
         const spaced = try std.mem.concat(testing.allocator, u8, &.{ " ", name });

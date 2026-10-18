@@ -24,6 +24,47 @@ fn specificity(attribute: []const u8, question: []const u8) usize {
     return count;
 }
 
+fn IndexType(comptime T: type) type {
+    return switch (@typeInfo(T)) {
+        .pointer => |p| p.child,
+        else => T,
+    };
+}
+fn entityCount(idx: anytype) usize {
+    return if (@hasDecl(IndexType(@TypeOf(idx)), "entityCount")) idx.entityCount() else idx.entity_names.len;
+}
+fn attributeCount(idx: anytype) usize {
+    return if (@hasDecl(IndexType(@TypeOf(idx)), "attributeCount")) idx.attributeCount() else idx.attribute_names.len;
+}
+fn entityName(idx: anytype, e: u32) []const u8 {
+    return if (@hasDecl(IndexType(@TypeOf(idx)), "entityName")) idx.entityName(e) else idx.entity_names[e];
+}
+fn attributeName(idx: anytype, x: usize) []const u8 {
+    return if (@hasDecl(IndexType(@TypeOf(idx)), "attributeName")) idx.attributeName(@intCast(x)) else idx.attribute_names[x];
+}
+fn pairAttribute(idx: anytype, p: u32) u32 {
+    return if (@hasDecl(IndexType(@TypeOf(idx)), "pairAttribute")) idx.pairAttribute(p) else idx.pair_attributes[p];
+}
+fn singleTakeback(idx: anytype, p: u32) bool {
+    return if (@hasDecl(IndexType(@TypeOf(idx)), "singleTakebackAt")) idx.singleTakebackAt(p) else idx.single_takeback[p];
+}
+const SliceIter = struct {
+    items: []const u32,
+    at: usize = 0,
+    fn next(self: *@This()) ?u32 {
+        if (self.at == self.items.len) return null;
+        const p = self.items[self.at];
+        self.at += 1;
+        return p;
+    }
+};
+fn Current(comptime T: type) type {
+    return if (@hasDecl(IndexType(T), "entCur")) @TypeOf(@as(T, undefined).entCur(0)) else SliceIter;
+}
+fn currentPlaces(idx: anytype, e: u32) Current(@TypeOf(idx)) {
+    return if (@hasDecl(IndexType(@TypeOf(idx)), "entCur")) idx.entCur(e) else .{ .items = idx.ent_cur.of(e) };
+}
+
 /// Missing pairs only, for already resolved subject ids. Existing current
 /// notes (including take-backs) are never replaced by a fabricated value.
 pub fn missingBlock(a: std.mem.Allocator, idx: anytype, subjects: []const u32, question: []const u8) ![]const u8 {
@@ -31,7 +72,7 @@ pub fn missingBlock(a: std.mem.Allocator, idx: anytype, subjects: []const u32, q
     errdefer out.deinit(a);
     var subject: ?u32 = null;
     for (subjects) |entity| {
-        if (entity >= idx.entity_names.len) continue;
+        if (entity >= entityCount(idx)) continue;
         if (subject) |previous| {
             // Without span binding, do not assign one attribute to several subjects.
             if (previous != entity) return out.toOwnedSlice(a);
@@ -39,7 +80,8 @@ pub fn missingBlock(a: std.mem.Allocator, idx: anytype, subjects: []const u32, q
     }
     var selected: ?usize = null;
     var best: usize = 0;
-    for (idx.attribute_names, 0..) |attribute, attr| {
+    for (0..attributeCount(idx)) |attr| {
+        const attribute = attributeName(idx, attr);
         const score = specificity(attribute, question);
         if (score > best) {
             best = score;
@@ -48,30 +90,33 @@ pub fn missingBlock(a: std.mem.Allocator, idx: anytype, subjects: []const u32, q
     }
     const selected_attr = selected orelse return out.toOwnedSlice(a);
     for (subjects, 0..) |entity, at| {
-        if (entity >= idx.entity_names.len) continue;
+        if (entity >= entityCount(idx)) continue;
         if (std.mem.indexOfScalar(u32, subjects[0..at], entity) != null) continue;
-        for (idx.attribute_names, 0..) |attribute, attr| {
+        for (0..attributeCount(idx)) |attr| {
+            const attribute = attributeName(idx, attr);
             if (attr != selected_attr) continue;
             var current = false;
             var taken_back = false;
             var known = false;
-            for (idx.ent_cur.of(entity)) |place| {
-                if (idx.pair_attributes[idx.pairAt(place)] == attr) {
+            var it1 = currentPlaces(idx, entity);
+            while (it1.next()) |place| {
+                if (pairAttribute(idx, idx.pairAt(place)) == attr) {
                     current = true;
-                    if (idx.single_takeback[place]) taken_back = true else known = true;
+                    if (singleTakeback(idx, place)) taken_back = true else known = true;
                 }
             }
             if (taken_back and !known) {
-                try out.print(a, "The current {s} of {s} is not known: the earlier value was taken back. Keep the take-back as evidence that the earlier value no longer holds; do not invent a replacement.\n", .{ attribute, idx.entity_names[entity] });
+                try out.print(a, "The current {s} of {s} is not known: the earlier value was taken back. Keep the take-back as evidence that the earlier value no longer holds; do not invent a replacement.\n", .{ attribute, entityName(idx, entity) });
                 continue;
             }
             if (current) continue;
             // A known, differently named attribute sharing a question word
             // makes a generic absence claim unsafe (colour vs eye_colour).
             var related = false;
-            for (idx.ent_cur.of(entity)) |place| {
-                const other = idx.pair_attributes[idx.pairAt(place)];
-                if (matches(idx.attribute_names[other], question)) {
+            var it2 = currentPlaces(idx, entity);
+            while (it2.next()) |place| {
+                const other = pairAttribute(idx, idx.pairAt(place));
+                if (matches(attributeName(idx, other), question)) {
                     related = true;
                     break;
                 }
@@ -81,14 +126,15 @@ pub fn missingBlock(a: std.mem.Allocator, idx: anytype, subjects: []const u32, q
             // relation semantics are resolved, absence of a direct pair is
             // not enough evidence that the answer is unknown.
             var linked = false;
-            for (idx.ent_cur.of(entity)) |place| {
+            var it3 = currentPlaces(idx, entity);
+            while (it3.next()) |place| {
                 if (idx.valueEntityAt(place) >= 0) {
                     linked = true;
                     break;
                 }
             }
             if (linked) continue;
-            try out.print(a, "No note about {s}'s {s}. If asked, say you don't know.\n", .{ idx.entity_names[entity], attribute });
+            try out.print(a, "No note about {s}'s {s}. If asked, say you don't know.\n", .{ entityName(idx, entity), attribute });
         }
     }
     return out.toOwnedSlice(a);
