@@ -1,4 +1,5 @@
-//! --notes while a reply decodes: the notes looked up again at its sentence ends, and a note that scores high put in.
+//! --notes while a reply decodes: the notes looked up again when the reply writes a name the block does not cover, and a
+//! note that scores high put in. A reply makes at most `default_checks` lookups and spends at most `default_budget_ms` on them.
 const std = @import("std");
 const api = @import("engine_api");
 const json = @import("json.zig");
@@ -18,14 +19,18 @@ pub const Place = fields.Place;
 pub const Ask = fields.Ask;
 pub const asked = fields.asked;
 pub const shapeAsked = fields.shapeAsked;
-pub const sentenceEnd = fields.sentenceEnd;
 const Server = @import("server.zig").Server;
 const Value = json.Value;
 const Cx = errors.Cx;
 const Allocator = std.mem.Allocator;
 
-/// A check comes at each sentence end of the reply, and at the latest this many reply tokens after the last one.
-pub const every: u32 = 48;
+/// The most lookups one reply makes while it decodes, those that find nothing counted too ("notes_decode_checks").
+pub const default_checks: u32 = 3;
+/// The time one reply's checks may take in all, the name scans and the lookups, in ms ("notes_decode_budget_ms").
+/// A lookup under way is never cut: the budget is read before each one, so a reply can go over it by one lookup.
+pub const default_budget_ms: f64 = 50;
+/// The fewest reply tokens from one lookup to the next ("notes_decode_gap"); a name written sooner waits for them.
+pub const default_gap: u32 = 4;
 /// The most injections one reply takes.
 pub const most: usize = 2;
 /// A new note qualifies when the query names its subject and its score, that boost in it, is this share of topWeight.
@@ -76,7 +81,16 @@ pub const Live = struct {
     place: Place,
     echo: bool,
     dry: bool = false,
-    names: bool = false, // a name the reply just wrote, of an entity with notes outside the block, is a check point
+    names: bool = false, // a name the reply just wrote, of an entity with notes outside the block, is a check point (the only one)
+    max_checks: u32 = default_checks,
+    budget_ns: i96 = @intFromFloat(default_budget_ms * 1e6),
+    gap: u32 = default_gap,
+    attempts: u32 = 0, // lookups started, whatever they found
+    triggers: usize = 0, // names that asked for a lookup
+    trigger_ns: i96 = 0, // the per-token name scans, in all
+    scans: usize = 0, // the per-token name scans, counted
+    pending: bool = false, // a name asked for a lookup the gap still holds back
+    covered: std.ArrayList(u32) = .empty, // entities whose name already asked for a lookup in this reply: never again
     shape: notes_route.Shape = .{},
     markers: reply_text.Markers = reply_text.think_markers,
     held: std.ArrayList(u32) = .empty, // every note the model sees: the first block's, then the injected
@@ -92,7 +106,7 @@ pub const Live = struct {
     capped: usize = 0, // checks whose qualifying notes the cap left out
     best: Check = .{ .at = 0 },
     check_ns: i96 = 0,
-    since: u32 = 0,
+    since: u32 = 0, // reply tokens since the last lookup
     stopped: ?[]const u8 = null,
     prepared: ?*const chat.Prepared = null,
     base: ?*const api.Request = null,
@@ -127,22 +141,51 @@ pub const Live = struct {
         return l;
     }
 
-    /// Whether the token just generated (its text `piece`) is a check point; counts it.
-    pub fn due(l: *Live, piece: []const u8) bool {
+    /// Whether the cap or the budget is spent; then the checks stop for the rest of the reply, the name scans too.
+    pub fn exhausted(l: *Live) bool {
+        if (l.stopped != null) return true;
+        if (l.attempts >= l.max_checks) {
+            l.stop("the check cap ran out");
+            return true;
+        }
+        if (l.check_ns + l.trigger_ns >= l.budget_ns) {
+            l.stop("the check time budget ran out");
+            return true;
+        }
+        return false;
+    }
+
+    /// After a reply token: whether a lookup runs now. A new name not covered asks for one; the cap, the budget and
+    /// the gap decide. `found`: the entity whose name the token ended (null: none).
+    pub fn due(l: *Live, found: ?u32) Allocator.Error!bool {
         if (l.stopped != null) return false;
-        l.since += 1;
-        if (!sentenceEnd(piece) and l.since < every) return false;
+        l.since +|= 1;
+        if (found) |e| {
+            try l.covered.append(l.a, e);
+            l.triggers += 1;
+            l.pending = true;
+        }
+        if (!l.pending) return false;
+        if (l.exhausted()) return false;
+        if (l.attempts > 0 and l.since < l.gap) return false;
+        l.pending = false;
         l.since = 0;
+        l.attempts += 1;
         return true;
     }
 
     /// After a reply token (`collected` the reply so far): the continuation to switch to when a check put notes in.
     pub fn atToken(l: *Live, srv: *Server, a: Allocator, collected: []const u32) chat.Failure!?*api.Request {
         if (l.stopped != null) return null;
-        if (!l.due(try srv.text.decode(a, collected[collected.len - 1 ..]))) {
-            if (!l.names or !l.nameJustWritten(collected)) return null;
-            l.since = 0;
+        if (l.exhausted()) return null; // spent: no more name scans either
+        var found: ?u32 = null;
+        if (l.names) {
+            l.scans += 1;
+            const s0 = clock.nowNs(srv.io);
+            found = l.nameWritten(collected);
+            l.trigger_ns += clock.nowNs(srv.io) - s0;
         }
+        if (!try l.due(found)) return null;
         const t0 = clock.nowNs(srv.io);
         defer l.check_ns += clock.nowNs(srv.io) - t0;
         // a thinking reply is read whole: its reasoning is where it names who the question is about (measured)
@@ -155,10 +198,16 @@ pub const Live = struct {
 
     /// Whether the reply's last tokens end a name of an entity with a current note outside the block.
     pub fn nameJustWritten(l: *Live, collected: []const u32) bool {
+        return l.nameWritten(collected) != null;
+    }
+
+    /// The entity whose name the reply's last tokens end, when it has a current note outside the block and no earlier
+    /// name of it asked for a lookup in this reply; null: none.
+    pub fn nameWritten(l: *Live, collected: []const u32) ?u32 {
         const v = l.store.acquire();
         defer l.store.release(v);
         const idx = v.idx;
-        if (idx.ver != l.ver) return false;
+        if (idx.ver != l.ver) return null;
         var keys: [index.max_phrase]u32 = undefined;
         var n: usize = 1;
         const maximum = if (l.shape.resolve_subjects) @max(idx.phraseMax(), idx.aliasMax()) else idx.phraseMax();
@@ -175,14 +224,15 @@ pub const Live = struct {
             for (entities) |e| {
                 if (e == index.no_note) continue;
                 if (l.shape.resolve_subjects and idx.self_entity == e) continue; // the assistant's "my" is not the user's
+                if (std.mem.indexOfScalar(u32, l.covered.items, e) != null) continue; // looked up already: found or not
                 var cur = idx.entCur(e);
                 while (cur.next()) |p| {
                     const id = idx.idAt(p);
-                    if (std.mem.indexOfScalar(u32, l.held.items, id) == null and std.mem.indexOfScalar(u32, l.exclude, id) == null) return true;
+                    if (std.mem.indexOfScalar(u32, l.held.items, id) == null and std.mem.indexOfScalar(u32, l.exclude, id) == null) return e;
                 }
             }
         }
-        return false;
+        return null;
     }
 
     /// The lookup over the question and the reply so far; the new notes that score at least min_share and fit the cap.
@@ -528,7 +578,7 @@ pub fn setup(srv: *const Server, cx: *Cx, body: Value, used: ?*const notes_route
     const l = try cx.a.create(Live);
     // (b) needs a template that keeps a later system message in place; a template that makes it a user turn gets (a)
     const place: Place = if (ask.place != .first and !std.mem.eql(u8, srv.late_system, "system")) .first else ask.place;
-    l.* = .{ .a = cx.a, .on = ask.on, .store = store, .ver = readFrom(u), .question = notes_route.lastUser(messages), .past = u.past, .cap = u.cap, .exclude = notes_ask.exclude, .place = place, .echo = u.echo, .dry = ask.dry, .names = ask.names, .shape = shape, .block = u.found.block, .prepared_block = u.found.block, .block_tokens = if (u.found.block.len > 0) u.found.tokens else 0 };
+    l.* = .{ .a = cx.a, .on = ask.on, .store = store, .ver = readFrom(u), .question = notes_route.lastUser(messages), .past = u.past, .cap = u.cap, .exclude = notes_ask.exclude, .place = place, .echo = u.echo, .dry = ask.dry, .names = ask.names, .max_checks = ask.checks, .budget_ns = @intFromFloat(ask.budget_ms * 1e6), .gap = ask.gap, .shape = shape, .block = u.found.block, .prepared_block = u.found.block, .block_tokens = if (u.found.block.len > 0) u.found.tokens else 0 };
     try l.held.appendSlice(cx.a, u.found.ids);
     return l;
 }

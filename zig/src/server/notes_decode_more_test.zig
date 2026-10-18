@@ -36,7 +36,7 @@ test "(c): the new notes spliced in right before the question, everything before
     const first = got.get("notes").?.strField("block").?;
     // two system messages that normalize would merge: the splice keeps them apart, so the first one's tokens stay put
     const head = try r.ids(try std.mem.concat(a, u8, &.{ "[system]", first, "\n[system]", late, "\n[user]", question, "\n[assistant]" }));
-    try testing.expectEqualSlices(u32, try std.mem.concat(a, u32, &.{ head, try r.ids("Your sister is Anna.") }), r.script.prompts.items[1]);
+    try testing.expectEqualSlices(u32, try std.mem.concat(a, u32, &.{ head, try r.ids("Your sister is Anna") }), r.script.prompts.items[1]);
     const before = try r.ids(try std.mem.concat(a, u8, &.{ "[system]", first, "\n" }));
     try testing.expectEqualSlices(u32, before, r.script.prompts.items[0][0..before.len]);
 }
@@ -48,9 +48,10 @@ test "the name trigger: a name the reply just wrote, of someone with a note outs
     const on = (try r.ask(&.{ named_late[0], named_late[1] }, ",\"notes_decode_names\":true")).value;
     try testing.expectEqualStrings("Your sister Anna drives a red Volvo.", content(on));
     try testing.expectEqual(@as(i64, @intCast((try r.ids("Your sister Anna")).len)), injected(on)[0].get("at_token").?.int64().?);
-    // control: without it the check waits for the sentence end, after the model said what it says
-    const off = (try r.ask(&.{ named_late[0], named_late[1] }, "")).value;
-    try testing.expectEqual(@as(i64, @intCast((try r.ids(named_late[0])).len)), injected(off)[0].get("at_token").?.int64().?);
+    // control: without it there is no check point at all; the reply is the engine's first one
+    const off = (try r.ask(&.{ named_late[0], named_late[1] }, ",\"notes_decode_names\":false")).value;
+    try testing.expectEqual(@as(usize, 0), injected(off).len);
+    try testing.expectEqualStrings(named_late[0], content(off));
     // a name whose notes are all in the block, and words that name nobody, are no check point
     const held = (try r.ask(&.{named_late[2]}, ",\"notes_decode_names\":true")).value;
     try testing.expectEqual(@as(i64, 0), decodeOf(held).get("checks").?.int64().?);
@@ -117,7 +118,7 @@ test "notes_position user: the block right before the question, (a) re-renders i
     const alone = try a.dupe(u32, r.script.prompts.items[0]);
     _ = try r.ask(&.{answers[5]}, "");
     try testing.expectEqualSlices(u32, r.script.prompts.items[0], alone);
-    const said = try r.ids("Your sister is Anna.");
+    const said = try r.ids("Your sister is Anna");
     const re = (try r.askWith(&.{ answers[0], answers[1] }, msgs, ",\"notes_position\":\"user\"")).value;
     const enlarged = decodeOf(re).strField("block").?;
     try testing.expectEqualSlices(u32, try std.mem.concat(a, u32, &.{ try r.prompt(&.{ .{ "system", system }, .{ "user", earlier_user }, .{ "assistant", earlier_reply }, .{ "system", enlarged }, .{ "user", question } }), said }), r.script.prompts.items[1]);

@@ -14,8 +14,17 @@ const Allocator = std.mem.Allocator;
 /// Where new notes go: (a) into the first block, (b) a block before the assistant turn, (c) one before the question.
 pub const Place = enum { first, turn, user };
 
-/// A request's notes_decode (default on), notes_decode_place, notes_decode_names and notes_decode_dry (checks only).
-pub const Ask = struct { on: bool = true, place: Place = default_place, dry: bool = false, names: bool = default_names };
+/// A request's notes_decode (default on), notes_decode_place, notes_decode_names (false: no check point at all),
+/// notes_decode_dry (checks only), and the limits: notes_decode_checks, notes_decode_budget_ms and notes_decode_gap.
+pub const Ask = struct {
+    on: bool = true,
+    place: Place = default_place,
+    dry: bool = false,
+    names: bool = default_names,
+    checks: u32 = notes_decode.default_checks,
+    budget_ms: f64 = notes_decode.default_budget_ms,
+    gap: u32 = notes_decode.default_gap,
+};
 
 /// The defaults, measured (NOTES-DECODE.md): a hit's notes before the question, a name the reply writes a check point.
 pub const default_place: Place = .user;
@@ -59,9 +68,19 @@ pub fn asked(cx: *Cx, body: Value, notes_on: bool) errors.Refused!Ask {
     const place = body.field("notes_decode_place");
     const dry = body.field("notes_decode_dry");
     const names = body.field("notes_decode_names");
+    const checks = body.field("notes_decode_checks");
+    const budget = body.field("notes_decode_budget_ms");
+    const gap = body.field("notes_decode_gap");
     if (!notes_on) {
-        if (on != null or place != null or dry != null or names != null) return cx.refuse("notes_decode, notes_decode_place, notes_decode_names and notes_decode_dry need \"notes\": true");
+        if (on != null or place != null or dry != null or names != null or checks != null or budget != null or gap != null) return cx.refuse("the notes_decode fields need \"notes\": true");
         return ask;
+    }
+    if (checks) |v| ask.checks = std.math.cast(u32, v.int64() orelse -1) orelse return cx.refuse("notes_decode_checks must be a whole number, 0 or more");
+    if (gap) |v| ask.gap = std.math.cast(u32, v.int64() orelse -1) orelse return cx.refuse("notes_decode_gap must be a whole number of tokens, 0 or more");
+    if (budget) |v| {
+        const ms = if (v == .bool) null else v.float64();
+        if (ms == null or !(ms.? >= 0 and ms.? <= 3.6e6)) return cx.refuse("notes_decode_budget_ms must be a number of milliseconds, 0 to 3600000");
+        ask.budget_ms = ms.?;
     }
     if (names) |v| {
         if (v != .bool) return cx.refuse("notes_decode_names must be a boolean");
@@ -82,17 +101,6 @@ pub fn asked(cx: *Cx, body: Value, notes_on: bool) errors.Refused!Ask {
     return ask;
 }
 
-/// Whether a reply piece (one token's text) ends a sentence: a full stop, ! or ? before closing marks, or a line break.
-pub fn sentenceEnd(piece: []const u8) bool {
-    if (std.mem.indexOfScalar(u8, piece, '\n') != null) return true;
-    var end = piece.len;
-    while (end > 0 and std.mem.indexOfScalar(u8, "\"')]*_ \t", piece[end - 1]) != null) end -= 1;
-    const t = piece[0..end];
-    if (t.len > 0 and std.mem.indexOfScalar(u8, ".!?", t[t.len - 1]) != null) return true;
-    for ([_][]const u8{ "\u{3002}", "\u{ff01}", "\u{ff1f}", "\u{2026}" }) |m| if (std.mem.endsWith(u8, t, m)) return true;
-    return false;
-}
-
 /// The reply's notes.decode field.
 pub fn value(l: *const Live, a: Allocator) Allocator.Error!Value {
     const o = try json.newObject(a);
@@ -108,6 +116,15 @@ pub fn value(l: *const Live, a: Allocator) Allocator.Error!Value {
     if (l.dry) try o.put(a, "dry", .{ .bool = true });
     try o.put(a, "notes_decode.min_share", .{ .float = notes_decode.min_share });
     try o.put(a, "checks", try json.intValue(a, l.n_checks));
+    try o.put(a, "attempts", try json.intValue(a, l.attempts));
+    try o.put(a, "triggers", try json.intValue(a, l.triggers));
+    try o.put(a, "trigger_us", .{ .float = micro(l.trigger_ns) });
+    try o.put(a, "scans", try json.intValue(a, l.scans));
+    const limits = try json.newObject(a);
+    try limits.put(a, "checks", try json.intValue(a, l.max_checks));
+    try limits.put(a, "budget_ms", .{ .float = micro(l.budget_ns) / 1e3 });
+    try limits.put(a, "gap", try json.intValue(a, l.gap));
+    try o.put(a, "limits", .{ .object = limits });
     try o.put(a, "capped", try json.intValue(a, l.capped));
     try o.put(a, "check_us", .{ .float = micro(l.check_ns) });
     try o.put(a, "best_share", .{ .float = l.best.share });
