@@ -15,6 +15,7 @@ const side = @import("slide_side.zig");
 const wording = @import("slide_words.zig");
 const prompts = @import("slide_prompts.zig");
 const slide_route = @import("slide_route.zig");
+const probes_mod = @import("notes/promote_probes.zig");
 const routes = @import("routes.zig");
 const http_body = @import("http_body.zig");
 const Server = @import("server.zig").Server;
@@ -527,7 +528,12 @@ const Backend = struct {
 
     /// The note's own question asked about others the user knows and of the model (the learner's `others`).
     pub fn neighbours(_: *Backend, a: Allocator, question: []const u8) ![]const []const u8 {
-        return slide_route.others(a, question, null, &.{});
+        var out: std.ArrayList([]const u8) = .empty;
+        for (probes_mod.swaps) |who| if (try probes_mod.swapSubject(a, question, who)) |q| try out.append(a, q);
+        const theirs = try slide_route.others(a, question, null, &.{});
+        if (theirs.len > 0) try out.append(a, theirs[theirs.len - 1]); // asked of the model itself
+        for (theirs[0..theirs.len -| 1]) |q| try out.append(a, q); // others' things of the subject's kind, last
+        return out.items;
     }
 
     /// A question that needs both notes (a yes/no comparison or a two-step one), written by the untaught model.

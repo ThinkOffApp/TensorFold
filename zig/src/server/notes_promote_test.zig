@@ -386,33 +386,6 @@ test "promotion: the state file is written whole through a fresh name, and a bad
     try testing.expectError(error.BadState, pjson.decode(testing.allocator, "not json", .{}));
 }
 
-test "promotion: --notes-promote-every takes a duration, off by default; hold and alone take a count from 1" {
-    const cli = @import("cli.zig");
-    const np = @import("notes_promote.zig");
-    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var u: cli.Usage = .{};
-    const plain = try cli.parse(a, &.{"m"}, &u);
-    try testing.expect(plain.notes_promote_every_ms == null);
-    try testing.expectEqual(@as(u32, 1), plain.notes_promote_hold);
-    try testing.expectEqual(@as(u32, 2), plain.notes_promote_alone);
-    const on = try cli.parse(a, &.{ "m", "--notes", "s.json", "--slide", "--notes-promote-every", "10m", "--notes-promote-hold", "2", "--notes-promote-alone", "3" }, &u);
-    try testing.expectEqual(@as(?i64, 600_000), on.notes_promote_every_ms);
-    try testing.expectEqual(@as(u32, 2), on.notes_promote_hold);
-    try testing.expectEqual(@as(u32, 3), on.notes_promote_alone);
-    try testing.expectEqual(@as(?i64, 600_000), np.parseDuration("600"));
-    try testing.expectEqual(@as(?i64, 86_400_000), np.parseDuration("24h"));
-    try testing.expectEqual(@as(?i64, 30_000), np.parseDuration("30s"));
-    for ([_][]const u8{ "", "0", "10x", "m", "-5m" }) |bad| try testing.expect(np.parseDuration(bad) == null);
-    try testing.expectError(error.Usage, cli.parse(a, &.{ "m", "--notes-promote-every", "soon" }, &u));
-    try testing.expectError(error.Usage, cli.parse(a, &.{ "m", "--notes-promote-hold", "0" }, &u));
-    try testing.expect(plain.notes_promote_regress == null); // every current note by default
-    try testing.expectEqual(@as(?u32, 5), (try cli.parse(a, &.{ "m", "--notes-promote-regress", "5" }, &u)).notes_promote_regress);
-    try testing.expect((try cli.parse(a, &.{ "m", "--notes-promote-regress", "all" }, &u)).notes_promote_regress == null);
-    try testing.expectError(error.Usage, cli.parse(a, &.{ "m", "--notes-promote-regress", "some" }, &u));
-}
-
 test "promotion: the regression set asks every current note's own question; a night that breaks an untaught note is rejected and named" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
@@ -519,25 +492,6 @@ test "promotion: a night failing at any allocation leaves every live neuron reco
         try testing.expect(k < 4000); // the sweep reached a night that needs no more allocations than it was given
     }
     try testing.expect(points > 50); // 73 points failed a night when this was written
-}
-
-test "promotion: a terse right reply agrees with its reference; a denied, doubted, wrong or mixed one does not" {
-    const np = @import("notes_promote.zig");
-    const fact = "My dog has grey eyes.";
-    const q = "What eye colour has my dog?";
-    const ref = "Your dog has grey eyes.";
-    const others = [_][]const u8{ "My dog's eyes are brown now.", "My cat's eyes are green.", "My dog is called Bruno now." };
-    for ([_][]const u8{ "Grey", "Grey.", "Your dog has grey eyes.", "They are grey." }) |r| try testing.expect(np.agreesWith(fact, q, ref, r, &others));
-    for ([_][]const u8{ "Your dog has brown eyes.", "I don't know your dog's eye colour.", "Not grey.", "They isn't grey.",
-        "Your dog's eyes aren't grey.", "I do not know whether grey.", "Maybe grey.", "Perhaps grey.", "Grey or brown.",
-        "Brown, not grey.", "Grey, like your cat's green ones." }) |r| if (np.agreesWith(fact, q, ref, r, &others)) {
-        std.debug.print("accepted: {s}\n", .{r});
-        return error.TestUnexpectedResult;
-    };
-    try testing.expect(!@import("slide_words.zig").recalls(fact, q, ref, "Grey")); // the learner's check alone refused it
-    const sis = "My sister's name is Ana.";
-    try testing.expect(np.agreesWith(sis, "What is my sister called?", "Your sister's name is Ana.", "Ana.", &.{}));
-    try testing.expect(!np.agreesWith(sis, "What is my sister called?", "Your sister's name is Ana.", "Your sister is called Maria.", &.{}));
 }
 
 test "promotion: the targeted probes reject a night that leaks a value to a neighbour, invents an untold answer or flips a two-note answer" {

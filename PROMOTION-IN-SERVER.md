@@ -98,7 +98,9 @@ the notes-only control, each with the same block) found three kinds of damage th
 taught value given to the same attribute of someone else ("my sister's eyes" became green), a made-up answer to a
 personal question nobody answered ("my rabbit" became Floppy), and two-note answers broken (the cat's eyes against
 mine, a two-step country). So each fact taught or in the pocket gets, written once and kept in the state:
-its own question asked about others the user knows and of the model (the learner's `slide_route.others`, at most 3);
+its own question with its subject swapped for a near relation and for someone nobody told of ("my cat's eyes": "my
+sister's eyes", "my neighbour's eyes"; the learner's `slide_route.others` alone gives "my sister's cat's eyes", which
+misses the day-2 loss, host test), then asked of the model, at most 3;
 and one question needing it and the current note sharing the most words with it (written by the untaught model, a
 yes/no comparison or a two-step question, with its reference answer from both facts). Three fixed untold personal
 questions join the controls. A neighbour or untold probe is worse when "don't know" turns into a value or the reply

@@ -27,6 +27,23 @@ pub const Regress = struct {
     right: []bool = &.{},
 };
 
+/// Whom a fact's question is also asked about, in place of its subject: a near relation and one nobody told of.
+pub const swaps = [_][]const u8{ "sister", "neighbour" };
+
+/// `question` with its first "my X" about `who` ("my cat's eyes": "my sister's eyes"); null if none or X is who.
+pub fn swapSubject(a: Allocator, question: []const u8, who: []const u8) !?[]const u8 {
+    var i: usize = 0;
+    while (std.ascii.findIgnoreCasePos(question, i, "my ")) |at| : (i = at + 3) {
+        if (at > 0 and std.ascii.isAlphabetic(question[at - 1])) continue;
+        var j = at + 3;
+        while (j < question.len and std.ascii.isAlphabetic(question[j])) j += 1;
+        if (j == at + 3) continue;
+        if (std.ascii.eqlIgnoreCase(question[at + 3 .. j], who)) return null;
+        return try std.mem.concat(a, u8, &.{ question[0 .. at + 3], who, question[j..] });
+    }
+    return null;
+}
+
 /// Whether a reply says it does not know (the model's ways of saying nothing was told).
 pub fn unknown(reply: []const u8) bool {
     const marks = [_][]const u8{ "don't know", "do not know", "don’t know", "not sure", "no information", "haven't told", "have not told", "haven't mentioned", "have not mentioned", "not mentioned", "don't have", "do not have", "can't know", "cannot know", "no way of knowing", "not been told", "wasn't told", "unknown" };
@@ -86,11 +103,9 @@ pub fn build(s: *State, a: Allocator, b: anytype, facts: []const *Fact, notes: [
     const sa = s.alloc();
     for (facts) |f| {
         if (f.neighbours.len == 0) if (f.ask) |own| {
-            // the first few others the user knows, and the last (the question asked of the model itself)
-            const ns = try b.neighbours(a, own.q);
-            const m = @min(ns.len, neighbours_per_fact);
-            const out = try sa.alloc([]const u8, m);
-            for (out, 0..) |*q, i| q.* = try sa.dupe(u8, if (i + 1 == m and ns.len > m) ns[ns.len - 1] else ns[i]);
+            const ns = try b.neighbours(a, own.q); // the backend's order: the most telling first
+            const out = try sa.alloc([]const u8, @min(ns.len, neighbours_per_fact));
+            for (out, ns[0..out.len]) |*q, x| q.* = try sa.dupe(u8, x);
             f.neighbours = out;
         };
         if (f.pair == null) if (try partner(a, s, f, notes)) |g| {
@@ -192,6 +207,16 @@ pub fn askOf(s: *State, a: Allocator, b: anytype, facts: []const *Fact) !void {
         const ref = (try b.references(a, f.text, &.{q}))[0];
         f.ask = .{ .q = try s.alloc().dupe(u8, q), .ref = try s.alloc().dupe(u8, ref) };
     }
+}
+
+test "a fact's question about someone else in its subject's place" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expectEqualStrings("What colour are my sister's eyes?", (try swapSubject(a, "What colour are my cat's eyes?", "sister")).?);
+    try std.testing.expectEqualStrings("Where does my neighbour live?", (try swapSubject(a, "Where does my sister live?", "neighbour")).?);
+    try std.testing.expect(try swapSubject(a, "Where does my sister live?", "sister") == null);
+    try std.testing.expect(try swapSubject(a, "What do I like?", "sister") == null);
 }
 
 test "don't know and yes or no, read off a reply" {
