@@ -119,6 +119,7 @@ pub fn value(l: *const Live, a: Allocator) Allocator.Error!Value {
     try o.put(a, "attempts", try json.intValue(a, l.attempts));
     try o.put(a, "triggers", try json.intValue(a, l.triggers));
     try o.put(a, "trigger_us", .{ .float = micro(l.trigger_ns) });
+    try o.put(a, "scans", try json.intValue(a, l.scans));
     const limits = try json.newObject(a);
     try limits.put(a, "checks", try json.intValue(a, l.max_checks));
     try limits.put(a, "budget_ms", .{ .float = micro(l.budget_ns) / 1e3 });

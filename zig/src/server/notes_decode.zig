@@ -88,6 +88,7 @@ pub const Live = struct {
     attempts: u32 = 0, // lookups started, whatever they found
     triggers: usize = 0, // names that asked for a lookup
     trigger_ns: i96 = 0, // the per-token name scans, in all
+    scans: usize = 0, // the per-token name scans, counted
     pending: bool = false, // a name asked for a lookup the gap still holds back
     covered: std.ArrayList(u32) = .empty, // entities whose name already asked for a lookup in this reply: never again
     shape: notes_route.Shape = .{},
@@ -140,6 +141,20 @@ pub const Live = struct {
         return l;
     }
 
+    /// Whether the cap or the budget is spent; then the checks stop for the rest of the reply, the name scans too.
+    pub fn exhausted(l: *Live) bool {
+        if (l.stopped != null) return true;
+        if (l.attempts >= l.max_checks) {
+            l.stop("the check cap ran out");
+            return true;
+        }
+        if (l.check_ns + l.trigger_ns >= l.budget_ns) {
+            l.stop("the check time budget ran out");
+            return true;
+        }
+        return false;
+    }
+
     /// After a reply token: whether a lookup runs now. A new name not covered asks for one; the cap, the budget and
     /// the gap decide. `found`: the entity whose name the token ended (null: none).
     pub fn due(l: *Live, found: ?u32) Allocator.Error!bool {
@@ -151,14 +166,7 @@ pub const Live = struct {
             l.pending = true;
         }
         if (!l.pending) return false;
-        if (l.attempts >= l.max_checks) {
-            l.stop("the check cap ran out");
-            return false;
-        }
-        if (l.check_ns + l.trigger_ns >= l.budget_ns) {
-            l.stop("the check time budget ran out");
-            return false;
-        }
+        if (l.exhausted()) return false;
         if (l.attempts > 0 and l.since < l.gap) return false;
         l.pending = false;
         l.since = 0;
@@ -169,8 +177,10 @@ pub const Live = struct {
     /// After a reply token (`collected` the reply so far): the continuation to switch to when a check put notes in.
     pub fn atToken(l: *Live, srv: *Server, a: Allocator, collected: []const u32) chat.Failure!?*api.Request {
         if (l.stopped != null) return null;
+        if (l.exhausted()) return null; // spent: no more name scans either
         var found: ?u32 = null;
         if (l.names) {
+            l.scans += 1;
             const s0 = clock.nowNs(srv.io);
             found = l.nameWritten(collected);
             l.trigger_ns += clock.nowNs(srv.io) - s0;

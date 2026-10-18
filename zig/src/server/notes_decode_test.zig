@@ -334,9 +334,10 @@ test "the gate: a new name asks, the cap counts every lookup, the budget is read
     var m: notes_decode.Live = .{ .a = testing.allocator, .on = true, .store = undefined, .ver = 0, .question = "", .past = false, .cap = 512, .exclude = &.{}, .place = .first, .echo = false, .block = "", .block_tokens = 0, .gap = 0 };
     defer m.covered.deinit(testing.allocator);
     for (1..4) |e| try testing.expect(try m.due(@intCast(e)));
-    try testing.expect(m.stopped == null); // the cap reached, nothing more asked: not reported as run out
-    try testing.expect(!try m.due(4));
+    try testing.expect(m.stopped == null);
+    try testing.expect(m.exhausted()); // the cap reached: spent, and said so
     try testing.expectEqualStrings("the check cap ran out", m.stopped.?);
+    try testing.expect(!try m.due(4));
     try testing.expect(!try m.due(5));
     try testing.expectEqual(@as(u32, 3), m.attempts);
 }
@@ -625,11 +626,11 @@ test "the cap: three lookups a reply by default, a fourth name is told the cap r
     defer r.deinit();
     const capped = decodeOf((try r.ask(&.{five_names}, ",\"notes_decode_dry\":true")).value);
     try testing.expectEqual(@as(i64, 3), capped.get("attempts").?.int64().?);
-    try testing.expectEqual(@as(i64, 4), capped.get("triggers").?.int64().?); // the fifth name came after the stop
+    try testing.expectEqual(@as(i64, 3), capped.get("triggers").?.int64().?); // the fourth and fifth came after the stop
     try testing.expectEqualStrings("the check cap ran out", capped.strField("stopped").?);
     try testing.expectEqual(@as(i64, 3), capped.get("limits").?.get("checks").?.int64().?);
-    // control: with a cap of 5 every name gets its lookup and nothing ran out
-    const all = decodeOf((try r.ask(&.{five_names}, ",\"notes_decode_dry\":true,\"notes_decode_checks\":5")).value);
+    // control: with a cap of 6 every name gets its lookup and nothing ran out (a cap of 5 would be spent after the tent)
+    const all = decodeOf((try r.ask(&.{five_names}, ",\"notes_decode_dry\":true,\"notes_decode_checks\":6")).value);
     try testing.expectEqual(@as(i64, 5), all.get("attempts").?.int64().?);
     try testing.expect(all.get("stopped").? == .null);
     // the budget: read before each lookup, so with 0 ms the first name finds it spent
@@ -642,4 +643,26 @@ test "the cap: three lookups a reply by default, a fourth name is told the cap r
     // no name scan at all: notes_decode_names false makes no check point
     const nameless = decodeOf((try r.ask(&.{five_names}, ",\"notes_decode_names\":false")).value);
     try testing.expectEqual(@as(i64, 0), nameless.get("attempts").?.int64().?);
+}
+
+test "spent means spent: after the cap or the budget runs out, the rest of a long reply makes no name scan at all" {
+    var r: Rig = .{ .legacy = "" };
+    try r.init(&(answers ++ [_][]const u8{ "Anna", "Anna " ++ long_plain }));
+    defer r.deinit();
+    const reply = "Anna " ++ long_plain;
+    // a cap of 1: Anna's lookup at the first token, then the cap is spent and not one more token is scanned
+    const cap = decodeOf((try r.ask(&.{reply}, ",\"notes_decode_dry\":true,\"notes_decode_checks\":1")).value);
+    try testing.expectEqual(@as(i64, 1), cap.get("attempts").?.int64().?);
+    try testing.expectEqual(@as(i64, 1), cap.get("scans").?.int64().?);
+    try testing.expectEqualStrings("the check cap ran out", cap.strField("stopped").?);
+    // a budget of 0: spent before the first token, so no scan and no lookup
+    const budget = decodeOf((try r.ask(&.{reply}, ",\"notes_decode_dry\":true,\"notes_decode_budget_ms\":0")).value);
+    try testing.expectEqual(@as(i64, 0), budget.get("scans").?.int64().?);
+    try testing.expectEqual(@as(i64, 0), budget.get("attempts").?.int64().?);
+    try testing.expectEqualStrings("the check time budget ran out", budget.strField("stopped").?);
+    // control: with room left, every token of the same reply is scanned
+    const room = decodeOf((try r.ask(&.{reply}, ",\"notes_decode_dry\":true")).value);
+    const n: i64 = @intCast((try r.ids(reply)).len);
+    try testing.expectEqual(n, room.get("scans").?.int64().?);
+    try testing.expectEqual(@as(i64, 1), room.get("attempts").?.int64().?);
 }
