@@ -24,9 +24,12 @@ test "missing note prefetch is opt in and fits the exact token cap" {
     // This fixture has an entity-valued relation for the cat. Without a
     // relation parser, a missing direct owner pair is not proof of absence.
     try testing.expect(std.mem.indexOf(u8, on.block, "No note about my cat's owner.") == null);
-    // The experimental block may drop unrelated subjects; every retained id
-    // still came from the original retrieval, never an invented note.
-    for (on.ids) |id| try testing.expect(std.mem.indexOfScalar(u32, off.ids, id) != null);
+    try testing.expectEqualSlices(u32, off.ids, on.ids);
+    const mixed = try text.text().encode(a, "Does my dog like what I like?", false);
+    const mixed_off = try store.retrieveQuestion(a, text.text(), mixed, false, 4096, &.{}, null, true, false);
+    const mixed_on = try store.retrieveQuestion(a, text.text(), mixed, false, 4096, &.{}, null, true, true);
+    try testing.expectEqualSlices(u32, mixed_off.ids, mixed_on.ids);
+    for ([_]u32{ 5, 28, 29 }) |id| try testing.expect(std.mem.indexOfScalar(u32, mixed_on.ids, id) != null);
     try testing.expectEqual((try text.text().encode(a, on.block, false)).len, on.tokens);
     const capped = try store.retrieveQuestion(a, text.text(), q, false, 1, &.{}, null, true, true);
     try testing.expect(capped.tokens <= 1);
