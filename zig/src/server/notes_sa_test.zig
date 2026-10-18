@@ -20,10 +20,10 @@ test "missing note prefetch is opt in and fits the exact token cap" {
     const q = try text.text().encode(a, "Who is my cat's owner?", false);
     const off = try store.retrieveQuestion(a, text.text(), q, false, 4096, &.{}, null, true, false);
     const on = try store.retrieveQuestion(a, text.text(), q, false, 4096, &.{}, null, true, true);
-    try testing.expect(std.mem.indexOf(u8, off.block, "No note about") == null);
+    try testing.expect(std.mem.indexOf(u8, off.block, "There is no note about") == null);
     // This fixture has an entity-valued relation for the cat. Without a
     // relation parser, a missing direct owner pair is not proof of absence.
-    try testing.expect(std.mem.indexOf(u8, on.block, "No note about my cat's owner.") == null);
+    try testing.expect(std.mem.indexOf(u8, on.block, "There is no note about my cat's owner.") == null);
     try testing.expectEqualSlices(u32, off.ids, on.ids);
     const mixed = try text.text().encode(a, "Does my dog like what I like?", false);
     const mixed_off = try store.retrieveQuestion(a, text.text(), mixed, false, 4096, &.{}, null, true, false);
@@ -32,20 +32,20 @@ test "missing note prefetch is opt in and fits the exact token cap" {
     for ([_]u32{ 5, 28, 29 }) |id| try testing.expect(std.mem.indexOfScalar(u32, mixed_on.ids, id) != null);
     const absence_q = try text.text().encode(a, "Who is my car's owner?", false);
     const absence = try store.retrieveQuestion(a, text.text(), absence_q, false, 4096, &.{}, null, true, true);
-    try testing.expect(std.mem.indexOf(u8, absence.block, "No note about my car's owner.") != null);
+    try testing.expect(std.mem.indexOf(u8, absence.block, "There is no note about my car's owner.") != null);
     const baseline = try store.retrieveSubjects(a, text.text(), absence_q, false, 4096, &.{}, null, true);
     const disabled = try store.retrieveQuestion(a, text.text(), absence_q, false, 4096, &.{}, null, true, false);
     try testing.expectEqualStrings(baseline.block, disabled.block);
     const colour_q = try text.text().encode(a, "What colour are my dog's eyes?", false);
     const colour = try store.retrieveQuestion(a, text.text(), colour_q, false, 4096, &.{}, null, true, true);
-    try testing.expect(std.mem.indexOf(u8, colour.block, "No note about") == null);
+    try testing.expect(std.mem.indexOf(u8, colour.block, "There is no note about") == null);
     try testing.expectEqual((try text.text().encode(a, on.block, false)).len, on.tokens);
     const capped = try store.retrieveQuestion(a, text.text(), q, false, 1, &.{}, null, true, true);
     try testing.expect(capped.tokens <= 1);
-    try testing.expect(std.mem.indexOf(u8, capped.block, "No note about") == null);
+    try testing.expect(std.mem.indexOf(u8, capped.block, "There is no note about") == null);
     const unresolved = try text.text().encode(a, "Who is my sister's owner?", false);
     const guarded = try store.retrieveQuestion(a, text.text(), unresolved, false, 4096, &.{}, null, true, true);
-    try testing.expect(std.mem.indexOf(u8, guarded.block, "No note about me's") == null);
+    try testing.expect(std.mem.indexOf(u8, guarded.block, "There is no note about me's") == null);
 }
 
 test "subject aliases contain only current names and first person words" {

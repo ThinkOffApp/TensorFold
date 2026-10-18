@@ -22,6 +22,15 @@ annotations. Ordinary requests retain their existing behavior.
 
 Known limitations:
 
+- With no retrieved evidence, the block intentionally contains only the
+  absence annotation, without a notes heading. It remains outside quoted data.
+- Erase does not remove entity/attribute vocabulary. A question-resolved alias
+  can therefore still name an erased entity in an absence annotation.
+- Display replaces underscores with spaces only; it does not invent synonym
+  expansions (for example, `fav` is not silently expanded to `favourite`).
+- The model gate must include a yes/no question about a withdrawn value,
+  such as "Is purple my cousin's favourite colour?", not only open questions.
+
 - Self absence is suppressed because an unrecognized possessive relation can
   otherwise resolve to the user (for example, “my sister” falling back to “my”).
 - No general relation parser, implicit-subject resolution or ambiguous-name

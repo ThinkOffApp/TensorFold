@@ -95,6 +95,8 @@ pub fn missingBlock(a: std.mem.Allocator, idx: anytype, subjects: []const u32, q
         for (0..attributeCount(idx)) |attr| {
             const attribute = attributeName(idx, attr);
             if (attr != selected_attr) continue;
+            const display = try std.mem.replaceOwned(u8, a, attribute, "_", " ");
+            defer a.free(display);
             var current = false;
             var taken_back = false;
             var known = false;
@@ -106,7 +108,7 @@ pub fn missingBlock(a: std.mem.Allocator, idx: anytype, subjects: []const u32, q
                 }
             }
             if (taken_back and !known) {
-                try out.print(a, "The current {s} of {s} is not known: the earlier value was taken back. Keep the take-back as evidence that the earlier value no longer holds; do not invent a replacement.\n", .{ attribute, entityName(idx, entity) });
+                try out.print(a, "The current {s} of {s} is not known: the earlier value was taken back. Keep the take-back as evidence that the earlier value no longer holds; do not invent a replacement.\n", .{ display, entityName(idx, entity) });
                 continue;
             }
             if (current) continue;
@@ -134,7 +136,7 @@ pub fn missingBlock(a: std.mem.Allocator, idx: anytype, subjects: []const u32, q
                 }
             }
             if (linked) continue;
-            try out.print(a, "No note about {s}'s {s}. If asked, say you don't know.\n", .{ entityName(idx, entity), attribute });
+            try out.print(a, "There is no note about {s}'s {s}. If asked, say you don't know.\n", .{ entityName(idx, entity), display });
         }
     }
     return out.toOwnedSlice(a);
@@ -175,7 +177,7 @@ test "missing pairs suppress attribute ties and unbound multiple subjects" {
     try std.testing.expectEqualStrings("", got);
     const positive = try missingBlock(a, Fixture{}, &.{1}, "What eye colour?");
     defer a.free(positive);
-    try std.testing.expectEqualStrings("No note about my cat's eye_colour. If asked, say you don't know.\n", positive);
+    try std.testing.expectEqualStrings("There is no note about my cat's eye colour. If asked, say you don't know.\n", positive);
     const tie = try missingBlock(a, Fixture{}, &.{1}, "What colour?");
     defer a.free(tie);
     try std.testing.expectEqualStrings("", tie);
@@ -184,8 +186,12 @@ test "missing pairs suppress attribute ties and unbound multiple subjects" {
     try std.testing.expectEqual(@as(usize, 0), none.len);
     const withdrawn = try missingBlock(a, Fixture{ .single_takeback = &.{true} }, &.{0}, "What eye colour?");
     defer a.free(withdrawn);
-    try std.testing.expect(std.mem.indexOf(u8, withdrawn, "The current eye_colour of my dog is not known: the earlier value was taken back.") != null);
-    try std.testing.expect(std.mem.indexOf(u8, withdrawn, "No note about my dog's eye_colour") == null);
+    try std.testing.expect(std.mem.indexOf(u8, withdrawn, "The current eye colour of my dog is not known: the earlier value was taken back.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, withdrawn, "There is no note about my dog's eye colour") == null);
+    const yes_no = try missingBlock(a, Fixture{ .single_takeback = &.{true} }, &.{0}, "Is purple my dog's eye colour?");
+    defer a.free(yes_no);
+    try std.testing.expectEqualStrings(withdrawn, yes_no);
+    try std.testing.expect(std.mem.indexOf(u8, yes_no, "No, ") == null);
     const linked = try missingBlock(a, Fixture{ .link = 1 }, &.{0}, "What name?");
     defer a.free(linked);
     try std.testing.expectEqual(@as(usize, 0), linked.len);
