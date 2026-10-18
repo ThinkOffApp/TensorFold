@@ -145,7 +145,7 @@ pub const LaneHost = struct {
         var asks = h.forgets.take();
         var held: std.ArrayList(*const pc.Entry) = .empty;
         const room = if (held.ensureTotalCapacity(h.gpa, h.admitted.items.len)) |_| true else |_| false;
-        for (h.admitted.items) |job| if (job.entry) |e| held.appendAssumeCapacity(e);
+        if (room) for (h.admitted.items) |job| if (job.entry) |e| held.appendAssumeCapacity(e);
         for (asks.items) |ask| {
             ask.out = .{};
             for (h.queued.items) |job| if (prompt_forget.carries(job.request.prompt, ask.span)) {
@@ -610,6 +610,25 @@ pub const LaneHost = struct {
         h.takeCancels();
     }
 };
+
+test "forget with an active cache entry and no memory for held entries stays incomplete" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var h: LaneHost = .{ .gpa = failing.allocator(), .io = std.testing.io, .core = undefined, .info_ = .{} };
+    const request: Request = .{ .prompt = &.{ 50, 51 }, .max_tokens = 1 };
+    var entry: pc.Entry = undefined;
+    var job: LaneHost.Job = .{ .host = &h, .id = 1, .request = &request, .sink = undefined, .entry = &entry };
+    try h.admitted.append(std.testing.allocator, &job);
+    defer h.admitted.deinit(std.testing.allocator);
+    var ask: prompt_forget.Ask = .{ .span = &.{ 50, 51 } };
+    try h.forgets.asks.append(std.testing.allocator, &ask);
+    defer h.forgets.close(std.testing.allocator, std.testing.io);
+    h.takeForgets();
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expect(ask.done);
+    try std.testing.expectEqual(@as(u32, 1), ask.out.held);
+    try std.testing.expectEqual(@as(u32, 1), ask.out.in_flight);
+    try std.testing.expect(!ask.out.complete());
+}
 
 /// The prompt length a request's kept states count as: its own, or for a warm pass the request whose reply it prefills.
 fn born(r: *const Request) u32 {
