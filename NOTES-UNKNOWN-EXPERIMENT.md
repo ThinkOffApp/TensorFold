@@ -6,8 +6,11 @@ prototype's measured accuracy result. Enable it per request with
 
 For present-time queries with an unambiguous non-self subject, annotations
 are appended without filtering or removing any retrieved notes, including
-self facts and take-backs. Stored attribute-name words identify potentially
-asked attributes. Missing pairs receive an explicit absence line; a current
+self facts and take-backs. All words of a stored attribute name must match;
+only a unique most-specific attribute is eligible. Multiple distinct subjects
+are suppressed until span binding exists. A current attribute sharing a
+question word also suppresses a generic absence claim. Missing pairs receive
+an explicit absence line; a current
 single-valued take-back receives an unknown-current-value annotation while
 retaining the evidence that the earlier value no longer holds. A set-item
 take-back does not make the whole attribute unknown. All added text is counted

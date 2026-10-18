@@ -30,6 +30,15 @@ test "missing note prefetch is opt in and fits the exact token cap" {
     const mixed_on = try store.retrieveQuestion(a, text.text(), mixed, false, 4096, &.{}, null, true, true);
     try testing.expectEqualSlices(u32, mixed_off.ids, mixed_on.ids);
     for ([_]u32{ 5, 28, 29 }) |id| try testing.expect(std.mem.indexOfScalar(u32, mixed_on.ids, id) != null);
+    const absence_q = try text.text().encode(a, "Who is my car's owner?", false);
+    const absence = try store.retrieveQuestion(a, text.text(), absence_q, false, 4096, &.{}, null, true, true);
+    try testing.expect(std.mem.indexOf(u8, absence.block, "No note about my car's owner.") != null);
+    const baseline = try store.retrieveSubjects(a, text.text(), absence_q, false, 4096, &.{}, null, true);
+    const disabled = try store.retrieveQuestion(a, text.text(), absence_q, false, 4096, &.{}, null, true, false);
+    try testing.expectEqualStrings(baseline.block, disabled.block);
+    const colour_q = try text.text().encode(a, "What colour are my dog's eyes?", false);
+    const colour = try store.retrieveQuestion(a, text.text(), colour_q, false, 4096, &.{}, null, true, true);
+    try testing.expect(std.mem.indexOf(u8, colour.block, "No note about") == null);
     try testing.expectEqual((try text.text().encode(a, on.block, false)).len, on.tokens);
     const capped = try store.retrieveQuestion(a, text.text(), q, false, 1, &.{}, null, true, true);
     try testing.expect(capped.tokens <= 1);
