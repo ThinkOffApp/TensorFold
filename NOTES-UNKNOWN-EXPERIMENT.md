@@ -4,9 +4,9 @@ This is an incomplete, off-by-default server experiment, not the client
 prototype's measured accuracy result. Enable it per request with
 `"notes": true, "notes_subjects": true, "notes_unknown": true`.
 
-For present-time queries with an unambiguous non-self subject, the initial
-retrieval is restricted to that subject and at most two value links among
-the notes already selected. Stored attribute-name words identify potentially
+For present-time queries with an unambiguous non-self subject, annotations
+are appended without filtering or removing any retrieved notes, including
+self facts and take-backs. Stored attribute-name words identify potentially
 asked attributes. Missing pairs receive an explicit absence line; a current
 single-valued take-back receives an unknown-current-value annotation while
 retaining the evidence that the earlier value no longer holds. A set-item

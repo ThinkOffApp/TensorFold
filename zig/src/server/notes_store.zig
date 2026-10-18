@@ -304,35 +304,8 @@ pub const Store = struct {
         const io = s.io;
         const t0 = clock.nowNs(io);
         const packed_notes = try lookup.lookup(idx, sc, qids, past, cap, exclude, s.long);
-        var chosen = try a.dupe(u32, packed_notes.chosen);
-        if (unknown and resolve_subjects and !past) {
-            var subjects: std.ArrayList(u32) = .empty;
-            for (sc.found.items, sc.found_weights.items) |entity, weight| {
-                if (idx.self_entity == entity or weight != 1) continue;
-                try subjects.append(a, entity);
-            }
-            // Keep linked subjects already reached by retrieval, but do not
-            // expand unbounded groups or invent an unresolved relation.
-            if (subjects.items.len > 0) {
-                for (0..2) |_| {
-                    const before = subjects.items.len;
-                    for (chosen) |place| {
-                        if (std.mem.indexOfScalar(u32, subjects.items[0..before], idx.entityAt(place)) == null) continue;
-                        const target = idx.valueEntityAt(place);
-                        if (target < 0) continue;
-                        const entity: u32 = @intCast(target);
-                        if (std.mem.indexOfScalar(u32, subjects.items, entity) == null) try subjects.append(a, entity);
-                    }
-                }
-                var keep: usize = 0;
-                for (chosen) |place| {
-                    if (std.mem.indexOfScalar(u32, subjects.items, idx.entityAt(place)) == null) continue;
-                    chosen[keep] = place;
-                    keep += 1;
-                }
-                chosen = chosen[0..keep];
-            }
-        }
+        // Unknown annotations may append evidence, never remove retrieved facts.
+        const chosen = try a.dupe(u32, packed_notes.chosen);
         var shown = try lookup.render(idx, sc, chosen);
         const t1 = clock.nowNs(io);
         // fit(): the whole block counted by the model's tokenizer; the lowest ranked note goes while it is over the cap
