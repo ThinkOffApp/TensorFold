@@ -4,6 +4,35 @@ TensorFold 1.0.11 serves language models from a Zig binary on Apple Silicon and 
 The engine reads checkpoints, tokenizes requests and runs Metal or CUDA kernels directly.
 Serving needs no Python or MLX installation.
 
+## Notes review branch (experimental)
+
+This branch is review code, not an upstream release. The code baseline is
+`6e71a087`. It includes in-server note retrieval, journal-backed writes,
+live note fetching, opt-in current-name/"me" resolution, live-fit allocation
+and retry safeguards, and temporary prefetch-tokenization allocation fixes.
+The unfinished unknown-note response wiring and multilingual prototype are
+not included. Nightly promotion and context injection D are separate branches.
+
+Notes require a server configured with `--notes` and a request opting in with
+`"notes": true`. Subject resolution additionally requires `"notes_subjects": true`
+(default false). Within a notes-enabled request, live checks default on;
+`"notes_decode": false` disables them. These are distinct switches, not a claim
+that every experimental feature is off inside a notes-enabled request.
+
+At the code baseline, the full CPU server test suite passed 319 of 319 tests
+(`zig build test-server -Dcpu=apple_m1`). A scripted HTTP streaming test also
+retains the committed reply prefix across one fetch, without duplicate text.
+That is not a Metal/CUDA gate receipt. Still open for the live-fetch handoff:
+platform streamed examples with two fetches; drafted/plain and concurrent/solo
+equivalence after restart; measured cache-prefix reuse; and fetch/extra-prompt
+token counts in the final done log. Earlier backend equivalence failures must
+remain visible rather than being treated as passed by this source review.
+
+Bounded write scaling and durable erasure/serving-barrier guarantees remain
+unfinished (see [the write-path plan](NOTES-WRITE-SCALING.md)). Shared-name
+relation disambiguation, full unknown-note handling, and multilingual retrieval
+are also unfinished. No promotion, erasure or platform gate is certified here.
+
 ## Mac app
 
 The [TensorFold desktop workspace](app/README.md) bundles the local engine, model downloads, hardware recommendations, live generation metrics, coding workers and document editing.
