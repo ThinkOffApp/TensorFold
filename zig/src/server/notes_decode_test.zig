@@ -1,4 +1,5 @@
-//! The decode-time note lookup (notes_decode.zig): check points, what qualifies, limits, the switch, the off switch.
+//! The decode-time note lookup (notes_decode.zig): check points (new names only), what qualifies, the cap, the budget and
+//! the gap, the switch, the off switch.
 const std = @import("std");
 const api = @import("engine_api");
 const server = @import("root.zig");
@@ -239,8 +240,8 @@ pub const Script = struct {
 pub const Rig = struct {
     words: Words = .{},
     links: bool = false,
-    /// Fields every request sends first (a request's own come after and win): the first version's behaviour.
-    legacy: []const u8 = ",\"notes_decode_place\":\"first\",\"notes_decode_names\":false,\"notes_value_hop\":false",
+    /// Fields every request sends first (a request's own come after and win): the first version's placement and lookup.
+    legacy: []const u8 = ",\"notes_decode_place\":\"first\",\"notes_value_hop\":false",
     script: Script = undefined,
     srv: *server.Server = undefined,
     arena: std.heap.ArenaAllocator = .init(testing.allocator),
@@ -306,19 +307,38 @@ pub fn injected(reply: Value) []Value {
     return decodeOf(reply).get("injected").?.array;
 }
 
-pub const answers = [_][]const u8{ "Your sister is Anna. She drives a red car.", " She drives a red Volvo.", "Your sister is Anna. Anna is kind.", " Anna is kind.", "I have a red bicycle too, I think.", "I do not know. Paris is in France.", "Your sister is Anna. Your brother is Otto. Your dog is Rex. Bye.", " Your brother is Otto. Your dog is Rex. Bye.", " Your dog is Rex. Bye.", "Maybe the boat is involved." };
+/// A continuation starts right after the name that asked for its lookup: ". She ...", not " She ...".
+pub const answers = [_][]const u8{ "Your sister is Anna. She drives a red car.", ". She drives a red Volvo.", "Your sister is Anna. Anna is kind.", ". Anna is kind.", "I have a red bicycle too, I think.", "I do not know. Paris is in France.", "Your sister is Anna. Your brother is Otto. Your dog is Rex. Bye.", ". Your brother is Otto. Your dog is Rex. Bye.", ". Your dog is Rex. Bye.", "Maybe the boat is involved.", long_plain, "Anna is here. Anna is there. Anna is everywhere.", five_names };
 
-test "a check at each sentence end, and at the latest every 48 reply tokens" {
-    for ([_][]const u8{ ".", "!", "?", " Anna.", "?\"", ".)", "**.**", "\n", " done.\n", "\u{3002}" }) |p| try testing.expect(notes_decode.sentenceEnd(p));
-    for ([_][]const u8{ "", " Anna", ",", "3", " Mr", ":", ";" }) |p| try testing.expect(!notes_decode.sentenceEnd(p));
+/// Many sentence ends and line breaks, no name: the reply that made 88 checks of a 256-token count before.
+pub const long_plain = "I do not know.\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\nIt is late. It is dark! Is it? Yes. No. Maybe.\nThat is all."; // 52 tokens, under the rig's 64
+/// Five names, each far enough from the last for the gap.
+pub const five_names = "Anna is here today. Otto is here today. Rex is here today. The boat is here today. The tent is here today.";
+
+test "the gate: a new name asks, the cap counts every lookup, the budget is read before one, the gap holds one back" {
     var l: notes_decode.Live = .{ .a = testing.allocator, .on = true, .store = undefined, .ver = 0, .question = "", .past = false, .cap = 512, .exclude = &.{}, .place = .first, .echo = false, .block = "", .block_tokens = 0 };
-    for (0..47) |_| try testing.expect(!l.due(" word"));
-    try testing.expect(l.due(" word")); // the 48th token without a sentence end
-    try testing.expect(l.due(".")); // a sentence end at once
-    for (0..10) |_| try testing.expect(!l.due(" word"));
-    try testing.expect(l.due("?"));
-    l.off("off");
-    try testing.expect(!l.due("."));
+    defer l.covered.deinit(testing.allocator);
+    for (0..100) |_| try testing.expect(!try l.due(null)); // no name: never, however long the reply
+    try testing.expect(try l.due(5)); // a name: at once, the first lookup waits for no gap
+    try testing.expect(!try l.due(6)); // another name 1 token later: held back by the gap of 4
+    try testing.expect(!try l.due(null));
+    try testing.expect(!try l.due(null));
+    try testing.expect(try l.due(null)); // 4 tokens on: the held-back name's lookup
+    try testing.expectEqual(@as(u32, 2), l.attempts);
+    try testing.expectEqualSlices(u32, &.{ 5, 6 }, l.covered.items);
+    l.check_ns = l.budget_ns; // the budget spent
+    for (0..4) |_| try testing.expect(!try l.due(null));
+    try testing.expect(!try l.due(7));
+    try testing.expectEqualStrings("the check time budget ran out", l.stopped.?);
+    // the cap: a third lookup, then a fourth name finds the cap spent
+    var m: notes_decode.Live = .{ .a = testing.allocator, .on = true, .store = undefined, .ver = 0, .question = "", .past = false, .cap = 512, .exclude = &.{}, .place = .first, .echo = false, .block = "", .block_tokens = 0, .gap = 0 };
+    defer m.covered.deinit(testing.allocator);
+    for (1..4) |e| try testing.expect(try m.due(@intCast(e)));
+    try testing.expect(m.stopped == null); // the cap reached, nothing more asked: not reported as run out
+    try testing.expect(!try m.due(4));
+    try testing.expectEqualStrings("the check cap ran out", m.stopped.?);
+    try testing.expect(!try m.due(5));
+    try testing.expectEqual(@as(u32, 3), m.attempts);
 }
 
 test "a note qualifies when the reply names its subject; shared words alone never qualify one (the negative control)" {
@@ -358,7 +378,7 @@ test "on a hit the reply switches: the note joins the first block, the reply so 
     const inj = injected(got);
     try testing.expectEqual(@as(usize, 1), inj.len);
     try testing.expectEqualStrings("2", inj[0].get("ids").?.array[0].int);
-    const said = try r.ids("Your sister is Anna.");
+    const said = try r.ids("Your sister is Anna"); // the check came at the name, before the sentence ended
     try testing.expectEqual(@as(i64, @intCast(said.len)), inj[0].get("at_token").?.int64().?);
     // the continuation: the enlarged first block, the question, then the reply's own tokens so far
     const block = decodeOf(got).strField("block").?;
@@ -423,7 +443,7 @@ test "placement (b): the new notes in a short block of their own before the assi
     const late = decodeOf(got).strField("block").?;
     try testing.expectEqualStrings("Current:\n[2] \"Anna drives a red Volvo.\"", late); // the first block's head is not said again
     const first = got.get("notes").?.strField("block").?;
-    const want = try std.mem.concat(r.arena.allocator(), u32, &.{ try r.prompt(&.{ .{ "system", first }, .{ "user", question }, .{ "system", late } }), try r.ids("Your sister is Anna.") });
+    const want = try std.mem.concat(r.arena.allocator(), u32, &.{ try r.prompt(&.{ .{ "system", first }, .{ "user", question }, .{ "system", late } }), try r.ids("Your sister is Anna") });
     try testing.expectEqualSlices(u32, want, r.script.prompts.items[1]);
 }
 
@@ -455,9 +475,9 @@ test "a note is never put in twice, and a reply takes two injections at most" {
     // the second continuation starts from the prepared prompt too: the first block with both notes in, in told order
     const both = decodeOf(three).strField("block").?;
     try testing.expect(std.mem.endsWith(u8, both, "[1] \"My sister is Anna.\"\n[2] \"Anna drives a red Volvo.\"\n[3] \"My brother is Otto.\"\n[4] \"Otto works at the harbour.\"\n[5] \"My dog is Rex.\""));
-    const so_far = try r.ids("Your sister is Anna. Your brother is Otto.");
+    const so_far = try r.ids("Your sister is Anna. Your brother is Otto");
     try testing.expectEqualSlices(u32, try std.mem.concat(a, u32, &.{ try r.prompt(&.{ .{ "system", both }, .{ "user", question } }), so_far }), r.script.prompts.items[2]);
-    // control: without the cap of two, Rex's note would have qualified at that sentence end
+    // control: without the cap of two, Rex's note would have qualified at his name
     var m: notes_decode.Live = .{ .a = a, .on = true, .store = r.srv.notes.?, .ver = 0, .question = question, .past = false, .cap = 512, .exclude = &.{}, .place = .first, .echo = false, .block = "", .block_tokens = 0 };
     for (decodeOf(three).get("ids").?.array) |id| try m.held.append(a, @intCast(id.int64().?));
     try testing.expectEqualSlices(u32, &.{6}, (try m.check(r.words.text(), a, "Your dog is Rex.", 20)).?.ids);
@@ -497,11 +517,11 @@ test "notes_decode false: one request, the same first prompt, the reply as the e
     try testing.expectEqualStrings("Your sister is Anna. She drives a red car.", content(off));
     try testing.expect(!decodeOf(off).get("on").?.bool);
     try testing.expect(decodeOf(on).get("on").?.bool);
-    // the negative control through the server: checks run, nothing is put in, one request
+    // the negative control through the server: a reply that names nobody makes no check and puts nothing in
     const none = (try r.ask(&.{answers[5]}, "")).value;
     try testing.expectEqual(@as(usize, 1), r.script.prompts.items.len);
     try testing.expectEqual(@as(usize, 0), injected(none).len);
-    try testing.expect(decodeOf(none).get("checks").?.int64().? >= 2);
+    try testing.expectEqual(@as(i64, 0), decodeOf(none).get("checks").?.int64().?);
     // a dry run checks and reports, and puts nothing in
     const dry = (try r.ask(&.{ answers[0], answers[1] }, ",\"notes_decode_dry\":true")).value;
     try testing.expectEqual(@as(usize, 1), r.script.prompts.items.len);
@@ -511,12 +531,12 @@ test "notes_decode false: one request, the same first prompt, the reply as the e
 
 test "a thinking reply is read whole: a name in its reasoning brings the note in before the answer" {
     var r: Rig = .{};
-    try r.init(&.{ "Her name is Anna. What does she drive?</think>A red car.", " What does she drive? Anna drives a red Volvo.</think>A red Volvo." });
+    try r.init(&.{ "Her name is Anna. What does she drive?</think>A red car.", ". What does she drive? Anna drives a red Volvo.</think>A red Volvo." });
     defer r.deinit();
-    const got = (try r.ask(&.{ "Her name is Anna. What does she drive?</think>A red car.", " What does she drive? Anna drives a red Volvo.</think>A red Volvo." }, ",\"chat_template_kwargs\":{\"enable_thinking\":true}")).value;
+    const got = (try r.ask(&.{ "Her name is Anna. What does she drive?</think>A red car.", ". What does she drive? Anna drives a red Volvo.</think>A red Volvo." }, ",\"chat_template_kwargs\":{\"enable_thinking\":true}")).value;
     const inj = injected(got);
     try testing.expectEqual(@as(usize, 1), inj.len);
-    try testing.expectEqual(@as(i64, @intCast((try r.ids("Her name is Anna.")).len)), inj[0].get("at_token").?.int64().?);
+    try testing.expectEqual(@as(i64, @intCast((try r.ids("Her name is Anna")).len)), inj[0].get("at_token").?.int64().?);
     try testing.expectEqualStrings("A red Volvo.", content(got));
     const reasoning = got.get("choices").?.array[0].get("message").?.strField("reasoning_content").?;
     try testing.expectEqualStrings("Her name is Anna. What does she drive? Anna drives a red Volvo.", reasoning);
@@ -534,6 +554,11 @@ test "the request fields: wrong types and the decode fields without notes are re
         .{ .extra = ",\"notes_decode_names\":\"yes\"", .message = "notes_decode_names must be a boolean" },
         .{ .extra = ",\"notes_value_hop\":1", .message = "notes_value_hop must be a boolean" },
         .{ .extra = ",\"notes_position\":\"last\"", .message = "notes_position must be \"first\" or \"user\"" },
+        .{ .extra = ",\"notes_decode_checks\":-1", .message = "notes_decode_checks must be a whole number, 0 or more" },
+        .{ .extra = ",\"notes_decode_checks\":1.5", .message = "notes_decode_checks must be a whole number, 0 or more" },
+        .{ .extra = ",\"notes_decode_gap\":\"4\"", .message = "notes_decode_gap must be a whole number of tokens, 0 or more" },
+        .{ .extra = ",\"notes_decode_budget_ms\":-1", .message = "notes_decode_budget_ms must be a number of milliseconds, 0 to 3600000" },
+        .{ .extra = ",\"notes_decode_budget_ms\":true", .message = "notes_decode_budget_ms must be a number of milliseconds, 0 to 3600000" },
     }) |c| {
         const got = try r.ask(&.{answers[0]}, c.extra);
         try testing.expectEqual(@as(u16, 400), got.status);
@@ -544,5 +569,77 @@ test "the request fields: wrong types and the decode fields without notes are re
     r.script.replies = &.{answers[0]};
     const got = try rig.request(r.srv, a, "POST", "/v1/chat/completions", body);
     try testing.expectEqual(@as(u16, 400), got.status);
-    try testing.expectEqualStrings("notes_decode, notes_decode_place, notes_decode_names and notes_decode_dry need \"notes\": true", got.value.get("error").?.strField("message").?);
+    try testing.expectEqualStrings("the notes_decode fields need \"notes\": true", got.value.get("error").?.strField("message").?);
+}
+
+test "no new name, no check: a long reply of sentence ends and line breaks is notes_decode false's reply, token for token" {
+    var r: Rig = .{ .legacy = "" }; // the server's defaults
+    try r.init(&answers);
+    defer r.deinit();
+    const a = r.arena.allocator();
+    const on = (try r.ask(&.{long_plain}, "")).value;
+    try testing.expectEqual(@as(usize, 1), r.script.prompts.items.len);
+    const on_prompt = try a.dupe(u32, r.script.prompts.items[0]);
+    const d = decodeOf(on);
+    try testing.expect(d.get("on").?.bool);
+    try testing.expectEqual(@as(i64, 0), d.get("checks").?.int64().?); // the old cadence made one at each of its 21 line and sentence ends
+    try testing.expectEqual(@as(i64, 0), d.get("attempts").?.int64().?);
+    try testing.expectEqual(@as(i64, 0), d.get("triggers").?.int64().?);
+    try testing.expect(d.get("stopped").? == .null);
+    const off = (try r.ask(&.{long_plain}, ",\"notes_decode\":false")).value;
+    try testing.expectEqualSlices(u32, on_prompt, r.script.prompts.items[0]);
+    try testing.expectEqualStrings(long_plain, content(on));
+    try testing.expectEqualStrings(content(off), content(on));
+    try testing.expectEqualStrings(on.get("usage").?.get("completion_tokens").?.int, off.get("usage").?.get("completion_tokens").?.int);
+    try testing.expectEqualStrings(on.get("choices").?.array[0].strField("finish_reason").?, off.get("choices").?.array[0].strField("finish_reason").?);
+    try testing.expectEqualStrings(on.get("notes").?.strField("block").?, off.get("notes").?.strField("block").?);
+}
+
+test "a new name makes exactly one lookup; a name already looked up never asks again, even when it found nothing" {
+    var r: Rig = .{ .legacy = "" };
+    try r.init(&answers);
+    defer r.deinit();
+    const one = (try r.ask(&.{ answers[0], answers[1] }, ",\"notes_decode_place\":\"first\"")).value;
+    try testing.expectEqual(@as(i64, 1), decodeOf(one).get("attempts").?.int64().?);
+    try testing.expectEqual(@as(i64, 1), decodeOf(one).get("checks").?.int64().?);
+    try testing.expectEqual(@as(usize, 1), injected(one).len);
+    // dry: Anna's lookup puts nothing in, so her note stays outside the block, and her name comes twice more
+    const dry = (try r.ask(&.{answers[11]}, ",\"notes_decode_dry\":true")).value;
+    try testing.expectEqual(@as(i64, 1), decodeOf(dry).get("attempts").?.int64().?);
+    try testing.expectEqual(@as(i64, 1), decodeOf(dry).get("triggers").?.int64().?);
+    try testing.expectEqual(@as(usize, 1), r.script.prompts.items.len);
+    // control: the name scan itself still sees the uncovered note at the third "Anna"; only the covered list stops it
+    const store = r.srv.notes.?;
+    const a = r.arena.allocator();
+    var l: notes_decode.Live = .{ .a = a, .on = true, .store = store, .ver = store.current.idx.ver, .question = question, .past = false, .cap = 512, .exclude = &.{}, .place = .first, .echo = false, .block = "", .block_tokens = 0 };
+    for (decodeOf(dry).get("ids").?.array) |id| try l.held.append(a, @intCast(id.int64().?));
+    const upto = try r.ids("Anna is here. Anna is there. Anna");
+    const e = l.nameWritten(upto).?;
+    try l.covered.append(a, e);
+    try testing.expect(l.nameWritten(upto) == null);
+}
+
+test "the cap: three lookups a reply by default, a fourth name is told the cap ran out; the budget, the same at 0 ms" {
+    var r: Rig = .{ .legacy = "" };
+    try r.init(&answers);
+    defer r.deinit();
+    const capped = decodeOf((try r.ask(&.{five_names}, ",\"notes_decode_dry\":true")).value);
+    try testing.expectEqual(@as(i64, 3), capped.get("attempts").?.int64().?);
+    try testing.expectEqual(@as(i64, 4), capped.get("triggers").?.int64().?); // the fifth name came after the stop
+    try testing.expectEqualStrings("the check cap ran out", capped.strField("stopped").?);
+    try testing.expectEqual(@as(i64, 3), capped.get("limits").?.get("checks").?.int64().?);
+    // control: with a cap of 5 every name gets its lookup and nothing ran out
+    const all = decodeOf((try r.ask(&.{five_names}, ",\"notes_decode_dry\":true,\"notes_decode_checks\":5")).value);
+    try testing.expectEqual(@as(i64, 5), all.get("attempts").?.int64().?);
+    try testing.expect(all.get("stopped").? == .null);
+    // the budget: read before each lookup, so with 0 ms the first name finds it spent
+    const broke = decodeOf((try r.ask(&.{five_names}, ",\"notes_decode_dry\":true,\"notes_decode_budget_ms\":0")).value);
+    try testing.expectEqual(@as(i64, 0), broke.get("attempts").?.int64().?);
+    try testing.expectEqualStrings("the check time budget ran out", broke.strField("stopped").?);
+    // the gap: a large one holds the second lookup back past the reply's end
+    const gapped = decodeOf((try r.ask(&.{five_names}, ",\"notes_decode_dry\":true,\"notes_decode_gap\":1000")).value);
+    try testing.expectEqual(@as(i64, 1), gapped.get("attempts").?.int64().?);
+    // no name scan at all: notes_decode_names false makes no check point
+    const nameless = decodeOf((try r.ask(&.{five_names}, ",\"notes_decode_names\":false")).value);
+    try testing.expectEqual(@as(i64, 0), nameless.get("attempts").?.int64().?);
 }
