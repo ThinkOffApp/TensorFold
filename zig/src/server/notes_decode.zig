@@ -267,7 +267,8 @@ pub const Live = struct {
         // Failed prefixes shrink geometrically: total rendered note volume is
         // below twice the initial pool, rather than every descending prefix.
         // This may leave spare room; the exact tokenizer still enforces cap.
-        while (n > 0) : (n = nextFitPrefix(n)) {
+        // Keep legacy prefix selection when subject resolution is disabled.
+        while (n > 0) : (n = if (l.shape.resolve_subjects) nextFitPrefix(n) else n - 1) {
             // Failed fits must not accumulate in the request arena. This
             // bounds temporary memory, independently of how many fits fail.
             var fit_arena = std.heap.ArenaAllocator.init(s.gpa);
