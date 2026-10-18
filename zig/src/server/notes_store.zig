@@ -3,7 +3,7 @@ const std = @import("std");
 const model_text = @import("model_text.zig");
 const clock = @import("clock.zig");
 const index = @import("notes/index.zig");
-const sa = @import("notes/sa.zig");
+const bounded = @import("notes/bounded.zig");
 const lookup = @import("notes/lookup.zig");
 const model_mod = @import("notes/model.zig");
 const write = @import("notes/write.zig");
@@ -60,6 +60,7 @@ pub const Store = struct {
     long: index.Long = .{}, // sa: matches longer than n_max (off: the lookup LLWZ's tests check)
     side_max: u32 = 1024, // sa: a write's version keeps its base while at most this many notes are past it
     merges: u64 = 0, // sa: bases built by writes and merges since startup (the load's not counted)
+    bw: bounded.Writes = .{}, // sa: versions as a core plus a delta, merged on a thread (notes/bounded.zig)
     defer_erase_merge: bool = false, // tests only: an erase that leaves the old base and model to a later merge
     parked: std.ArrayList(*Model) = .empty, // the models such an erase left
 
@@ -174,7 +175,9 @@ pub const Store = struct {
             return e;
         };
         errdefer idx.deinit();
-        try @import("notes/alias.zig").populate(idx, m, text);
+        s.bw.alias_memo.gpa = s.gpa;
+        errdefer s.bw.alias_memo.deinit(s.gpa);
+        try @import("notes/alias.zig").populateMemo(idx, m, text, &s.bw.alias_memo); // read once, kept for writes
         const v = try gpa.create(Version);
         v.* = .{ .idx = idx };
         s.current = v;
@@ -198,6 +201,7 @@ pub const Store = struct {
 
     pub fn deinit(s: *Store) void {
         const parent = s.zeroing.child;
+        s.bw.deinit(s); // first: a merge in flight reads a version freed below
         for (s.free.items) |k| {
             k.sc.deinit();
             s.gpa.destroy(k);
@@ -206,6 +210,7 @@ pub const Store = struct {
         for (s.retired.items) |v| freeVersion(s.gpa, v);
         s.retired.deinit(s.gpa);
         freeVersion(s.gpa, s.current);
+        s.bw.reaper.join(); // the cores those versions let go, freed on their own threads
         for (s.parked.items) |m| m.deinit();
         s.parked.deinit(s.gpa);
         s.log.deinit();
@@ -246,14 +251,16 @@ pub const Store = struct {
         const kept = s.free.pop();
         const epoch = s.epoch;
         s.lock.unlock(s.io);
+        var room: usize = 0; // a scratch for fewer notes comes back with room for more: writes add them one by one
         if (kept) |k| {
             if (k.epoch == epoch and k.sc.slot.len >= idx.notes() and (idx.kind != .sa or k.sc.seen.len >= idx.notes())) return k;
+            if (k.epoch == epoch) room = @max(1024, idx.notes() / 8);
             k.sc.deinit(); // made before an erase, or for fewer notes
             s.gpa.destroy(k);
         }
         const k = try s.gpa.create(Kept);
         errdefer s.gpa.destroy(k);
-        k.* = .{ .sc = try lookup.Scratch.init(s.gpa, idx), .epoch = epoch };
+        k.* = .{ .sc = try lookup.Scratch.initRoom(s.gpa, idx, room), .epoch = epoch };
         return k;
     }
 
@@ -352,6 +359,7 @@ pub const Store = struct {
         s.retired.appendAssumeCapacity(s.current);
         s.current = v;
         if (erase) s.epoch += 1;
+        if (erase) s.bw.alias_memo.model = null; // an erase's model may reuse the old one's address
     }
 
     /// Frees the pool's scratches made before the last erase (they may hold an erased note's text). Never allocates.
@@ -370,36 +378,24 @@ pub const Store = struct {
         }
     }
 
-    /// A new numbered version; sa: on the current base while side_max or fewer notes follow it, else a merge.
+    /// A new numbered version; sa: layered on the current core while the delta is under its limits, else a merge.
     pub fn build(s: *Store) !*Version {
-        var reuse: ?*sa.Base = null;
-        if (s.kind == .sa) if (s.current.idx.base) |b| {
-            if (s.model.notes.items.len - b.notes <= s.side_max) reuse = b;
-        };
-        return s.buildOn(reuse);
-    }
-
-    fn buildOn(s: *Store, reuse: ?*sa.Base) !*Version {
-        const idx = try index.Index.buildWith(s.gpa, s.model, s.kind, reuse);
-        errdefer idx.deinit();
-        try @import("notes/alias.zig").populate(idx, s.model, s.text);
-        const v = try s.gpa.create(Version);
-        v.* = .{ .idx = idx };
-        idx.ver = s.next_ver;
-        if (s.kind == .sa and reuse == null) s.merges += 1;
-        return v;
+        return bounded.build(s, &.{});
     }
 
     /// sa: the side buffer merged now, and what a deferred erase left freed; postings: the index built again.
     pub fn merge(s: *Store) !void {
         s.writer.lockUncancelable(s.io);
         defer s.writer.unlock(s.io);
+        s.bw.stop();
         try s.retired.ensureUnusedCapacity(s.gpa, 1);
-        const v = try s.buildOn(null);
+        const v = try bounded.full(s);
         s.swap(v, false);
         s.next_ver += 1;
+        s.bw.core_retired.clearRetainingCapacity();
         if (s.parked.items.len > 0) { // what a deferred erase left: freed as an erase frees it
             s.reclaim(true);
+            s.bw.reaper.join();
             for (s.parked.items) |m| m.deinit();
             s.parked.clearRetainingCapacity();
             s.sweep();

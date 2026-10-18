@@ -42,7 +42,12 @@ pub const Scratch = struct {
     const lists = .{ "touched", "pool", "keys", "qkeys", "qgrams", "found", "found_weights", "spans", "chosen", "order", "ids", "scores", "block", "hits", "codes", "long" };
 
     pub fn init(gpa: Allocator, idx: *const Index) Allocator.Error!Scratch {
-        const n = idx.notes();
+        return initRoom(gpa, idx, 0);
+    }
+
+    /// init() with room for `room` notes more (written after it): a store that grows makes one now and then.
+    pub fn initRoom(gpa: Allocator, idx: *const Index, room: usize) Allocator.Error!Scratch {
+        const n = idx.notes() + room;
         const slot = try gpa.alloc(Slot, n);
         errdefer gpa.free(slot);
         const xstamp = try gpa.alloc(u32, n);
@@ -115,15 +120,16 @@ pub const Rendered = struct {
     block: []const u8, // "" when nothing is retrieved
 };
 
-/// Python's order key (-score, -told, id) as one u128 that sorts ascending: score bits, tie rank, then the place.
-pub fn orderKey(score: f64, trank: u32, place: u32) u128 {
+/// Python's order key (-score, -told, id) as one u128 that sorts ascending: score bits, then the tie rank (rankAt).
+pub fn orderKey(score: f64, rank: u64) u128 {
     const b: u64 = @bitCast(score);
     const up: u64 = if (b >> 63 != 0) ~b else b | (@as(u64, 1) << 63); // ascending with the score
-    return (@as(u128, ~up) << 64) | (@as(u128, trank) << 32) | place;
+    return (@as(u128, ~up) << 64) | rank;
 }
 
-inline fn placeOf(k: u128) u32 {
-    return @truncate(k);
+/// The place an order key was made for.
+pub inline fn placeOf(idx: *const Index, k: u128) u32 {
+    return idx.placeOfRank(@truncate(k));
 }
 
 /// The k smallest keys first, in no order (nth_element); keys are distinct, so this is heapq.nsmallest(k, ...).
@@ -154,16 +160,16 @@ fn selectFirst(ks: []u128, k: usize) void {
 /// NoteStore.subjects: entities whose phrase the question holds, longest first, none inside another; repeats count.
 fn subjects(idx: *const Index, sc: *Scratch) Allocator.Error!void {
     const q = sc.qkeys.items;
-    if (idx.phrases.count() == 0 and !idx.settings.resolve_subjects) return;
-    const maximum = if (idx.settings.resolve_subjects) @max(idx.phrase_max, idx.alias_max) else idx.phrase_max;
+    if (idx.phraseCount() == 0 and !idx.settings.resolve_subjects) return;
+    const maximum = if (idx.settings.resolve_subjects) @max(idx.phraseMax(), idx.aliasMax()) else idx.phraseMax();
     var n: usize = @min(q.len, index.max_phrase, maximum);
     while (n >= 1) : (n -= 1) {
         var j: usize = 0;
         while (j + n <= q.len) : (j += 1) {
             const phrase = index.packPhrase(q[j..][0..n]);
-            const ordinary = if (n >= 2) idx.phrases.get(phrase) else null;
-            const alias = if (idx.settings.resolve_subjects) idx.aliases.get(phrase) else null;
-            const candidates = if (idx.settings.resolve_subjects and ordinary == null) idx.alias_entities.get(phrase) else null;
+            const ordinary = if (n >= 2) idx.phraseOf(phrase) else null;
+            const alias = if (idx.settings.resolve_subjects) idx.aliasOf(phrase) else null;
+            const candidates = if (idx.settings.resolve_subjects and ordinary == null) idx.aliasCandidates(phrase) else null;
             if (ordinary == null and alias == null and candidates == null) continue;
             var inside = false;
             for (sc.spans.items) |sp| {
@@ -177,11 +183,11 @@ fn subjects(idx: *const Index, sc: *Scratch) Allocator.Error!void {
             if (candidates) |cs| {
                 // Normalized entity IDF: a unique alias has full strength;
                 // common names retain all candidates with weaker evidence.
-                const entities: f64 = @floatFromInt(@max(idx.ent_cur.off.len - 1, cs.items.len));
-                const count: f64 = @floatFromInt(cs.items.len);
+                const entities: f64 = @floatFromInt(@max(idx.entityCount(), cs.len));
+                const count: f64 = @floatFromInt(cs.len);
                 const weight = idx.log(1.0 + (entities - count + 0.5) / (count + 0.5)) /
                     idx.log(1.0 + (entities - 0.5) / 1.5);
-                for (cs.items) |e| {
+                for (cs) |e| {
                     if (!idx.settings.resolve_self and idx.self_entity == e) continue;
                     try sc.found.append(sc.gpa, e);
                     try sc.found_weights.append(sc.gpa, weight);
@@ -325,8 +331,15 @@ pub fn lookup(idx: *const Index, sc: *Scratch, qids: []const u32, past: bool, ca
         const top = idx.log(1.0 + (@as(f64, @floatFromInt(N)) - 0.5) / 1.5) * st.subject;
         try subjects(idx, sc);
         for (sc.found.items, sc.found_weights.items) |e, weight| {
-            for (idx.ent_cur.of(e)) |i| sc.add(i, top * weight);
-            if (past) for (idx.ent_keys.of(e)) |k| for (idx.pair_notes.of(k)) |i| sc.add(i, top * weight);
+            var cur = idx.entCur(e);
+            while (cur.next()) |i| sc.add(i, top * weight);
+            if (past) {
+                var ks = idx.entKeys(e);
+                while (ks.next()) |k| {
+                    var ns = idx.pairNotes(k);
+                    while (ns.next()) |i| sc.add(i, top * weight);
+                }
+            }
         }
     }
     if (excluding) { // for i in exclude: score.pop(i, None)
@@ -346,7 +359,7 @@ pub fn lookup(idx: *const Index, sc: *Scratch, qids: []const u32, past: bool, ca
 
     // the candidate cut: the 4*room best when there are more than 8*room candidates (4 tokens a line or more)
     const room: usize = @intCast(@max(1, @divFloor(@as(i64, cap) - @as(i64, idx.fx_head), 4)));
-    for (sc.touched.items) |i| sc.keys.appendAssumeCapacity(orderKey(sc.slot[i].score, idx.rankAt(i), i));
+    for (sc.touched.items) |i| sc.keys.appendAssumeCapacity(orderKey(sc.slot[i].score, idx.rankAt(i)));
     var direct = sc.keys.items;
     if (direct.len > 8 * room) {
         selectFirst(direct, 4 * room);
@@ -358,36 +371,36 @@ pub fn lookup(idx: *const Index, sc: *Scratch, qids: []const u32, past: bool, ca
     std.sort.pdq(u128, direct[0..head_n], {}, std.sort.asc(u128));
     if (st.min_rel > 0) {
         // the kept ones keep their order, so the sorted head stays first
-        const floor = sc.slot[placeOf(direct[0])].score * st.min_rel;
+        const floor = sc.slot[placeOf(idx, direct[0])].score * st.min_rel;
         var w: usize = 0;
         for (direct) |k| {
-            if (sc.slot[placeOf(k)].score >= floor) {
+            if (sc.slot[placeOf(idx, k)].score >= floor) {
                 direct[w] = k;
                 w += 1;
             }
         }
         direct = direct[0..w];
     }
-    for (direct) |k| sc.toPool(placeOf(k));
+    for (direct) |k| sc.toPool(placeOf(idx, k));
     // one hop from the best direct matches; a hop note scores hop_weight of the note that brought it in
     for (direct[0..@min(direct.len, st.hop_from)]) |k| {
-        const i = placeOf(k);
+        const i = placeOf(idx, k);
         const s = sc.slot[i].score * st.hop_weight;
-        var near: [3][]const u32 = undefined;
+        var near: [3]index.Iter = undefined;
         var nn: usize = 0;
         if (st.hop != .none) {
-            near[nn] = idx.ent_cur.of(idx.entityAt(i));
+            near[nn] = idx.entCur(idx.entityAt(i));
             nn += 1;
             if (st.hop == .subject_value and idx.valueEntityAt(i) >= 0) {
-                near[nn] = idx.ent_cur.of(@intCast(idx.valueEntityAt(i)));
+                near[nn] = idx.entCur(@intCast(idx.valueEntityAt(i)));
                 nn += 1;
             }
         }
         if (past and st.hop_history) {
-            near[nn] = idx.pair_notes.of(idx.pairAt(i));
+            near[nn] = idx.pairNotes(idx.pairAt(i));
             nn += 1;
         }
-        for (near[0..nn]) |js| for (js) |j| {
+        for (near[0..nn]) |*js| while (js.next()) |j| {
             if (excluding and sc.xstamp[j] == sc.gen) continue;
             if (s > sc.get(j)) {
                 sc.slot[j].stamp = sc.gen;
@@ -399,7 +412,7 @@ pub fn lookup(idx: *const Index, sc: *Scratch, qids: []const u32, past: bool, ca
 
     // pack(): sorted a part at a time; the walk stops once no line could fit, where Python's walk only skips
     sc.keys.clearRetainingCapacity();
-    for (sc.pool.items) |i| sc.keys.appendAssumeCapacity(orderKey(sc.slot[i].score, idx.rankAt(i), i));
+    for (sc.pool.items) |i| sc.keys.appendAssumeCapacity(orderKey(sc.slot[i].score, idx.rankAt(i)));
     var used: u32 = idx.fx_head;
     var has_cur = false;
     var has_hist = false;
@@ -412,7 +425,7 @@ pub fn lookup(idx: *const Index, sc: *Scratch, qids: []const u32, past: bool, ca
         std.sort.pdq(u128, rest[0..m], {}, std.sort.asc(u128));
         for (rest[0..m]) |k| {
             if (@as(i64, cap) - @as(i64, used) < idx.min_line) break :walk;
-            const i = placeOf(k);
+            const i = placeOf(idx, k);
             const cur = idx.stateAt(i) == .current;
             if (!cur and !past) continue;
             const titled = if (cur) has_cur else has_hist;
@@ -497,7 +510,7 @@ test "the order key sorts as Python's (-score, -told, id), and selectFirst as so
     std.sort.pdq(u32, &by, T{ .told = &told }, T.less);
     var trank: [n]u32 = undefined;
     for (by, 0..) |x, k| trank[x] = @intCast(k);
-    for (0..n) |i| keys[i] = orderKey(score[i], trank[i], @intCast(i));
+    for (0..n) |i| keys[i] = orderKey(score[i], (@as(u64, trank[i]) << 32) | i); // the full build's layout
     const P = struct {
         score: []const f64,
         told: []const i64,
@@ -510,15 +523,15 @@ test "the order key sorts as Python's (-score, -told, id), and selectFirst as so
     std.sort.pdq(u32, &places, P{ .score = &score, .told = &told }, P.less);
     var all = keys;
     std.sort.pdq(u128, &all, {}, std.sort.asc(u128));
-    for (all, 0..) |k, i| try std.testing.expectEqual(places[i], placeOf(k));
+    for (all, 0..) |k, i| try std.testing.expectEqual(places[i], @as(u32, @truncate(k)));
     for ([_]usize{ 1, 2, 37, 250, 499 }) |k| {
         var ks = keys;
         selectFirst(&ks, k);
         std.sort.pdq(u128, ks[0..k], {}, std.sort.asc(u128));
         try std.testing.expectEqualSlices(u128, all[0..k], ks[0..k]);
     }
-    try std.testing.expect(orderKey(0.5, 0, 0) < orderKey(0.25, 0, 0)); // a higher score sorts first
-    try std.testing.expect(orderKey(0.5, 0, 9) < orderKey(0.5, 1, 0)); // then the tie order
+    try std.testing.expect(orderKey(0.5, 0) < orderKey(0.25, 0)); // a higher score sorts first
+    try std.testing.expect(orderKey(0.5, 9) < orderKey(0.5, 1 << 32)); // then the tie order
 }
 
 test "the weights' log is the C library's bit for bit, where Zig's own log differs" {

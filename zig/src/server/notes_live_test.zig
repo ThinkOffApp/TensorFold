@@ -130,14 +130,14 @@ fn check(r: *rig.Rig, a: std.mem.Allocator, cp: Value) !usize {
 
 /// The script run on a fresh rig, `skip` (a step index) left out; differences per checkpoint name.
 fn run(a: std.mem.Allocator, skip: ?usize, restart: bool) !Ran {
-    return runKind(a, skip, restart, .postings, 1024);
+    return runKind(a, skip, restart, .postings, 1024, false);
 }
 
 const Ran = struct { replies: usize, checks: [3]usize, after_restart: usize, merges: u64 = 0, side_at_checks: [3]usize = .{ 0, 0, 0 } };
 
 /// run() on a store with the n-gram index of `kind` (sa: a merge once the side buffer passes `side_max` notes).
-fn runKind(a: std.mem.Allocator, skip: ?usize, restart: bool, kind: @import("notes_store.zig").IndexKind, side_max: u32) !Ran {
-    const r = try rig.Rig.initKind(testing.allocator, kind, side_max);
+fn runKind(a: std.mem.Allocator, skip: ?usize, restart: bool, kind: @import("notes_store.zig").IndexKind, side_max: u32, background: bool) !Ran {
+    const r = try rig.Rig.initWith(testing.allocator, .{ .kind = kind, .side_max = side_max, .background = background });
     defer r.deinit();
     const doc = (try json.parse(a, rig.writes_json)).ok;
     var replies: usize = 0;
@@ -167,7 +167,7 @@ fn runKind(a: std.mem.Allocator, skip: ?usize, restart: bool, kind: @import("not
 test "the suffix-array index: the fixture's writes give Python's replies, blocks and notes with the side buffer never merged" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const got = try runKind(arena.allocator(), null, true, .sa, 1_000_000);
+    const got = try runKind(arena.allocator(), null, true, .sa, 1_000_000, false);
     try testing.expectEqual(@as(usize, 0), got.replies);
     try testing.expectEqual([3]usize{ 0, 0, 0 }, got.checks);
     try testing.expectEqual(@as(usize, 0), got.after_restart);
@@ -177,20 +177,21 @@ test "the suffix-array index: the fixture's writes give Python's replies, blocks
 test "the suffix-array index: the same with a merge at every write, and with one every third note" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    for ([_]u32{ 0, 3 }) |side_max| {
-        const got = try runKind(arena.allocator(), null, true, .sa, side_max);
+    for ([_]u32{ 0, 3 }) |side_max| for ([_]bool{ false, true }) |background| { // merges in the write, or on a thread
+        const got = try runKind(arena.allocator(), null, true, .sa, side_max, background);
         try testing.expectEqual(@as(usize, 0), got.replies);
         try testing.expectEqual([3]usize{ 0, 0, 0 }, got.checks);
         try testing.expectEqual(@as(usize, 0), got.after_restart);
+        if (background) continue; // when a thread's merge comes in is the scheduler's (notes_layer_test.zig waits)
         try testing.expect(got.merges > 0);
         if (side_max == 0) try testing.expectEqual([3]usize{ 0, 0, 0 }, got.side_at_checks);
-    }
+    };
 }
 
 test "negative control: the suffix-array index with one take-back left out differs from Python at the next checkpoint" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const got = try runKind(arena.allocator(), 7, false, .sa, 1_000_000);
+    const got = try runKind(arena.allocator(), 7, false, .sa, 1_000_000, false);
     try testing.expectEqual(@as(usize, 0), got.checks[0]);
     try testing.expect(got.checks[1] > 0);
 }

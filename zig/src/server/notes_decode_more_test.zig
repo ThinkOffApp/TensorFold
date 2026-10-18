@@ -97,9 +97,9 @@ test "a written note's value entity is the entity its text names; a snapshot's n
     }
     const idx = try index.Index.build(testing.allocator, m);
     defer idx.deinit();
-    try testing.expectEqual(@as(i32, 1), idx.value_ent[0]); // "My sister is Anna." names Anna (entity 1)
-    try testing.expectEqual(@as(i32, -1), idx.value_ent[6]); // "I have a red bicycle." names nobody
-    try testing.expectEqual(@as(i32, -1), idx.value_ent[2]); // "My brother is Otto." is a snapshot's note
+    try testing.expectEqual(@as(i32, 1), idx.valueEntityAt(0)); // "My sister is Anna." names Anna (entity 1)
+    try testing.expectEqual(@as(i32, -1), idx.valueEntityAt(6)); // "I have a red bicycle." names nobody
+    try testing.expectEqual(@as(i32, -1), idx.valueEntityAt(2)); // "My brother is Otto." is a snapshot's note
     try testing.expectEqual(@as(?u32, 3), value.named(idx, try w.ids(a, "My brother is Otto."), 2));
 }
 

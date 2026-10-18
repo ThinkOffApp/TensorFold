@@ -3,6 +3,7 @@ const std = @import("std");
 const json = @import("../json.zig");
 const index = @import("index.zig");
 const line_mod = @import("line.zig");
+const model_ix = @import("model_ix.zig");
 const Value = json.Value;
 const Allocator = std.mem.Allocator;
 
@@ -104,6 +105,7 @@ pub const Model = struct {
     told_last: i64 = 0,
     grams_current: u32 = 0, // the snapshot's own n-gram counts, which Index.load checks
     grams_history: u32 = 0,
+    ix: model_ix.Ix = .{}, // names, pairs, sources and current facts' normal forms: a write's lookups (model_ix.zig)
 
     pub fn deinit(m: *Model) void {
         const g = m.gpa;
@@ -135,25 +137,38 @@ pub const Model = struct {
         return if (m.notes.items.len == 0) 1 else m.notes.items[m.notes.items.len - 1].id + 1;
     }
 
+    /// The first entity with this name.
     pub fn entityOf(m: *const Model, name: []const u8) ?u32 {
-        for (m.entities.items, 0..) |e, k| if (std.mem.eql(u8, e, name)) return @intCast(k);
-        return null;
+        return m.ix.entity.get(name);
     }
 
     pub fn attributeOf(m: *const Model, name: []const u8) ?u32 {
-        for (m.attributes.items, 0..) |x, k| if (std.mem.eql(u8, x, name)) return @intCast(k);
-        return null;
+        return m.ix.attribute.get(name);
     }
 
     pub fn pairOf(m: *const Model, entity: u32, attribute: u32) ?u32 {
-        for (m.pairs.items, 0..) |p, k| if (p.entity == entity and p.attribute == attribute) return @intCast(k);
-        return null;
+        return m.ix.pair.get(model_ix.Ix.pairKey(entity, attribute));
     }
 
     /// The place of the note a write made, by its source.
     pub fn placeOfSource(m: *const Model, source: []const u8) ?u32 {
-        for (m.notes.items[m.base_notes..], m.base_notes..) |*n, k| if (n.source()) |s| if (std.mem.eql(u8, s, source)) return @intCast(k);
-        return null;
+        return m.ix.source.get(source);
+    }
+
+    /// The lookups made from the lists, as a parse ends (a write keeps them up to date: write.zig).
+    fn indexAll(m: *Model) LoadError!void {
+        const g = m.gpa;
+        const x = &m.ix;
+        for (m.entities.items, 0..) |e, k| try model_ix.Ix.putName(&x.entity, g, e, @intCast(k));
+        for (m.attributes.items, 0..) |e, k| try model_ix.Ix.putName(&x.attribute, g, e, @intCast(k));
+        for (m.pairs.items, 0..) |p, k| {
+            const r = try x.pair.getOrPut(g, model_ix.Ix.pairKey(p.entity, p.attribute));
+            if (!r.found_existing) r.value_ptr.* = @intCast(k);
+        }
+        for (m.notes.items, 0..) |*n, k| {
+            if (n.source()) |s| try model_ix.Ix.putName(&x.source, g, s, @intCast(k));
+            if (n.state == .current and n.kind == .fact) try x.addFact(g, try model_ix.factKeyOf(g, n.entity, n.text()), @intCast(k));
+        }
     }
 
     pub fn keyOf(m: *const Model, t: u32) u32 {
@@ -236,6 +251,7 @@ pub fn parse(gpa: Allocator, text: []const u8) LoadError!*Model {
     m.grams_history = try uint(grams, "history");
     m.base_notes = m.notes.items.len;
     try m.trim(); // the entity and attribute names grew one at a time
+    try m.indexAll(); // after trim: the maps' keys are the names themselves, which trim never moves
     return m;
 }
 
@@ -252,6 +268,7 @@ fn deinitLists(m: *Model) void {
     m.pairs.deinit(g);
     for (m.phrases.items) |p| g.free(p.keys);
     m.phrases.deinit(g);
+    m.ix.deinit(g);
     m.arena.deinit();
 }
 

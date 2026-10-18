@@ -84,6 +84,7 @@ test {
     _ = @import("notes/overlay.zig");
     _ = @import("notes/alias.zig");
     _ = @import("notes/question_attribute.zig");
+    _ = @import("notes/model_ix.zig");
     _ = @import("notes/write.zig");
     _ = @import("notes/journal.zig");
     _ = @import("notes/journal_tmp.zig");
@@ -108,4 +109,8 @@ test {
     _ = @import("notes_decode.zig");
     _ = @import("notes_decode_test.zig");
     _ = @import("notes_decode_more_test.zig");
+    _ = @import("notes_layer_test.zig");
+    _ = @import("notes_delta_test.zig");
+    _ = @import("notes/core_build.zig");
+    _ = @import("notes/bounded.zig");
 }

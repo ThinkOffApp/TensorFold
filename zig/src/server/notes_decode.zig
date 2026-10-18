@@ -161,21 +161,22 @@ pub const Live = struct {
         if (idx.ver != l.ver) return false;
         var keys: [index.max_phrase]u32 = undefined;
         var n: usize = 1;
-        const maximum = if (l.shape.resolve_subjects) @max(idx.phrase_max, idx.alias_max) else idx.phrase_max;
+        const maximum = if (l.shape.resolve_subjects) @max(idx.phraseMax(), idx.aliasMax()) else idx.phraseMax();
         while (n <= @min(collected.len, @max(maximum, 1))) : (n += 1) {
             for (collected[collected.len - n ..], keys[0..n]) |t, *k| k.* = idx.keyOf(t);
-            const ordinary = if (n == 1) idx.names.get(keys[0]) else idx.phrases.get(index.packPhrase(keys[0..n]));
-            const alias = if (l.shape.resolve_subjects) idx.aliases.get(index.packPhrase(keys[0..n])) else null;
-            const candidates = if (l.shape.resolve_subjects and ordinary == null) idx.alias_entities.get(index.packPhrase(keys[0..n])) else null;
+            const ordinary = if (n == 1) idx.nameOf(keys[0]) else idx.phraseOf(index.packPhrase(keys[0..n]));
+            const alias = if (l.shape.resolve_subjects) idx.aliasOf(index.packPhrase(keys[0..n])) else null;
+            const candidates = if (l.shape.resolve_subjects and ordinary == null) idx.aliasCandidates(index.packPhrase(keys[0..n])) else null;
             // An unresolved common name is not sufficient live-fetch evidence.
             // Expanding hundreds of entities also makes fitting unbounded work.
-            if (candidates) |cs| if (cs.items.len > 1) continue;
+            if (candidates) |cs| if (cs.len > 1) continue;
             const single = [1]u32{ordinary orelse alias orelse index.no_note};
-            const entities = if (candidates) |cs| cs.items else &single;
+            const entities = if (candidates) |cs| cs else &single;
             for (entities) |e| {
                 if (e == index.no_note) continue;
                 if (l.shape.resolve_subjects and idx.self_entity == e) continue; // the assistant's "my" is not the user's
-                for (idx.ent_cur.of(e)) |p| {
+                var cur = idx.entCur(e);
+                while (cur.next()) |p| {
                     const id = idx.idAt(p);
                     if (std.mem.indexOfScalar(u32, l.held.items, id) == null and std.mem.indexOfScalar(u32, l.exclude, id) == null) return true;
                 }
@@ -194,7 +195,7 @@ pub const Live = struct {
         view.settings.resolve_subjects = l.shape.resolve_subjects;
         // Until relation disambiguation is available, live checks consume only
         // unique aliases. The unique map marks collisions with no_note.
-        view.alias_entities = .empty;
+        view.alias_candidates_off = true;
         if (l.shape.resolve_subjects) view.settings.resolve_self = false; // first-person aliases belong to the question-only prefetch
         const idx = &view;
         if (idx.ver != l.ver) {
@@ -242,8 +243,11 @@ pub const Live = struct {
         var score: std.AutoHashMapUnmanaged(u32, f64) = .empty;
         for (names.all, 0..) |e, i| {
             const extra: f64 = if (i >= names.boosted) boost else 0; // lookup() boosted the first ones itself
-            try addNotes(a, &score, sc, idx.ent_cur.of(e), extra);
-            if (l.past) for (idx.ent_keys.of(e)) |pk| try addNotes(a, &score, sc, idx.pair_notes.of(pk), extra);
+            try addNotes(a, &score, sc, idx.entCur(e), extra);
+            if (l.past) {
+                var ks = idx.entKeys(e);
+                while (ks.next()) |pk| try addNotes(a, &score, sc, idx.pairNotes(pk), extra);
+            }
         }
         var it = score.iterator();
         while (it.next()) |kv| {
@@ -251,13 +255,13 @@ pub const Live = struct {
             if (std.mem.indexOfScalar(u32, l.exclude, id) != null or std.mem.indexOfScalar(u32, l.held.items, id) != null) continue;
             if (!l.past and idx.stateAt(kv.key_ptr.*) != .current) continue;
             if (kv.value_ptr.* < min_share * top) continue;
-            try keys.append(a, lookup.orderKey(kv.value_ptr.*, idx.rankAt(kv.key_ptr.*), kv.key_ptr.*));
+            try keys.append(a, lookup.orderKey(kv.value_ptr.*, idx.rankAt(kv.key_ptr.*)));
         }
         std.sort.pdq(u128, keys.items, {}, std.sort.asc(u128));
         const fresh = try a.alloc(u32, keys.items.len); // places, best first
         const shares = try a.alloc(f64, keys.items.len);
         for (keys.items, fresh, shares) |key, *p, *x| {
-            p.* = @truncate(key);
+            p.* = lookup.placeOf(idx, key);
             x.* = score.get(p.*).? / top;
         }
         if (fresh.len == 0) return null;
@@ -541,7 +545,7 @@ fn named(a: Allocator, idx: *const index.Index, sc: *const lookup.Scratch) Alloc
     var out: std.ArrayList(u32) = .empty;
     for (sc.found.items) |e| if (std.mem.indexOfScalar(u32, out.items, e) == null) try out.append(a, e);
     const boosted = out.items.len;
-    for (sc.qkeys.items) |k| if (idx.names.get(k)) |e| if (std.mem.indexOfScalar(u32, out.items, e) == null) try out.append(a, e);
+    for (sc.qkeys.items) |k| if (idx.nameOf(k)) |e| if (std.mem.indexOfScalar(u32, out.items, e) == null) try out.append(a, e);
     return .{ .all = out.items, .boosted = boosted };
 }
 
@@ -551,8 +555,9 @@ fn scoreOf(sc: *const lookup.Scratch, p: u32) f64 {
 }
 
 /// Each note in `notes` with its lookup score plus `extra` (the subject boost lookup() gives only longer names).
-fn addNotes(a: Allocator, score: *std.AutoHashMapUnmanaged(u32, f64), sc: *const lookup.Scratch, notes: []const u32, extra: f64) Allocator.Error!void {
-    for (notes) |p| {
+fn addNotes(a: Allocator, score: *std.AutoHashMapUnmanaged(u32, f64), sc: *const lookup.Scratch, notes: index.Iter, extra: f64) Allocator.Error!void {
+    var it = notes;
+    while (it.next()) |p| {
         const r = try score.getOrPut(a, p);
         r.value_ptr.* = (if (r.found_existing) r.value_ptr.* else scoreOf(sc, p)) + extra;
     }

@@ -92,9 +92,11 @@ fn look(t: *Tracking, r: *rig.Rig, a: Allocator, own: []const u32, own_keys: []c
         const key: u32 = @truncate(g.* >> @intCast(32 * k));
         if (std.mem.indexOfScalar(u32, keys, key) != null) w.ids += 1;
     };
-    var pi = v.idx.phrases.keyIterator();
-    while (pi.next()) |p| for (p.*) |key| if (std.mem.indexOfScalar(u32, keys, key) != null) {
-        w.ids += 1;
+    for ([_]?*const @import("notes/index.zig").Index{ v.idx, v.idx.layer.core }) |ix| if (ix) |x| { // a layered version's core too
+        var pi = x.own_phrases.keyIterator();
+        while (pi.next()) |p| for (p.*) |key| if (std.mem.indexOfScalar(u32, keys, key) != null) {
+            w.ids += 1;
+        };
     };
     // sa: the keys every base still alive holds (the current one, retired versions', none other)
     var bases: std.ArrayList(*const @import("notes/sa.zig").Base) = .empty;
