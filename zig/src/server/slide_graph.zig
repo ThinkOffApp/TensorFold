@@ -76,6 +76,13 @@ pub const Graph = struct {
         g.model_arena.deinit();
     }
 
+    /// How many facts the graph holds now (every state).
+    pub fn count(g: *Graph) usize {
+        g.mutex.lockUncancelable(g.io);
+        defer g.mutex.unlock(g.io);
+        return g.facts.items.len;
+    }
+
     /// A newly taught fact, queued; returns its id (0 when memory ran out).
     pub fn add(g: *Graph, text: []const u8, source: []const u8, at: i64) u32 {
         g.mutex.lockUncancelable(g.io);
