@@ -303,7 +303,10 @@ pub const Store = struct {
             // Oversized retry encodes must not accumulate in the request arena.
             var fit_arena = std.heap.ArenaAllocator.init(s.gpa);
             defer fit_arena.deinit();
-            tokens = (text.encode(fit_arena.allocator(), shown.block, false) catch return error.Tokenizer).len;
+            tokens = (text.encode(fit_arena.allocator(), shown.block, false) catch |e| switch (e) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.Tokenizer,
+            }).len;
             if (tokens <= cap) break;
             n -= 1;
             tokens = 0;
