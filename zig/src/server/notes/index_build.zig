@@ -258,7 +258,7 @@ pub fn buildPostings(self: *Index, gpa: Allocator, raw: []const Raw, first: usiz
                 try entries.append(gpa, .{ .cur_off = 0, .cur_len = 0, .hist_off = 0, .hist_len = 0 });
             }
             const e = &entries.items[r.value_ptr.*];
-            if (self.state[first + k] == .current) e.cur_len += 1 else e.hist_len += 1;
+            if (self.stateAt(@intCast(first + k)) == .current) e.cur_len += 1 else e.hist_len += 1;
             try hits.append(gpa, .{ .entry = r.value_ptr.*, .note = @intCast(first + k) });
         }
     }
@@ -275,7 +275,7 @@ pub fn buildPostings(self: *Index, gpa: Allocator, raw: []const Raw, first: usiz
     @memset(fill, 0);
     for (hits.items) |h| {
         const e = entries.items[h.entry];
-        if (self.state[h.note] == .current) {
+        if (self.stateAt(h.note) == .current) {
             post[e.cur_off + fill[2 * h.entry]] = h.note;
             fill[2 * h.entry] += 1;
         } else {

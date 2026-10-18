@@ -6,6 +6,38 @@ const index = @import("notes/index.zig");
 const merge = @import("notes/merge.zig");
 const testing = std.testing;
 const Index = index.Index;
+const layer = @import("notes/layer.zig");
+const model = @import("notes/model.zig");
+
+fn oneWriteVersionBytes(n: usize) !usize {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const r = try rig.Rig.initKind(testing.allocator, .sa, 1024);
+    defer r.deinit();
+    var m = r.store().model.*;
+    const notes = try arena.allocator().alloc(model.Note, n + 1);
+    for (notes, 0..) |*note, k| {
+        note.* = m.notes.items[1];
+        note.id = @intCast(k + 1);
+        note.told = @intCast(k + 1);
+        note.state = .current;
+    }
+    m.notes = .fromOwnedSlice(notes[0..n]);
+    const core = try Index.buildKind(testing.allocator, &m, .sa);
+    defer core.deinit();
+    m.notes = .fromOwnedSlice(notes);
+    const version = (try layer.build(testing.allocator, &m, core, &.{})).?;
+    defer version.deinit();
+    try testing.expectEqual(@as(usize, n + 1), version.notes());
+    try testing.expectEqual(index.State.current, version.stateAt(@intCast(n)));
+    return version.arena.bytes();
+}
+
+test "one-write version allocation stays within its budget when the unchanged core grows" {
+    const small = try oneWriteVersionBytes(128);
+    const large = try oneWriteVersionBytes(8192);
+    try testing.expect(large <= small + 1024);
+}
 
 fn list(a: std.mem.Allocator, it0: index.Iter) ![]u32 {
     var it = it0;

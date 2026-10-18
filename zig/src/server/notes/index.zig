@@ -140,14 +140,14 @@ pub const Iter = struct {
     a: []const u32,
     b: []const u32 = &.{},
     i: usize = 0,
-    state: []const State,
+    idx: *const Index,
     live: bool = false,
 
     pub inline fn next(it: *Iter) ?u32 {
         while (it.i < it.a.len) {
             const p = it.a[it.i];
             it.i += 1;
-            if (!it.live or it.state[p] == .current) return p;
+            if (!it.live or it.idx.stateAt(p) == .current) return p;
         }
         const k = it.i - it.a.len;
         if (k >= it.b.len) return null;
@@ -228,7 +228,8 @@ pub const Index = struct {
     // Version-local metadata: a layered version (layer.zig) reads places below core_n from its core, unless a
     // later write retired them (layer.over, layer.values), and its own columns from core_n on.
     pub inline fn stateAt(self: *const Index, place: u32) State {
-        return self.state[place];
+        if (place < self.layer.core_n) return if (self.layer.over.get(place)) |o| o.state else self.layer.core.?.state[place];
+        return self.state[place - self.layer.core_n];
     }
 
     pub fn lineAt(self: *const Index, p: u32) []const u8 {
@@ -336,20 +337,20 @@ pub const Index = struct {
 
     /// The places of an entity's current notes, by place (O.ent_cur).
     pub fn entCur(self: *const Index, e: u32) Iter {
-        if (self.layer.core) |c| return .{ .a = c.groupOf(.cur, e), .b = self.layer.side_cur.get(e) orelse &.{}, .state = self.state, .live = true };
-        return .{ .a = self.own_ent_cur.of(e), .state = self.state };
+        if (self.layer.core) |c| return .{ .a = c.groupOf(.cur, e), .b = self.layer.side_cur.get(e) orelse &.{}, .idx = self, .live = true };
+        return .{ .a = self.own_ent_cur.of(e), .idx = self };
     }
 
     /// An entity's pairs (O.ent_keys).
     pub fn entKeys(self: *const Index, e: u32) Iter {
-        if (self.layer.core) |c| return .{ .a = c.groupOf(.keys, e), .b = self.layer.side_keys_of.get(e) orelse &.{}, .state = self.state };
-        return .{ .a = self.own_ent_keys.of(e), .state = self.state };
+        if (self.layer.core) |c| return .{ .a = c.groupOf(.keys, e), .b = self.layer.side_keys_of.get(e) orelse &.{}, .idx = self };
+        return .{ .a = self.own_ent_keys.of(e), .idx = self };
     }
 
     /// A pair's notes, every state, oldest first (O.by_key).
     pub fn pairNotes(self: *const Index, pr: u32) Iter {
-        if (self.layer.core) |c| return .{ .a = c.groupOf(.pairs, pr), .b = self.layer.side_pairs.get(pr) orelse &.{}, .state = self.state };
-        return .{ .a = self.own_pair_notes.of(pr), .state = self.state };
+        if (self.layer.core) |c| return .{ .a = c.groupOf(.pairs, pr), .b = self.layer.side_pairs.get(pr) orelse &.{}, .idx = self };
+        return .{ .a = self.own_pair_notes.of(pr), .idx = self };
     }
 
     /// A core's group k of `which`, or none when k came after it was built.

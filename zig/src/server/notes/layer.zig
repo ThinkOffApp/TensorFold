@@ -10,8 +10,8 @@ const Index = index.Index;
 const Model = model_mod.Model;
 const Allocator = std.mem.Allocator;
 
-/// A core note retired since the core was built: its line and cost now (its state is in the version's `state`).
-pub const Over = struct { line: []const u8, cost: u32 };
+/// A core note retired since the core was built: its version-local state, line and cost.
+pub const Over = struct { state: index.State, line: []const u8, cost: u32 };
 
 /// What a layered version keeps beside its core, in its own arena; a core's or a full index's is empty.
 pub const Layer = struct {
@@ -59,23 +59,20 @@ pub fn build(gpa: Allocator, m: *const Model, core: *Index, retired: []const u32
     self.layer.first_id = if (n > cn) m.notes.items[cn].id else 0;
     self.layer.more_entities = @intCast(m.entities.items.len - core.entity_names.len);
     try ib.namesOf(self, m, core.entity_names.len, core.attribute_names.len, core.pair_attributes.len);
-    // every place's state: the core's, the core notes retired since, then the side's
-    const state = try a.alloc(index.State, n);
-    @memcpy(state[0..cn], core.state[0..cn]);
+    const state = try a.alloc(index.State, n - cn);
     try self.layer.over.ensureTotalCapacity(a, @intCast(retired.len));
     var gone: u32 = 0;
     for (retired) |p| if (p < cn) {
         const x = &m.notes.items[p];
-        if (state[p] == .current and x.state != .current) gone += 1;
-        state[p] = x.state;
-        self.layer.over.putAssumeCapacity(p, .{ .line = x.line(), .cost = x.cost });
+        if (!self.layer.over.contains(p) and core.stateAt(p) == .current and x.state != .current) gone += 1;
+        self.layer.over.putAssumeCapacity(p, .{ .state = x.state, .line = x.line(), .cost = x.cost });
     };
     const side = m.notes.items[cn..];
     const raw = try gpa.alloc(index.Raw, side.len); // the build's own, freed when it returns
     defer gpa.free(raw);
     for (side, raw, cn..) |*x, *r, p| {
         r.* = .{ .id = x.id, .state = x.state, .entity = x.entity, .pair = x.pair, .value_ent = x.value_ent, .told = x.told, .line = x.line(), .cost = x.cost, .tokens = x.tokens() };
-        state[p] = x.state;
+        state[p - cn] = x.state;
     }
     self.state = state;
     try sideColumns(self, a, raw);
