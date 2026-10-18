@@ -545,6 +545,16 @@ const Backend = struct {
         return if (q.len > 0 and q.len < 200 and q[q.len - 1] == '?' and std.mem.indexOfScalar(u8, q, '\n') == null) q else "";
     }
 
+    /// The current notes' texts (a word of one in a "don't know" reply is a value the reply gives).
+    pub fn texts(b: *Backend, _: Allocator) ![]const []const u8 {
+        return b.othersOf("");
+    }
+
+    /// Every regression probe's two replies and verdict, one JSON line each in SNAPSHOT.promote-probes.jsonl.
+    pub fn recordProbe(b: *Backend, night: u32, kind: []const u8, q: []const u8, before: []const u8, after: []const u8, ok: bool) void {
+        pjson.appendProbe(b.arena, b.p.path, .{ .night = night, .kind = kind, .q = q, .before = before, .after = after, .ok = ok });
+    }
+
     pub fn agrees(b: *Backend, fact: []const u8, question: []const u8, ref: []const u8, reply: []const u8) bool {
         return agreesWith(fact, question, ref, reply, b.othersOf(fact));
     }

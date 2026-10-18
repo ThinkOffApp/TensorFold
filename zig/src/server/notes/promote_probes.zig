@@ -8,6 +8,7 @@ const Note = promote.Note;
 const Ask = promote.Ask;
 const Probe = promote.Probe;
 const NightLog = promote.NightLog;
+const judge = @import("promote_judge.zig");
 
 /// Judged: fact and pair right to wrong; control changed; neighbour and untold "don't know" to a value, or changed.
 pub const Kind = enum { fact, control, neighbour, pair };
@@ -54,7 +55,7 @@ pub fn unknown(reply: []const u8) bool {
 /// "yes" or "no" when the reply opens with one (null: neither).
 pub fn yesNo(reply: []const u8) ?bool {
     const t = std.mem.trimStart(u8, reply, " \t\r\n*\"'");
-    if (std.ascii.startsWithIgnoreCase(t, "yes")) return true;
+    if (std.ascii.startsWithIgnoreCase(t, "yes") and (t.len == 3 or !std.ascii.isAlphabetic(t[3]))) return true;
     if (std.ascii.startsWithIgnoreCase(t, "no") and (t.len == 2 or !std.ascii.isAlphabetic(t[2]))) return false;
     return null;
 }
@@ -172,8 +173,10 @@ pub fn worse(a: Allocator, b: anytype, r: Regress, after: []const []const u8, lo
         const ok = switch (r.kind[i]) {
             .fact, .pair => right(b, r, i, now),
             .control => std.mem.eql(u8, was, now) or try b.same(a, q.q, was, now),
-            .neighbour => if (unknown(was)) unknown(now) else std.mem.eql(u8, was, now) or try b.same(a, q.q, was, now),
+            // "I don't know for sure, but your rabbit is named Floppy." gives a new value: worse
+            .neighbour => if (unknown(was)) unknown(now) and !judge.newValue(q.q, was, now, try b.texts(a)) else std.mem.eql(u8, was, now) or try b.same(a, q.q, was, now),
         };
+        b.recordProbe(log.night, @tagName(r.kind[i]), q.q, was, now, ok);
         if (ok) continue;
         n += 1;
         if (list.items.len > 0) try list.appendSlice(a, " | ");
@@ -225,4 +228,6 @@ test "don't know and yes or no, read off a reply" {
     try std.testing.expectEqual(@as(?bool, true), yesNo("Yes."));
     try std.testing.expectEqual(@as(?bool, false), yesNo("No, your cat's eyes are green and your eyes are not green."));
     try std.testing.expectEqual(@as(?bool, null), yesNo("Nobody knows."));
+    try std.testing.expectEqual(@as(?bool, null), yesNo("Yesterday it rained."));
+    try std.testing.expectEqual(@as(?bool, true), yesNo("Yes, it is."));
 }

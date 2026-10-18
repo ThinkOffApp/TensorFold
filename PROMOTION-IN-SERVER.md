@@ -105,7 +105,10 @@ and one question needing it and the current note sharing the most words with it 
 yes/no comparison or a two-step question, with its reference answer from both facts). Three fixed untold personal
 questions join the controls. A neighbour or untold probe is worse when "don't know" turns into a value or the reply
 changes in substance; a two-note probe when right turns wrong (a yes/no reference: the same yes or no). The log names
-each by kind. Host test: a lesson that leaks a value to neighbours, one that invents an untold answer and one that
+each by kind. Since `8596a471`'s review (codexmb): a "don't know" reply that still gives a value the earlier reply and the
+question lack (a name, a number, or a word of a stored note: "I don't know for sure, but your rabbit is named
+Floppy.") counts as giving it; a yes/no reference is matched on the whole first word ("Yesterday" is neither). Every
+probe's two replies and verdict go to `SNAPSHOT.promote-probes.jsonl`, so a night can be judged again later. Host test: a lesson that leaks a value to neighbours, one that invents an untold answer and one that
 flips a two-note answer each reject the night; control: the same night with no damage is kept.
 
 **Retry.** A missed or rejected fact is due once more the next night (`retries`, kept in the state); not a third time.

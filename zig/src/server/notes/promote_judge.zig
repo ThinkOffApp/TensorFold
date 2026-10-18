@@ -30,6 +30,19 @@ pub fn agreesWith(fact: []const u8, question: []const u8, ref: []const u8, reply
     return n > 0 and 2 * said >= n;
 }
 
+/// Whether `reply` gives a value neither `before` nor the question has: a name, a number, or a stored note's word.
+pub fn newValue(question: []const u8, before: []const u8, reply: []const u8, notes: []const []const u8) bool {
+    var it = std.mem.tokenizeAny(u8, reply, delims);
+    var first = true;
+    while (it.next()) |w| : (first = false) {
+        if (std.ascii.isDigit(w[0]) and !hasStem(before, w) and !hasStem(question, w)) return true;
+        if (w.len < 2 or wording.isFiller(w) or hasStem(before, w) or hasStem(question, w)) continue;
+        if (!first and std.ascii.isUpper(w[0]) and !std.mem.eql(u8, w, "I")) return true;
+        if (w.len >= 3) for (notes) |n| if (hasStem(n, w)) return true;
+    }
+    return false;
+}
+
 const delims = " \t\r\n.,;:!?\"'()*_";
 
 /// A reply at most this many words long may agree by its value words alone.

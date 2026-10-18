@@ -227,3 +227,24 @@ pub fn writeFile(a: Allocator, path: []const u8, bytes: []const u8) WriteError!v
     defer _ = std.c.close(dfd);
     if (!journal.fullSync(dfd, null)) return error.PromoteIo;
 }
+
+/// One regression probe as a night judged it.
+pub const ProbeLine = struct { night: u32, kind: []const u8, q: []const u8, before: []const u8, after: []const u8, ok: bool };
+
+/// `r` as a JSON line appended to STATE-probes.jsonl (best effort: a probe log that cannot be written is skipped).
+pub fn appendProbe(a: Allocator, state_path: []const u8, r: ProbeLine) void {
+    const o = json.newObject(a) catch return;
+    o.put(a, "night", int(a, r.night) catch return) catch return;
+    o.put(a, "kind", .{ .string = r.kind }) catch return;
+    o.put(a, "q", .{ .string = r.q }) catch return;
+    o.put(a, "before", .{ .string = r.before }) catch return;
+    o.put(a, "after", .{ .string = r.after }) catch return;
+    o.put(a, "ok", .{ .bool = r.ok }) catch return;
+    const line = json.stringify(a, .{ .object = o }, .{}) catch return;
+    const path = std.fmt.allocPrintSentinel(a, "{s}-probes.jsonl", .{state_path}, 0) catch return;
+    const fd = std.c.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true, .CLOEXEC = true }, @as(std.c.mode_t, 0o600));
+    if (fd < 0) return;
+    defer _ = std.c.close(fd);
+    _ = std.c.write(fd, line.ptr, line.len);
+    _ = std.c.write(fd, "\n", 1);
+}

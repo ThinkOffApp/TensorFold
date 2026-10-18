@@ -29,6 +29,7 @@ const Fake = struct {
     leaks: []const u8 = "", // a text whose neurons, while live, answer every neighbour question with its value
     flips: []const u8 = "", // a text whose neurons, while live, answer two-note questions "No"
     invents: []const u8 = "", // a text whose neurons, while live, make up an answer to the untold questions
+    hedged_invent: bool = false, // the made-up answer wrapped in a don't-know
     crash_at_teach: ?u32 = null, // the teach call to stop at (a crash): error.Crash
     teaches: u32 = 0,
     retires: u32 = 0,
@@ -106,6 +107,12 @@ const Fake = struct {
         f.pairs += 1;
         return std.fmt.allocPrint(a, "P:{s}+{s}", .{ topic(one), topic(two) });
     }
+    pub fn texts(f: *Fake, a: Allocator) ![]const []const u8 {
+        var out: std.ArrayList([]const u8) = .empty;
+        for (f.store.items) |n| if (n.current) try out.append(a, n.text);
+        return out.items;
+    }
+    pub fn recordProbe(_: *Fake, _: u32, _: []const u8, _: []const u8, _: []const u8, _: []const u8, _: bool) void {}
     pub fn questionOf(f: *Fake, a: Allocator, text: []const u8) ![]const u8 {
         f.questions += 1;
         return std.fmt.allocPrint(a, "Q:{s}", .{topic(text)});
@@ -123,7 +130,7 @@ const Fake = struct {
     fn answer(f: *Fake, q: promote.Ask) []const u8 {
         if (std.mem.startsWith(u8, q.q, "N:")) return if (f.live(f.leaks)) |l| l.value else "I don't know.";
         if (std.mem.startsWith(u8, q.q, "P:")) return if (f.live(f.flips) != null) "No." else "Yes.";
-        for (@import("notes/promote_probes.zig").untold) |u| if (std.mem.eql(u8, u, q.q)) return if (f.live(f.invents) != null) "Floppy." else "I don't know.";
+        for (@import("notes/promote_probes.zig").untold) |u| if (std.mem.eql(u8, u, q.q)) return if (f.live(f.invents) == null) "I don't know your rabbit's name." else if (f.hedged_invent) "I don't know for sure, but your rabbit is named Floppy." else "Floppy.";
         if (!std.mem.startsWith(u8, q.q, "Q:")) {
             for (f.pocket.items) |l| if (l.live and l.breaks) return "Lyon";
             return "Paris";
@@ -495,8 +502,8 @@ test "promotion: a night failing at any allocation leaves every live neuron reco
 }
 
 test "promotion: the targeted probes reject a night that leaks a value to a neighbour, invents an untold answer or flips a two-note answer" {
-    const Case = enum { leak, invent, flip, none };
-    for ([_]Case{ .leak, .invent, .flip, .none }) |c| {
+    const Case = enum { leak, invent, hedged, flip, none };
+    for ([_]Case{ .leak, .invent, .hedged, .flip, .none }) |c| {
         var arena: std.heap.ArenaAllocator = .init(testing.allocator);
         defer arena.deinit();
         var f: Fake = .{ .a = arena.allocator() };
@@ -505,6 +512,10 @@ test "promotion: the targeted probes reject a night that leaks a value to a neig
         switch (c) {
             .leak => f.leaks = "cat eyes=green",
             .invent => f.invents = "cat eyes=green",
+            .hedged => {
+                f.invents = "cat eyes=green";
+                f.hedged_invent = true;
+            },
             .flip => f.flips = "my eyes=green",
             .none => {},
         }
@@ -523,6 +534,7 @@ test "promotion: the targeted probes reject a night that leaks a value to a neig
         const tag = switch (c) {
             .leak => "neighbour: N:cat eyes -> green (was I don't know.)",
             .invent => "neighbour: What is my rabbit's name? -> Floppy.",
+            .hedged => "neighbour: What is my rabbit's name? -> I don't know for sure, but your rabbit is named Floppy.",
             .flip => "pair: P:",
             .none => unreachable,
         };

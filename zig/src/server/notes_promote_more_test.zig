@@ -3,6 +3,19 @@ const std = @import("std");
 const probes = @import("notes/promote_probes.zig");
 const testing = std.testing;
 
+test "promotion: a don't-know reply that still gives a new value is not a don't-know" {
+    const judge = @import("notes/promote_judge.zig");
+    const q = "What is my rabbit's name?";
+    const was = "I don't know your rabbit's name.";
+    const notes = [_][]const u8{ "My cat's eyes are green.", "My sister lives in Turku." };
+    try testing.expect(probes.unknown("I don't know for sure, but your rabbit is named Floppy."));
+    try testing.expect(judge.newValue(q, was, "I don't know for sure, but your rabbit is named Floppy.", &notes));
+    try testing.expect(judge.newValue(q, was, "I don't know, maybe it is green.", &notes)); // a stored value
+    try testing.expect(judge.newValue(q, was, "I don't know, perhaps 3 of them.", &notes));
+    try testing.expect(!judge.newValue(q, was, "I don't know your rabbit's name. You haven't told me.", &notes));
+    try testing.expect(!judge.newValue(q, was, "I don't know your rabbit's name. I don't have any information about a rabbit.", &notes));
+}
+
 test "promotion: --notes-promote-every takes a duration, off by default; hold and alone take a count from 1" {
     const cli = @import("cli.zig");
     const np = @import("notes_promote.zig");
