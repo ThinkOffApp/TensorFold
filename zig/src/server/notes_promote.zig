@@ -241,12 +241,13 @@ pub const Promoter = struct {
         var arena: std.heap.ArenaAllocator = .init(p.gpa);
         defer arena.deinit();
         var b: Backend = .{ .p = p };
-        b.recover(arena.allocator()) catch {};
         p.drainPending();
         log.line("notes promotion: night {d} begins", .{p.state.nights_done + 1});
-        const n = promote.night(&p.state, arena.allocator(), &b) catch |e| {
-            log.line("notes promotion: night {d} stopped ({s}); the state is the file's, and the next night rebuilds", .{ p.state.nights_done + 1, @errorName(e) });
-            p.reload();
+        const n = promote.nightOrRebuild(&p.state, arena.allocator(), &b) catch |e| {
+            // no reload (it allocates): the state in memory holds every neuron placed and is marked to rebuild
+            log.line("notes promotion: night {d} stopped ({s}); the next night zeroes every promotion neuron and teaches again", .{ p.state.nights_done + 1, @errorName(e) });
+            b.persist(&p.state) catch {}; // the file already says the night is open, which a start reads as a rebuild
+            _ = p.tryPublish();
             return;
         };
         if (n.worse_list.len > 0) log.line("notes promotion: night {d}: worse: {s}", .{ n.night, n.worse_list });
@@ -360,15 +361,6 @@ pub const Promoter = struct {
         p.state = fresh;
     }
 
-    fn reload(p: *Promoter) void {
-        const bytes = std.Io.Dir.cwd().readFileAlloc(p.io, p.path, p.gpa, .limited(256 << 20)) catch return;
-        defer p.gpa.free(bytes);
-        const back = pjson.decode(p.gpa, bytes, p.state.settings) catch return;
-        p.state.deinit();
-        p.state = back;
-        _ = p.tryPublish();
-    }
-
     /// GET /v1/promotion: the state as last written, and whether a night runs; POST: a night now.
     pub fn handle(p: *Promoter, conn: *Conn, a: Allocator) void {
         if (std.mem.eql(u8, conn.method, "POST")) {
@@ -402,17 +394,12 @@ const Backend = struct {
         return .{ .flag = &b.p.stop };
     }
 
-    /// After a stop mid-teach: the neurons of a learned graph fact with the text being taught join the pocket.
-    fn recover(b: *Backend, a: Allocator) !void {
-        const s = &b.p.state;
-        const op = s.open orelse return;
-        if (op.teaching.len == 0) return;
+    /// The neurons the slide graph records for learned facts of `text` (a lesson a stop or a failure left unrecorded).
+    pub fn placedFor(b: *Backend, a: Allocator, text: []const u8) ![]const promote.Neuron {
         const graph = try b.srv().slide.learnedChat(a, 0, std.math.maxInt(usize));
-        var all: std.ArrayList(promote.Neuron) = .empty;
-        try all.appendSlice(s.alloc(), s.pocket);
-        for (graph) |g| if (std.mem.eql(u8, g.text, op.teaching)) for (g.neurons) |n| if (!promote.has(all.items, n)) try all.append(s.alloc(), n);
-        s.pocket = all.items;
-        s.open.?.teaching = "";
+        var out: std.ArrayList(promote.Neuron) = .empty;
+        for (graph) |g| if (std.mem.eql(u8, g.text, text)) try out.appendSlice(a, g.neurons);
+        return out.items;
     }
 
     pub fn notes(b: *Backend, a: Allocator) ![]promote.Note {

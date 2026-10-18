@@ -106,6 +106,13 @@ this relied on a reload that itself allocates). Zeroing one fact's neurons remov
 input and output weights set to zero); what it cannot undo is a later lesson's refit of an earlier neuron (question 1).
 Take-backs and changes do not zero anything at once: the note answers, and the next night rebuilds the pocket.
 
+**A failed night.** Any error inside a night (an allocation, the learner, a stop) marks the state to rebuild and
+allocates nothing more: the pocket is recorded before each lesson, and the open night names the text being taught.
+The next night first adds the neurons the slide graph records for that text (a lesson that placed neurons but failed
+before they were recorded), then zeroes every promotion neuron and teaches again. The first version reloaded the
+state file, which allocates; an allocation-failure sweep over a night (73 failing points) found that a lesson's
+neurons could also go unrecorded when the allocation after it failed.
+
 **Crash.** The state file says a night is open, with the neurons it has placed so far, before any change to the
 weights. A start that finds an open night marks the next night a `rebuild` and zeroes every recorded promotion neuron
 first (and the neurons of a slide-graph fact with the text that was being taught).

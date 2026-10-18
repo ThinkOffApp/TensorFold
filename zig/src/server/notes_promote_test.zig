@@ -89,6 +89,11 @@ const Fake = struct {
         const q = try std.fmt.allocPrint(a, "Q:{s}", .{topic(text)});
         return .{ .kept = true, .neurons = ns, .questions = try a.dupe([]const u8, &.{ q, q, q, q, q }) };
     }
+    pub fn placedFor(f: *Fake, a: Allocator, text: []const u8) ![]const Neuron {
+        var out: std.ArrayList(Neuron) = .empty;
+        for (f.pocket.items) |l| if (l.live and std.mem.eql(u8, l.topic, topic(text)) and std.mem.eql(u8, l.value, val(text))) try out.appendSlice(a, l.neurons);
+        return out.items;
+    }
     pub fn questionOf(f: *Fake, a: Allocator, text: []const u8) ![]const u8 {
         f.questions += 1;
         return std.fmt.allocPrint(a, "Q:{s}", .{topic(text)});
@@ -449,4 +454,49 @@ test "promotion: a missed or rejected fact is tried once more the next night, an
     defer back.deinit();
     try testing.expectEqual(@as(u32, 1), back.find("w2").?.retries);
     try testing.expectEqualStrings("Q:dog", back.find("w1").?.ask.?.q);
+}
+
+test "promotion: a night failing at any allocation leaves every live neuron recorded, and the next night rebuilds" {
+    var points: usize = 0;
+    for ([_]bool{ false, true }) |stale| {
+        var k: usize = 0;
+        while (k < 4000) : (k += 1) {
+            var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+            defer arena.deinit();
+            var f: Fake = .{ .a = arena.allocator() };
+            _ = try f.add("w1", "dog=Luna");
+            _ = try f.add("w2", "boat=blue");
+            // every allocation counted one by one: the failing allocator over an arena that frees at the end
+            var backing: std.heap.ArenaAllocator = .init(testing.allocator);
+            defer backing.deinit();
+            var failing = std.testing.FailingAllocator.init(backing.allocator(), .{});
+            var s = promote.State.init(failing.allocator(), .{});
+            defer s.deinit();
+            _ = try run(&s, &f, &arena);
+            _ = try f.add("w3", "cat=Milo");
+            if (stale) try f.change("w1", "w4", "dog=Bruno"); // a rebuild night, else an add night
+            failing.fail_index = failing.alloc_index + k;
+            const got = promote.nightOrRebuild(&s, failing.allocator(), &f);
+            failing.fail_index = std.math.maxInt(usize);
+            if (got) |_| break else |e| try testing.expectEqual(error.OutOfMemory, e);
+            points += 1;
+            try testing.expect(s.rebuild_next);
+            // every live neuron recorded, or placed by the lesson the night names as open (the slide graph has those)
+            const open_text = if (s.open) |op| op.teaching else "";
+            for (f.pocket.items) |l| if (l.live) for (l.neurons) |n| {
+                const of_open = open_text.len > 0 and std.mem.eql(u8, l.topic, Fake.topic(open_text));
+                try testing.expect(promote.has(s.pocket, n) or of_open);
+            };
+            // the next night, with memory back: every promotion neuron zeroed and taught again
+            var nb: std.heap.ArenaAllocator = .init(testing.allocator);
+            defer nb.deinit();
+            const n = try promote.nightOrRebuild(&s, nb.allocator(), &f);
+            try testing.expect(std.mem.eql(u8, n.plan, "rebuild") or std.mem.eql(u8, n.plan, "source"));
+            try testing.expect(!s.rebuild_next and s.open == null);
+            for (f.pocket.items) |l| if (l.live) for (l.neurons) |x| try testing.expect(promote.has(s.pocket, x));
+            try testing.expectEqual(@as(usize, 2) * s.count(promote.active), s.pocket.len);
+        }
+        try testing.expect(k < 4000); // the sweep reached a night that needs no more allocations than it was given
+    }
+    try testing.expect(points > 50); // 73 points failed a night when this was written
 }

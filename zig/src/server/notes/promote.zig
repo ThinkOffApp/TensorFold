@@ -105,7 +105,7 @@ pub const State = struct {
         return out.items;
     }
 
-    fn count(s: *const State, comptime pred: fn (Status) bool) u32 {
+    pub fn count(s: *const State, comptime pred: fn (Status) bool) u32 {
         var n: u32 = 0;
         for (s.facts.items) |f| n += @intFromBool(pred(f.status));
         return n;
@@ -267,11 +267,28 @@ fn probesOf(s: *State, a: Allocator, b: anytype, f: *Fact, t: Taught) !void {
 
 const Plan = enum { add, rebuild, @"rebuild-old", source };
 
+/// night(); a failure marks a rebuild, allocating nothing (the pocket and the open lesson record every neuron placed).
+pub fn nightOrRebuild(s: *State, a: Allocator, b: anytype) !NightLog {
+    return night(s, a, b) catch |e| {
+        s.rebuild_next = true;
+        return e;
+    };
+}
+
 /// One night: qualify, teach, check for regressions, and move notes out of the prompt or back.
 pub fn night(s: *State, a: Allocator, b: anytype) !NightLog {
     const k = s.nights_done + 1;
     var log: NightLog = .{ .night = k, .started_ms = b.nowMs() };
     const sa = s.alloc();
+    // a night stopped while a lesson ran: what that lesson placed joins the pocket, so the rebuild zeroes it too
+    if (s.open) |op| if (op.teaching.len > 0) {
+        var all: std.ArrayList(Neuron) = .empty;
+        try all.appendSlice(sa, s.pocket);
+        for (try b.placedFor(a, op.teaching)) |n| if (!has(all.items, n)) try all.append(sa, n);
+        s.pocket = all.items;
+        s.rebuild_next = true;
+        s.open.?.teaching = "";
+    };
     const notes = try b.notes(a);
     for (notes) |n| if (n.fact and s.find(n.key) == null) try s.facts.append(sa, .{ .key = try sa.dupe(u8, n.key), .text = try sa.dupe(u8, n.text), .told = n.told, .since = b.firstSeen(n.key) orelse s.nights_done });
     var stale: std.ArrayList(*Fact) = .empty;
