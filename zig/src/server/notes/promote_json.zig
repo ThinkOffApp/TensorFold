@@ -72,6 +72,16 @@ pub fn value(s: *const State, a: Allocator) !Value {
             try y.put(a, "ref", .{ .string = p.ref });
             try x.put(a, "ask", .{ .object = y });
         } else try x.put(a, "ask", .null);
+        const nb = try a.alloc(Value, f.neighbours.len);
+        for (f.neighbours, nb) |q, *slot| slot.* = .{ .string = q };
+        try x.put(a, "neighbours", .{ .array = nb });
+        if (f.pair) |p| {
+            const y = try json.newObject(a);
+            try y.put(a, "q", .{ .string = p.q });
+            try y.put(a, "ref", .{ .string = p.ref });
+            try y.put(a, "text", .{ .string = p.text });
+            try x.put(a, "pair", .{ .object = y });
+        } else try x.put(a, "pair", .null);
         v.* = .{ .object = x };
     }
     try o.put(a, "facts", .{ .array = facts });
@@ -152,6 +162,12 @@ pub fn decode(gpa: Allocator, bytes: []const u8, settings: promote.Settings) Loa
         f.why = try str(sa, x.field("why"));
         if (x.field("retries")) |r| f.retries = try uint(u32, r); // absent in a file from before retries
         if (x.field("ask")) |p| f.ask = .{ .q = try str(sa, p.field("q")), .ref = try str(sa, p.field("ref")) };
+        if (x.field("neighbours")) |nb| if (nb.items()) |xs| {
+            const out = try sa.alloc([]const u8, xs.len);
+            for (xs, out) |q, *o| o.* = try str(sa, q);
+            f.neighbours = out;
+        };
+        if (x.field("pair")) |p| f.pair = .{ .q = try str(sa, p.field("q")), .ref = try str(sa, p.field("ref")), .text = try str(sa, p.field("text")) };
         try s.facts.append(sa, f);
     }
     for ((v.field("nights") orelse return error.BadState).items() orelse return error.BadState) |x| {

@@ -14,6 +14,7 @@ const slide_ask = @import("slide_ask.zig");
 const side = @import("slide_side.zig");
 const wording = @import("slide_words.zig");
 const prompts = @import("slide_prompts.zig");
+const slide_route = @import("slide_route.zig");
 const routes = @import("routes.zig");
 const http_body = @import("http_body.zig");
 const Server = @import("server.zig").Server;
@@ -24,6 +25,9 @@ const Allocator = std.mem.Allocator;
 
 /// How a note's own question is asked for: the model writes what its user would ask to hear the note again.
 const question_prompt = "The user once told you: \"{s}\"\nWrite the one short question the user would ask you later to hear this again, in the user's own words (for example: What is my dog's name?). Reply with the question only.";
+
+/// How a two-note question is asked for: one the user could ask that needs both statements.
+const pair_prompt = "The user once told you: \"{s}\" and \"{s}\"\nWrite one short question the user could ask you that needs both statements to answer, a yes-or-no comparison or a two-step question, in the user's own words. Reply with the question only.";
 
 /// Tokens a night's question is answered in at most (the learner's own checks read 48).
 pub const answer_tokens = 48;
@@ -517,6 +521,20 @@ const Backend = struct {
         var cx: errors.Cx = .{ .a = a };
         const ask = try std.fmt.allocPrint(a, question_prompt, .{fact});
         const r = try slide_ask.askBase(b.srv(), &cx, null, ask, 32, b.stopper());
+        const q = std.mem.trim(u8, r.content, " \t\r\n\"*");
+        return if (q.len > 0 and q.len < 200 and q[q.len - 1] == '?' and std.mem.indexOfScalar(u8, q, '\n') == null) q else "";
+    }
+
+    /// The note's own question asked about others the user knows and of the model (the learner's `others`).
+    pub fn neighbours(_: *Backend, a: Allocator, question: []const u8) ![]const []const u8 {
+        return slide_route.others(a, question, null, &.{});
+    }
+
+    /// A question that needs both notes (a yes/no comparison or a two-step one), written by the untaught model.
+    pub fn pairQuestion(b: *Backend, a: Allocator, one: []const u8, two: []const u8) ![]const u8 {
+        var cx: errors.Cx = .{ .a = a };
+        const ask = try std.fmt.allocPrint(a, pair_prompt, .{ one, two });
+        const r = try slide_ask.askBase(b.srv(), &cx, null, ask, 40, b.stopper());
         const q = std.mem.trim(u8, r.content, " \t\r\n\"*");
         return if (q.len > 0 and q.len < 200 and q[q.len - 1] == '?' and std.mem.indexOfScalar(u8, q, '\n') == null) q else "";
     }

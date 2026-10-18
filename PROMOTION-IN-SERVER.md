@@ -93,6 +93,19 @@ would then count as worse is not known).
 the cache generation bump; a failure at any allocation leaves the old report, list and generation whole (codexmb's
 review of `9cf5180e`; an allocation-failure sweep over the publish fails on the old code, with a leak).
 
+**Targeted probes (since `b7dc1f3b`).** The day-2 diagnosis (both GB10 runs, the same 4 questions lost against
+the notes-only control, each with the same block) found three kinds of damage the single-fact probes cannot see: a
+taught value given to the same attribute of someone else ("my sister's eyes" became green), a made-up answer to a
+personal question nobody answered ("my rabbit" became Floppy), and two-note answers broken (the cat's eyes against
+mine, a two-step country). So each fact taught or in the pocket gets, written once and kept in the state:
+its own question asked about others the user knows and of the model (the learner's `slide_route.others`, at most 3);
+and one question needing it and the current note sharing the most words with it (written by the untaught model, a
+yes/no comparison or a two-step question, with its reference answer from both facts). Three fixed untold personal
+questions join the controls. A neighbour or untold probe is worse when "don't know" turns into a value or the reply
+changes in substance; a two-note probe when right turns wrong (a yes/no reference: the same yes or no). The log names
+each by kind. Host test: a lesson that leaks a value to neighbours, one that invents an untold answer and one that
+flips a two-note answer each reject the night; control: the same night with no damage is kept.
+
 **Retry.** A missed or rejected fact is due once more the next night (`retries`, kept in the state); not a third time.
 
 **Alone.** On the accepted state each fact in the pocket is asked its probes with its own note left out (and the other

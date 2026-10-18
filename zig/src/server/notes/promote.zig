@@ -2,6 +2,7 @@
 const std = @import("std");
 const api = @import("engine_api");
 const Allocator = std.mem.Allocator;
+const probes = @import("promote_probes.zig");
 
 pub const Neuron = api.Neuron;
 pub const NeuronKey = api.NeuronKey;
@@ -26,7 +27,12 @@ pub const Fact = struct {
     why: []const u8 = "", // the last thing that happened to it
     retries: u32 = 0, // nights it was due again after a miss or a rejection
     ask: ?Probe = null, // the note's own question and its reference answer, for every night's regression set
+    neighbours: []const []const u8 = &.{}, // its own question asked about others the user knows (written once)
+    pair: ?Pair = null, // a question that needs this note and another (written once)
 };
+
+/// A two-note question, its reference answer and the two facts it was written from.
+pub const Pair = struct { q: []const u8, ref: []const u8, text: []const u8 };
 
 /// One night as the report shows it.
 pub const NightLog = struct {
@@ -150,6 +156,10 @@ pub fn idsOf(a: Allocator, notes: []const Note, keys: []const []const u8) Alloca
     return out.items;
 }
 
+pub fn noteOfPub(notes: []const Note, key: []const u8) ?Note {
+    return noteOf(notes, key);
+}
+
 fn noteOf(notes: []const Note, key: []const u8) ?Note {
     for (notes) |n| if (std.mem.eql(u8, n.key, key)) return n;
     return null;
@@ -157,73 +167,6 @@ fn noteOf(notes: []const Note, key: []const u8) ?Note {
 
 fn byTold(_: void, x: *Fact, y: *Fact) bool {
     return x.told < y.told or (x.told == y.told and std.mem.lessThan(u8, x.key, y.key));
-}
-
-const Regress = struct { asks: []const Ask, facts: []const ?*const Fact, probe: []const ?Probe, before: []const []const u8, right: []const bool };
-
-/// The regression set: each fact's probes, then the controls; asked as production asks them now.
-fn regressSet(a: Allocator, keep: []const *Fact, noted: []const *Fact, excl: []const u32) !struct { asks: []Ask, facts: []?*const Fact, probe: []?Probe } {
-    var asks: std.ArrayList(Ask) = .empty;
-    var facts: std.ArrayList(?*const Fact) = .empty;
-    var probe: std.ArrayList(?Probe) = .empty;
-    for (keep) |f| for (f.probes) |p| {
-        try asks.append(a, .{ .q = p.q, .exclude = excl });
-        try facts.append(a, f);
-        try probe.append(a, p);
-    };
-    for (noted) |f| if (f.ask) |p| {
-        try asks.append(a, .{ .q = p.q, .exclude = excl });
-        try facts.append(a, f);
-        try probe.append(a, p);
-    };
-    for (controls) |q| {
-        try asks.append(a, .{ .q = q, .exclude = excl });
-        try facts.append(a, null);
-        try probe.append(a, null);
-    }
-    return .{ .asks = asks.items, .facts = facts.items, .probe = probe.items };
-}
-
-/// Questions right before and wrong now (a control: changed in substance); their wordings joined into `log`.
-fn worseCount(a: Allocator, b: anytype, r: Regress, after: []const []const u8, log: *NightLog) !u32 {
-    var n: u32 = 0;
-    var list: std.ArrayList(u8) = .empty;
-    for (r.asks, 0..) |q, i| {
-        if (!r.right[i]) continue;
-        const ok = if (r.facts[i]) |f| b.agrees(f.text, q.q, r.probe[i].?.ref, after[i]) else std.mem.eql(u8, r.before[i], after[i]) or try b.same(a, q.q, r.before[i], after[i]);
-        if (ok) continue;
-        n += 1;
-        if (list.items.len > 0) try list.appendSlice(a, " | ");
-        try list.print(a, "{s} -> {s} (was {s})", .{ q.q, after[i][0..@min(after[i].len, 80)], r.before[i][0..@min(r.before[i].len, 80)] });
-    }
-    // the list of a rejected plan stays in the log beside any later one
-    if (n > 0) log.worse_list = if (log.worse_list.len > 0) try std.mem.concat(a, u8, &.{ log.worse_list, " || ", list.items }) else list.items;
-    return n;
-}
-
-/// The current fact notes whose own question joins tonight's regression set: all, or `n` chosen by key hash.
-fn sampleNotes(a: Allocator, s: *State, notes: []const Note, n: ?u32) ![]*Fact {
-    var out: std.ArrayList(*Fact) = .empty;
-    for (s.facts.items) |*f| if (noteOf(notes, f.key)) |cur| if (cur.fact and f.status != .freed) try out.append(a, f);
-    const Order = struct {
-        fn lt(_: void, x: *Fact, y: *Fact) bool {
-            return std.hash.Wyhash.hash(0, x.key) < std.hash.Wyhash.hash(0, y.key);
-        }
-    };
-    std.mem.sort(*Fact, out.items, {}, Order.lt);
-    const m = if (n) |x| @min(x, out.items.len) else out.items.len;
-    return out.items[0..m];
-}
-
-/// A question for each note that has none yet, written by the model, with its reference answer (kept in the state).
-fn askOf(s: *State, a: Allocator, b: anytype, facts: []const *Fact) !void {
-    for (facts) |f| {
-        if (f.ask != null) continue;
-        const q = try b.questionOf(a, f.text);
-        if (q.len == 0) continue;
-        const ref = (try b.references(a, f.text, &.{q}))[0];
-        f.ask = .{ .q = try s.alloc().dupe(u8, q), .ref = try s.alloc().dupe(u8, ref) };
-    }
 }
 
 fn setPocket(s: *State, add: []const Neuron) !void {
@@ -330,14 +273,16 @@ pub fn night(s: *State, a: Allocator, b: anytype) !NightLog {
 
 fn runPlans(s: *State, a: Allocator, b: anytype, k: u32, notes: []const Note, stale: []*Fact, keep: []*Fact, due: []*Fact, rebuild: bool, log: *NightLog) !void {
     const excl = try idsOf(a, notes, try s.inWeights(a));
-    const noted = try sampleNotes(a, s, notes, s.settings.regress_notes);
-    try askOf(s, a, b, noted);
-    const set = try regressSet(a, keep, noted, excl);
-    const before = try b.askAll(a, set.asks);
+    const noted = try probes.sampleNotes(a, s, notes, s.settings.regress_notes);
+    try probes.askOf(s, a, b, noted);
+    // the targeted probes: of the facts taught tonight and those in the pocket, written once
+    const targeted = try std.mem.concat(a, *Fact, &.{ keep, due });
+    try probes.askOf(s, a, b, targeted);
+    try probes.build(s, a, b, targeted, notes);
+    var set = try probes.set(a, keep, noted, targeted, excl);
+    try probes.before(b, &set, a, try b.askAll(a, set.asks));
     log.asks += @intCast(set.asks.len);
-    const right = try a.alloc(bool, set.asks.len);
-    for (set.asks, 0..) |q, i| right[i] = if (set.facts[i]) |f| b.agrees(f.text, q.q, set.probe[i].?.ref, before[i]) else true;
-    const r: Regress = .{ .asks = set.asks, .facts = set.facts, .probe = set.probe, .before = before, .right = right };
+    const r = set;
     log.probes = @intCast(set.asks.len);
     var plans: std.ArrayList(Plan) = .empty;
     if (!rebuild) try plans.append(a, .add) else {
@@ -367,7 +312,7 @@ fn runPlans(s: *State, a: Allocator, b: anytype, k: u32, notes: []const Note, st
         for (asks2) |*q| q.exclude = ask_excl;
         const after = try b.askAll(a, asks2);
         log.asks += @intCast(asks2.len);
-        log.worse = try worseCount(a, b, r, after, log);
+        log.worse = try probes.worse(a, b, r, after, log);
         if (log.worse <= s.settings.tolerance or plan == .source) {
             try accept(s, a, b, k, plan, stale, keep, due, sorted, taught);
             return;
@@ -379,7 +324,7 @@ fn runPlans(s: *State, a: Allocator, b: anytype, k: u32, notes: []const Note, st
             s.pocket = before_add;
             const again = try b.askAll(a, set.asks);
             log.asks += @intCast(set.asks.len);
-            log.worse = try worseCount(a, b, r, again, log);
+            log.worse = try probes.worse(a, b, r, again, log);
             for (due) |f| reject(s, f, "rejected: the night made answers worse");
             if (log.worse > s.settings.tolerance) {
                 log.tries += 1;

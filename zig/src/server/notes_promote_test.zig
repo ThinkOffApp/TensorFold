@@ -2,6 +2,7 @@
 const std = @import("std");
 const promote = @import("notes/promote.zig");
 const pjson = @import("notes/promote_json.zig");
+const probes = @import("notes/promote_probes.zig");
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
 const Neuron = promote.Neuron;
@@ -10,7 +11,7 @@ const Neuron = promote.Neuron;
 const FNote = struct { id: u32, key: []const u8, text: []const u8, told: i64, fact: bool = true, current: bool = true };
 
 /// A taught fact in the fake pocket: its topic, value and neurons (live until retired).
-const Live = struct { topic: []const u8, value: []const u8, neurons: []const Neuron, live: bool = true, breaks: bool = false, clobbers: bool = false };
+const Live = struct { topic: []const u8, value: []const u8, neurons: []const Neuron, live: bool = true, breaks: bool = false, clobbers: bool = false, text: []const u8 = "" };
 
 const Fake = struct {
     a: Allocator,
@@ -24,6 +25,10 @@ const Fake = struct {
     clobbered: []const u8 = "",
     miss_once: []const u8 = "", // a text the learner misses the first time only
     questions: u32 = 0, // notes' own questions written
+    pairs: u32 = 0, // two-note questions written
+    leaks: []const u8 = "", // a text whose neurons, while live, answer every neighbour question with its value
+    flips: []const u8 = "", // a text whose neurons, while live, answer two-note questions "No"
+    invents: []const u8 = "", // a text whose neurons, while live, make up an answer to the untold questions
     crash_at_teach: ?u32 = null, // the teach call to stop at (a crash): error.Crash
     teaches: u32 = 0,
     retires: u32 = 0,
@@ -85,7 +90,7 @@ const Fake = struct {
             n.* = .{ .layer = 1, .neuron = f.next_neuron, .key = .reply };
             f.next_neuron += 1;
         }
-        try f.pocket.append(f.a, .{ .topic = topic(text), .value = val(text), .neurons = ns, .breaks = std.mem.eql(u8, text, f.breaks), .clobbers = std.mem.eql(u8, text, f.clobbers) });
+        try f.pocket.append(f.a, .{ .topic = topic(text), .value = val(text), .neurons = ns, .breaks = std.mem.eql(u8, text, f.breaks), .clobbers = std.mem.eql(u8, text, f.clobbers), .text = text });
         const q = try std.fmt.allocPrint(a, "Q:{s}", .{topic(text)});
         return .{ .kept = true, .neurons = ns, .questions = try a.dupe([]const u8, &.{ q, q, q, q, q }) };
     }
@@ -94,16 +99,31 @@ const Fake = struct {
         for (f.pocket.items) |l| if (l.live and std.mem.eql(u8, l.topic, topic(text)) and std.mem.eql(u8, l.value, val(text))) try out.appendSlice(a, l.neurons);
         return out.items;
     }
+    pub fn neighbours(_: *Fake, a: Allocator, q: []const u8) ![]const []const u8 {
+        return a.dupe([]const u8, &.{try std.fmt.allocPrint(a, "N:{s}", .{q[2..]})});
+    }
+    pub fn pairQuestion(f: *Fake, a: Allocator, one: []const u8, two: []const u8) ![]const u8 {
+        f.pairs += 1;
+        return std.fmt.allocPrint(a, "P:{s}+{s}", .{ topic(one), topic(two) });
+    }
     pub fn questionOf(f: *Fake, a: Allocator, text: []const u8) ![]const u8 {
         f.questions += 1;
         return std.fmt.allocPrint(a, "Q:{s}", .{topic(text)});
     }
     pub fn references(_: *Fake, a: Allocator, fact: []const u8, qs: []const []const u8) ![]const []const u8 {
         const out = try a.alloc([]const u8, qs.len);
-        for (out) |*r| r.* = val(fact);
+        for (out, qs) |*r, q| r.* = if (std.mem.startsWith(u8, q, "P:")) "Yes." else val(fact);
         return out;
     }
+    fn live(f: *Fake, text: []const u8) ?Live {
+        if (text.len == 0) return null;
+        for (f.pocket.items) |l| if (l.live and std.mem.eql(u8, l.text, text)) return l;
+        return null;
+    }
     fn answer(f: *Fake, q: promote.Ask) []const u8 {
+        if (std.mem.startsWith(u8, q.q, "N:")) return if (f.live(f.leaks)) |l| l.value else "I don't know.";
+        if (std.mem.startsWith(u8, q.q, "P:")) return if (f.live(f.flips) != null) "No." else "Yes.";
+        for (@import("notes/promote_probes.zig").untold) |u| if (std.mem.eql(u8, u, q.q)) return if (f.live(f.invents) != null) "Floppy." else "I don't know.";
         if (!std.mem.startsWith(u8, q.q, "Q:")) {
             for (f.pocket.items) |l| if (l.live and l.breaks) return "Lyon";
             return "Paris";
@@ -407,13 +427,13 @@ test "promotion: the regression set asks every current note's own question; a ni
         if (sample == null) {
             try testing.expectEqual(@as(u32, 1), n.rejected); // the cat's answer went wrong with its note in the prompt
             try testing.expectEqual(promote.Status.rejected, status(&s, "w2"));
-            try testing.expect(std.mem.indexOf(u8, n.worse_list, "Q:cat -> wrong (was green)") != null);
+            try testing.expect(std.mem.indexOf(u8, n.worse_list, "fact: Q:cat -> wrong (was green)") != null);
             try testing.expectEqualStrings("Q:cat", s.find("w1").?.ask.?.q);
-            try testing.expectEqual(@as(u32, 2 + promote.controls.len), n.probes);
+            try testing.expectEqual(@as(u32, 2 + 1 + probes.untold.len + promote.controls.len), n.probes); // + the boat's neighbour
         } else { // control: without the notes' questions the same night is kept
             try testing.expectEqual(@as(u32, 0), n.rejected);
             try testing.expectEqual(promote.Status.promoted, status(&s, "w2"));
-            try testing.expectEqual(@as(u32, promote.controls.len), n.probes);
+            try testing.expectEqual(@as(u32, 1 + probes.untold.len + promote.controls.len), n.probes);
         }
     }
     // a sample of 1 of 3 notes: one note's question joins the set, written once and kept across nights
@@ -424,11 +444,11 @@ test "promotion: the regression set asks every current note's own question; a ni
     var s3 = promote.State.init(testing.allocator, .{ .regress_notes = 1 });
     defer s3.deinit();
     const n3 = try run(&s3, &g, &arena);
-    try testing.expectEqual(@as(u32, 1 + promote.controls.len), n3.probes);
-    try testing.expectEqual(@as(u32, 1), g.questions);
+    try testing.expectEqual(@as(u32, 1 + 3 + probes.untold.len + promote.controls.len), n3.probes); // 1 note, 3 neighbours
+    try testing.expectEqual(@as(u32, 3), g.questions); // each due fact's own question, for its neighbours
     _ = try g.add("w4", "kite=pink");
     _ = try run(&s3, &g, &arena);
-    try testing.expect(g.questions <= 2);
+    try testing.expectEqual(@as(u32, 4), g.questions); // written once: only the new note's
 }
 
 test "promotion: a missed or rejected fact is tried once more the next night, and not a third time" {
@@ -518,4 +538,60 @@ test "promotion: a terse right reply agrees with its reference; a denied, doubte
     const sis = "My sister's name is Ana.";
     try testing.expect(np.agreesWith(sis, "What is my sister called?", "Your sister's name is Ana.", "Ana.", &.{}));
     try testing.expect(!np.agreesWith(sis, "What is my sister called?", "Your sister's name is Ana.", "Your sister is called Maria.", &.{}));
+}
+
+test "promotion: the targeted probes reject a night that leaks a value to a neighbour, invents an untold answer or flips a two-note answer" {
+    const Case = enum { leak, invent, flip, none };
+    for ([_]Case{ .leak, .invent, .flip, .none }) |c| {
+        var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+        defer arena.deinit();
+        var f: Fake = .{ .a = arena.allocator() };
+        _ = try f.add("w1", "cat eyes=green");
+        _ = try f.add("w2", "my eyes=green");
+        switch (c) {
+            .leak => f.leaks = "cat eyes=green",
+            .invent => f.invents = "cat eyes=green",
+            .flip => f.flips = "my eyes=green",
+            .none => {},
+        }
+        var s = promote.State.init(testing.allocator, .{});
+        defer s.deinit();
+        const n = try run(&s, &f, &arena);
+        const cat = s.find("w1").?;
+        try testing.expectEqualStrings("N:cat eyes", cat.neighbours[0]);
+        try testing.expectEqualStrings("P:cat eyes+my eyes", cat.pair.?.q); // the note sharing words with it
+        if (c == .none) { // control: the same night with no damage is kept
+            try testing.expectEqual(@as(u32, 0), n.rejected);
+            try testing.expectEqual(promote.Status.promoted, status(&s, "w1"));
+            continue;
+        }
+        try testing.expectEqual(@as(u32, 1), n.rejected);
+        const tag = switch (c) {
+            .leak => "neighbour: N:cat eyes -> green (was I don't know.)",
+            .invent => "neighbour: What is my rabbit's name? -> Floppy.",
+            .flip => "pair: P:",
+            .none => unreachable,
+        };
+        if (std.mem.indexOf(u8, n.worse_list, tag) == null) {
+            std.debug.print("{s}: {s}\n", .{ @tagName(c), n.worse_list });
+            return error.TestUnexpectedResult;
+        }
+    }
+    // written once, kept in the state, reused the next night
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var g: Fake = .{ .a = arena.allocator() };
+    _ = try g.add("w1", "cat eyes=green");
+    _ = try g.add("w2", "my eyes=green");
+    var s = promote.State.init(testing.allocator, .{});
+    defer s.deinit();
+    _ = try run(&s, &g, &arena);
+    const pairs = g.pairs;
+    var back = try pjson.decode(testing.allocator, try pjson.encode(&s, arena.allocator()), .{});
+    defer back.deinit();
+    try testing.expectEqualStrings("N:cat eyes", back.find("w1").?.neighbours[0]);
+    try testing.expectEqualStrings(s.find("w1").?.pair.?.ref, back.find("w1").?.pair.?.ref);
+    _ = try g.add("w3", "tent=red");
+    _ = try promote.night(&back, arena.allocator(), &g);
+    try testing.expectEqual(pairs, g.pairs); // the tent shares no words: no pair; the others' are kept
 }
