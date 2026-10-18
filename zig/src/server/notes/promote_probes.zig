@@ -47,7 +47,7 @@ pub fn swapSubject(a: Allocator, question: []const u8, who: []const u8) !?[]cons
 
 /// Whether a reply says it does not know (the model's ways of saying nothing was told).
 pub fn unknown(reply: []const u8) bool {
-    const marks = [_][]const u8{ "don't know", "do not know", "don’t know", "not sure", "no information", "haven't told", "have not told", "haven't mentioned", "have not mentioned", "not mentioned", "don't have", "do not have", "can't know", "cannot know", "no way of knowing", "not been told", "wasn't told", "unknown" };
+    const marks = [_][]const u8{ "don't know", "do not know", "don’t know", "not sure", "no information", "haven't told", "have not told", "haven't mentioned", "have not mentioned", "not mentioned", "don't have", "do not have", "can't know", "cannot know", "no way of knowing", "not been told", "wasn't told", "unknown", "not provided", "not given", "not specified", "not stated", "doesn't tell", "does not tell", "doesn't say", "does not say", "doesn't mention", "does not mention", "no data", "no record" };
     for (marks) |m| if (std.ascii.findIgnoreCase(reply, m) != null) return true;
     return false;
 }
@@ -162,6 +162,17 @@ pub fn before(b: anytype, r: *Regress, a: Allocator, replies: []const []const u8
     };
 }
 
+/// A change settled from the two replies alone (null: the probe's check decides); see PROMOTION-IN-SERVER.md, Judge.
+pub fn settled(kind: Kind, q: []const u8, was: []const u8, now: []const u8, notes: []const []const u8) ?bool {
+    const fresh = judge.newValue(q, was, now, notes);
+    if (kind != .fact and unknown(now) and !fresh) return true;
+    if (kind == .neighbour and unknown(was)) return false; // it gave a value, or a new one beside its don't-know
+    if (fresh) return null;
+    if (yesNo(was)) |w| if (yesNo(now)) |x| if (w == x) return true;
+    if (judge.extends(was, now)) return true;
+    return null;
+}
+
 /// Probes worse now than before; their kinds and wordings joined into `log`.
 pub fn worse(a: Allocator, b: anytype, r: Regress, after: []const []const u8, log: *NightLog) !u32 {
     var n: u32 = 0;
@@ -170,7 +181,7 @@ pub fn worse(a: Allocator, b: anytype, r: Regress, after: []const []const u8, lo
         if (!r.right[i]) continue;
         const was = r.before[i];
         const now = after[i];
-        const ok = switch (r.kind[i]) {
+        const ok = settled(r.kind[i], q.q, was, now, try b.texts(a)) orelse switch (r.kind[i]) {
             .fact, .pair => right(b, r, i, now),
             .control => std.mem.eql(u8, was, now) or try b.same(a, q.q, was, now),
             // "I don't know for sure, but your rabbit is named Floppy." gives a new value: worse

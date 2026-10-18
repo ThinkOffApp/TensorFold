@@ -32,15 +32,35 @@ pub fn agreesWith(fact: []const u8, question: []const u8, ref: []const u8, reply
 
 /// Whether `reply` gives a value neither `before` nor the question has: a name, a number, or a stored note's word.
 pub fn newValue(question: []const u8, before: []const u8, reply: []const u8, notes: []const []const u8) bool {
-    var it = std.mem.tokenizeAny(u8, reply, delims);
-    var first = true;
-    while (it.next()) |w| : (first = false) {
-        if (std.ascii.isDigit(w[0]) and !hasStem(before, w) and !hasStem(question, w)) return true;
-        if (w.len < 2 or wording.isFiller(w) or hasStem(before, w) or hasStem(question, w)) continue;
-        if (!first and std.ascii.isUpper(w[0]) and !std.mem.eql(u8, w, "I")) return true;
-        if (w.len >= 3) for (notes) |n| if (hasStem(n, w)) return true;
+    // clause by clause: a denying clause asserts nothing; "I don't know, but your rabbit is Floppy." asserts its second
+    var clauses = std.mem.tokenizeAny(u8, reply, ".!?;,");
+    while (clauses.next()) |raw| {
+        var parts = std.mem.splitSequence(u8, raw, " but ");
+        while (parts.next()) |clause| {
+            if (denies(clause)) continue;
+            var it = std.mem.tokenizeAny(u8, clause, delims);
+            var first = true;
+            while (it.next()) |w| : (first = false) {
+                if (std.ascii.isDigit(w[0]) and !hasStem(before, w) and !hasStem(question, w)) return true;
+                if (w.len < 2 or wording.isFiller(w) or hasStem(before, w) or hasStem(question, w)) continue;
+                if (!first and std.ascii.isUpper(w[0]) and !std.mem.eql(u8, w, "I")) return true;
+                if (w.len >= 3) for (notes) |n| if (hasStem(n, w)) return true;
+            }
+        }
     }
     return false;
+}
+
+/// Whether `now` says every word of `before` (fillers aside, by stem): the same reply, at more length.
+pub fn extends(before: []const u8, now: []const u8) bool {
+    var it = std.mem.tokenizeAny(u8, before, delims);
+    var n: usize = 0;
+    while (it.next()) |w| {
+        if (w.len < 3 or wording.isFiller(w)) continue;
+        n += 1;
+        if (!hasStem(now, w)) return false;
+    }
+    return n > 0;
 }
 
 const delims = " \t\r\n.,;:!?\"'()*_";
@@ -50,6 +70,15 @@ const terse_words = 8;
 
 /// Words that deny, doubt or offer a choice: a reply holding one does not give the fact as told.
 const hedges = [_][]const u8{ "not", "no", "isn", "aren", "don", "doesn", "didn", "never", "maybe", "perhaps", "possibly", "probably", "might", "whether", "unsure", "or", "either", "neither", "nor" };
+
+/// Words that deny: a clause holding one asserts no value (a doubt, "maybe green", still offers one).
+const denials = [_][]const u8{ "not", "no", "isn", "aren", "don", "doesn", "didn", "never", "neither", "nor", "without" };
+
+fn denies(clause: []const u8) bool {
+    var it = std.mem.tokenizeAny(u8, clause, delims);
+    while (it.next()) |w| for (denials) |d| if (std.ascii.eqlIgnoreCase(w, d)) return true;
+    return false;
+}
 
 fn hedged(reply: []const u8) bool {
     var it = std.mem.tokenizeAny(u8, reply, delims);
