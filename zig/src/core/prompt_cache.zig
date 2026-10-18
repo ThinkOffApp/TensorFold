@@ -118,6 +118,7 @@ pub const Forgotten = struct {
     held: u32 = 0, // kept states a running prompt pass is restoring: left in place, a later forget takes them
     failed: u32 = 0, // learned states whose files or index record could not be removed, or a folder sync that failed
     in_flight: u32 = 0, // requests queued or running whose prompt holds the span (the engine counts them)
+    disk: bool = false, // the learned states' index (--learn) was searched: false when this store keeps none on disk
 
     /// Nothing the engine keeps holds the span any more, and no request carrying it is still running.
     pub fn complete(f: Forgotten) bool {
@@ -357,7 +358,10 @@ pub const Store = struct {
             s.remove(i);
             out.states += 1;
         }
-        if (s.imprint) |im| learned.forget(s, im, span, &out);
+        if (s.imprint) |im| {
+            learned.forget(s, im, span, &out);
+            out.disk = true;
+        }
         return out;
     }
 

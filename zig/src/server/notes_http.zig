@@ -195,7 +195,7 @@ fn erasedValue(srv: *Server, a: Allocator, id: u32, e: ops.Erased) Allocator.Err
     try o.put(a, "renumbered", .{ .array = moved });
     // the store's own structures and the journal hold it no more; every other place that may is named, and only
     // when none may is the erase complete
-    const status = places.check(srv);
+    const status = places.check(srv, places.forget(srv, a, e.texts));
     var remaining: std.ArrayList(Value) = .empty;
     var names: std.ArrayList(Value) = .empty;
     const checked = try json.newObject(a);
