@@ -243,3 +243,79 @@ test "an injection whose take runs out of memory fails its reply alone; a neighb
     }
     try std.testing.expect(failed > 0); // the sweep reached a failing take
 }
+
+/// A plain reply's first delivery pushes `extra` and arms the fake to fail every later read of its draws.
+const Armed = struct {
+    inject: *api.Inject,
+    target: *lanes.fake.Fake,
+    mutex: std.Io.Mutex = .init,
+    tokens: std.ArrayList(u32) = .empty,
+    done: ?Reason = null,
+
+    fn event(ctx: *anyopaque, _: Id, e: *const Event) void {
+        const b: *Armed = @ptrCast(@alignCast(ctx));
+        b.mutex.lockUncancelable(std.testing.io);
+        defer b.mutex.unlock(std.testing.io);
+        switch (e.*) {
+            .tokens => |t| {
+                b.tokens.appendSlice(gpa, t) catch {};
+                if (b.target.fail_reads.load(.acquire) == 0) {
+                    b.inject.push(&extra) catch {};
+                    var it = b.target.lanes.keyIterator(); // the lane thread delivers: its one stream is this reply's
+                    b.target.fail_reads.store(@intFromPtr(it.next().?.*), .release);
+                }
+            },
+            .finished => |f| b.done = f.reason,
+            else => {},
+        }
+    }
+};
+
+test "a settle that fails ends its reply with its own tokens alone, and the host serves the next request" {
+    var costs: [16]lanes.config.Cost = undefined;
+    for (&costs, 1..) |*c, w| c.* = .{ .width = @intCast(w), .ms = 5.0 + 0.8 * @as(f64, @floatFromInt(w)) };
+    var cfg = try lanes.Config.init(gpa, .{ .exact_width = 16, .gpu_tokens = true, .window_costs = &costs }, 16, 15);
+    defer cfg.deinit(gpa);
+    var target: lanes.fake.Fake = .{ .gpa = gpa };
+    defer target.deinit();
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(gpa, &cfg, target.backend(), clock.clock());
+    defer core.deinit();
+    var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 2, .inject = true });
+    try host.start();
+    defer host.stop();
+    var inject: api.Inject = .{ .io = std.testing.io, .gpa = gpa, .room = extra.len };
+    defer inject.deinit();
+    var armed: Armed = .{ .inject = &inject, .target = &target };
+    defer armed.tokens.deinit(gpa);
+    const plain: Request = .{ .prompt = &prompt, .max_tokens = 30, .drafts = false, .inject = &inject }; // a step stays queued
+    try host.engine().submit(1, &plain, .{ .ctx = &armed, .event = Armed.event });
+    while (true) {
+        armed.mutex.lockUncancelable(std.testing.io);
+        const d = armed.done;
+        armed.mutex.unlock(std.testing.io);
+        if (d) |r| {
+            try std.testing.expectEqual(Reason.failed, r);
+            break;
+        }
+        std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
+    }
+    const where = try inject.where(gpa);
+    defer gpa.free(where);
+    try std.testing.expectEqual(@as(usize, 0), where.len); // it failed at the settle, before any context was taken
+    var history: std.ArrayList(u32) = .empty;
+    defer history.deinit(gpa);
+    try history.appendSlice(gpa, &prompt);
+    for (armed.tokens.items) |t| { // what it sent is its own reply: no injected token reached the client
+        try std.testing.expectEqual(lanes.fake.next(history.items, null, history.items.len), t);
+        try history.append(gpa, t);
+    }
+    target.fail_reads.store(0, .release);
+    var next: Reply = .{};
+    defer next.tokens.deinit(gpa);
+    const other = [_]u32{ 3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5 };
+    const later: Request = .{ .prompt = &other, .max_tokens = 30 };
+    try host.engine().submit(2, &later, .{ .ctx = &next, .event = Reply.event });
+    try std.testing.expectEqual(Reason.length, next.wait());
+    try std.testing.expectEqual(@as(usize, 30), next.tokens.items.len);
+}

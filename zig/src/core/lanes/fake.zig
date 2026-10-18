@@ -54,6 +54,8 @@ pub const Fake = struct {
     prefill_chunks: usize = 0,
     prefill_count: usize = 0,
     extend_count: usize = 0, // extend passes run
+    owners: std.ArrayList(*Stream) = .empty, // handle -> the stream it was drawn for
+    fail_reads: std.atomic.Value(usize) = .init(0), // reads of this stream's draws fail with error.GpuFailed (0: none)
     prefill_hook: ?*const fn (ctx: *anyopaque, s: *Stream, chunk: usize) void = null,
     prefill_hook_ctx: ?*anyopaque = null,
     refuse_sampled: bool = false, // prefill refuses a sampled stream with error.SamplingRefused
@@ -68,6 +70,7 @@ pub const Fake = struct {
         while (it.next()) |l| freeLane(x.gpa, l);
         x.lanes.deinit(x.gpa);
         x.drawn.deinit(x.gpa);
+        x.owners.deinit(x.gpa);
     }
 
     fn freeLane(gpa: Allocator, l: *Lane) void {
@@ -96,6 +99,7 @@ pub const Fake = struct {
     fn draw(x: *Fake, l: *Lane, s: *Stream, position: u64) !u64 {
         if (position != l.history.items.len) return error.PositionMismatch;
         try x.drawn.append(x.gpa, x.targetNext(l.history.items, s.sampling, position));
+        try x.owners.append(x.gpa, s);
         return x.drawn.items.len - 1;
     }
 
@@ -252,7 +256,9 @@ pub const Fake = struct {
     }
 
     fn read(ptr: *anyopaque, handle: u64) anyerror!u32 {
-        return self(ptr).drawn.items[handle];
+        const x = self(ptr);
+        if (x.fail_reads.load(.acquire) == @intFromPtr(x.owners.items[handle])) return error.GpuFailed;
+        return x.drawn.items[handle];
     }
 
     fn verify(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) anyerror!void {
