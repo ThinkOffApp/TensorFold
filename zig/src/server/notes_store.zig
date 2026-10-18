@@ -300,7 +300,10 @@ pub const Store = struct {
         var n = chosen.len;
         var tokens: usize = 0;
         while (n > 0) {
-            tokens = (text.encode(a, shown.block, false) catch return error.Tokenizer).len;
+            // Oversized retry encodes must not accumulate in the request arena.
+            var fit_arena = std.heap.ArenaAllocator.init(s.gpa);
+            defer fit_arena.deinit();
+            tokens = (text.encode(fit_arena.allocator(), shown.block, false) catch return error.Tokenizer).len;
             if (tokens <= cap) break;
             n -= 1;
             tokens = 0;
