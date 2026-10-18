@@ -40,11 +40,11 @@ pub const Echo = struct {
 /// The day the fixture's writes are told on (2026-10-16).
 pub const today = line_mod.ordinalOf(2026, 10, 16);
 
-/// An index kind and side buffer a rig is built with.
-pub const Kind = struct { kind: notes_store.IndexKind = .postings, side_max: u32 = 1024 };
+/// An index kind and side buffer a rig is built with; `background`: sa merges on their own thread.
+pub const Kind = struct { kind: notes_store.IndexKind = .postings, side_max: u32 = 1024, background: bool = true };
 
-/// postings; sa with its side buffer (a few writes never merge); sa merging at every write (a new base each time).
-pub const kinds = [_]Kind{ .{}, .{ .kind = .sa }, .{ .kind = .sa, .side_max = 0 } };
+/// postings; sa's side buffer (no merge in a few writes); sa merging at every write, in the write, and on a thread.
+pub const kinds = [_]Kind{ .{}, .{ .kind = .sa }, .{ .kind = .sa, .side_max = 0, .background = false }, .{ .kind = .sa, .side_max = 0 } };
 
 pub const Rig = struct {
     tmp: testing.TmpDir,
@@ -55,6 +55,7 @@ pub const Rig = struct {
     gpa: std.mem.Allocator,
     kind: notes_store.IndexKind = .postings,
     side_max: u32 = 1024,
+    background: bool = true,
 
     pub fn init(gpa: std.mem.Allocator) !*Rig {
         return initKind(gpa, .postings, 1024);
@@ -62,7 +63,10 @@ pub const Rig = struct {
 
     /// initKind() with `k`'s index kind and side buffer.
     pub fn initWith(gpa: std.mem.Allocator, k: Kind) !*Rig {
-        return initKind(gpa, k.kind, k.side_max);
+        const r = try initKind(gpa, k.kind, k.side_max);
+        r.background = k.background;
+        r.store().bw.background_merge = k.background;
+        return r;
     }
 
     /// The rig with the n-gram index of `kind` (sa: a new base once the side buffer passes `side_max` notes).
@@ -89,6 +93,7 @@ pub const Rig = struct {
         };
         s.today = today;
         s.side_max = r.side_max;
+        s.bw.background_merge = r.background;
         r.srv.notes = s;
     }
 

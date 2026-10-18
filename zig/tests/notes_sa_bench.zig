@@ -48,11 +48,14 @@ pub fn main(init: std.process.Init) !u8 {
     const io = init.io;
     const a = init.arena.allocator();
     const argv = try init.minimal.args.toSlice(a);
-    if (argv.len != 6 and argv.len != 7) {
-        std.debug.print("usage: notes-sa-bench MODEL_DIR SNAPSHOT REF.json OUT_DIR WRITES [SIDE_MAX]\n", .{});
+    if (argv.len < 6 or argv.len > 10) {
+        std.debug.print("usage: notes-sa-bench MODEL_DIR SNAPSHOT REF.json OUT_DIR WRITES [SIDE_MAX [sync|thread [postings|sa [HARD_MAX]]]]\n", .{});
         return 2;
     }
-    const side_max: u32 = if (argv.len == 7) try std.fmt.parseInt(u32, argv[6], 10) else 1024;
+    const sync = argv.len >= 8 and std.mem.eql(u8, argv[7], "sync"); // merges in the write, not on a thread
+    const hard_max: ?u32 = if (argv.len == 10) try std.fmt.parseInt(u32, argv[9], 10) else null;
+    const only: ?Kind = if (argv.len >= 9) std.meta.stringToEnum(Kind, argv[8]) orelse return 2 else null;
+    const side_max: u32 = if (argv.len >= 7) try std.fmt.parseInt(u32, argv[6], 10) else 1024;
     var problem: []const u8 = "";
     const ht = try server.hf_text.HfText.load(gpa, io, argv[1], null, a, &problem);
     defer ht.deinit();
@@ -71,6 +74,7 @@ pub fn main(init: std.process.Init) !u8 {
     const builds: usize = if (n >= 100_000) 5 else 20;
     var out: std.Io.Writer.Allocating = .init(a);
     for ([_]Kind{ .postings, .sa }) |kind| {
+        if (only) |k| if (k != kind) continue;
         // 1. the index build from a parsed model (what a load and, for postings, every write does)
         var build_ns: std.ArrayList(u64) = .empty;
         for (0..builds) |_| {
@@ -91,13 +95,17 @@ pub fn main(init: std.process.Init) !u8 {
         };
         defer store.deinit();
         store.side_max = side_max;
+        store.bw.background_merge = !sync;
+        store.bw.hard_max = hard_max;
         var t_load: std.ArrayList(u64) = .empty;
         var i_load: std.ArrayList(u64) = .empty;
         var d_load: u64 = 0;
         try lookups(store, text, qs.items, reps, a, io, &t_load, &i_load, &d_load);
         // 3. writes as the live bench makes them (no erases among them): the side buffer fills, merges past side_max
         var write_ns: std.ArrayList(u64) = .empty;
-        var merge_write_ns: std.ArrayList(u64) = .empty;
+        var merge_write_ns: std.ArrayList(u64) = .empty; // a write whose version is on a new core (made here or on a thread)
+        var start_ns: std.ArrayList(u64) = .empty; // a write that began a merge on its own thread (the notes copied)
+        var all_ns: std.ArrayList(u64) = .empty;
         var vbuild_ns: std.ArrayList(u64) = .empty;
         var why: ops.Refusal = .{};
         for (0..writes) |k| {
@@ -107,6 +115,7 @@ pub fn main(init: std.process.Init) !u8 {
             const item = try std.fmt.allocPrint(w, "my item {d}", .{k / 4});
             const last = store.model.notes.items[store.model.notes.items.len - 1];
             const merges = store.merges;
+            const was_merging = store.bw.merging != null;
             const t0 = now(io);
             _ = switch (k % 4) {
                 0 => try ops.perform(store, w, .{ .op = .add, .text = try std.fmt.allocPrint(w, "My item {d} is red.", .{k / 4}), .subject = item }, &why),
@@ -115,7 +124,8 @@ pub fn main(init: std.process.Init) !u8 {
                 else => try ops.perform(store, w, .{ .op = .take_back, .text = "I take that back.", .target = last.id }, &why),
             };
             const ns = now(io) - t0;
-            try (if (store.merges != merges) &merge_write_ns else &write_ns).append(a, ns);
+            try all_ns.append(a, ns);
+            try (if (store.merges != merges) &merge_write_ns else if (!was_merging and store.bw.merging != null) &start_ns else &write_ns).append(a, ns);
             if (k % 50 == 25) { // the version build alone, at this point (the write's own share of its time)
                 const t1 = now(io);
                 const v = try store.build();
@@ -125,6 +135,8 @@ pub fn main(init: std.process.Init) !u8 {
             }
         }
         const ix = store.current.idx;
+        const delta_bytes: usize = if (ix.layer.core != null) ix.arena.bytes() else 0; // read now: a merge below frees it
+        const delta_notes: usize = ix.notes() - ix.layer.core_n;
         const side = if (ix.base) |b| ix.notes() - b.notes else 0;
         // 4. the lookups on the written store, the side buffer as the writes left it
         var t_written: std.ArrayList(u64) = .empty;
@@ -152,13 +164,18 @@ pub fn main(init: std.process.Init) !u8 {
             try erase_ns.append(a, now(io) - t0);
         }
         const o = &out.writer;
-        try o.print("{{\"kind\":\"{s}\",\"snapshot\":\"{s}\",\"notes\":{d},\"questions\":{d},\"reps\":{d},\"side_max\":{d},\"writes\":{d},\"notes_after\":{d},\"side_after\":{d},\"merges\":{d}", .{ @tagName(kind), std.fs.path.basename(argv[2]), n, qs.items.len, reps, side_max, writes, store.model.notes.items.len, side, store.merges });
+        try o.print("{{\"merges_on\":\"{s}\",", .{if (sync) "the write" else "a thread"});
+        try o.print("\"kind\":\"{s}\",\"snapshot\":\"{s}\",\"notes\":{d},\"questions\":{d},\"reps\":{d},\"side_max\":{d},\"writes\":{d},\"notes_after\":{d},\"side_after\":{d},\"merges\":{d}", .{ @tagName(kind), std.fs.path.basename(argv[2]), n, qs.items.len, reps, side_max, writes, store.model.notes.items.len, side, store.merges });
         try o.print(",\"build_ms\":{{\"p50\":{d:.2},\"min\":{d:.2},\"n\":{d}}}", .{ pct(build_ns.items, 50) / 1e3, pct(build_ns.items, 0) / 1e3, build_ns.items.len });
         try o.print(",\"lookup_us\":{{\"p50\":{d:.1},\"p95\":{d:.1},\"inner_p50\":{d:.1},\"inner_p95\":{d:.1},\"n\":{d},\"digest\":\"{x}\"}}", .{ pct(t_load.items, 50), pct(t_load.items, 95), pct(i_load.items, 50), pct(i_load.items, 95), t_load.items.len, d_load });
         try o.print(",\"write_ms\":{{\"p50\":{d:.2},\"p95\":{d:.2},\"n\":{d}}},\"merge_write_ms\":{{\"p50\":{d:.2},\"max\":{d:.2},\"n\":{d}}}", .{ pct(write_ns.items, 50) / 1e3, pct(write_ns.items, 95) / 1e3, write_ns.items.len, pct(merge_write_ns.items, 50) / 1e3, pct(merge_write_ns.items, 100) / 1e3, merge_write_ns.items.len });
+        try o.print(",\"merge_start_ms\":{{\"p50\":{d:.2},\"max\":{d:.2},\"n\":{d}}}", .{ pct(start_ns.items, 50) / 1e3, pct(start_ns.items, 100) / 1e3, start_ns.items.len });
+        try o.print(",\"all_writes_ms\":{{\"p50\":{d:.2},\"p95\":{d:.2},\"p99\":{d:.2},\"max\":{d:.2},\"n\":{d}}}", .{ pct(all_ns.items, 50) / 1e3, pct(all_ns.items, 95) / 1e3, pct(all_ns.items, 99) / 1e3, pct(all_ns.items, 100) / 1e3, all_ns.items.len });
         try o.print(",\"version_build_ms\":{{\"p50\":{d:.2},\"p95\":{d:.2},\"n\":{d}}}", .{ pct(vbuild_ns.items, 50) / 1e3, pct(vbuild_ns.items, 95) / 1e3, vbuild_ns.items.len });
         try o.print(",\"lookup_written_us\":{{\"p50\":{d:.1},\"p95\":{d:.1},\"inner_p50\":{d:.1},\"inner_p95\":{d:.1},\"digest\":\"{x}\"}}", .{ pct(t_written.items, 50), pct(t_written.items, 95), pct(i_written.items, 50), pct(i_written.items, 95), d_written });
         try o.print(",\"merge_ms\":{{\"p50\":{d:.2},\"max\":{d:.2}}},\"lookup_merged_us\":{{\"p50\":{d:.1},\"p95\":{d:.1},\"digest\":\"{x}\"}}", .{ pct(merge_ns.items, 50) / 1e3, pct(merge_ns.items, 100) / 1e3, pct(t_merged.items, 50), pct(t_merged.items, 95), d_merged });
+        try o.print(",\"delta_bytes\":{d},\"delta_notes\":{d}", .{ delta_bytes, delta_notes });
+        try o.print(",\"hard_max\":{d},\"waits\":{d},\"wait_ms\":{d:.2}", .{ store.bw.hardLimit(store.side_max), store.bw.waits, @as(f64, @floatFromInt(store.bw.wait_ns)) / 1e6 });
         try o.print(",\"erase_ms\":{{\"p50\":{d:.2},\"max\":{d:.2},\"n\":{d}}}}}\n", .{ pct(erase_ns.items, 50) / 1e3, pct(erase_ns.items, 100) / 1e3, erase_ns.items.len });
         std.Io.Dir.cwd().deleteFile(io, journal) catch {};
         std.Io.Dir.cwd().deleteFile(io, snap) catch {};

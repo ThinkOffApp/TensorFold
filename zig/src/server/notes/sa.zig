@@ -212,6 +212,22 @@ fn radix(xs: []Entry, tmp: []Entry, bits: usize) void {
 
 /// The base over `notes` (places 0..len-1); the ids of one key must agree on `vwordy` (Unsupported otherwise).
 pub fn build(gpa: Allocator, notes: []const Source, vwordy: []const bool) BuildError!*Base {
+    return buildOn(gpa, null, notes, vwordy);
+}
+
+/// build() of `notes` whose first `old.notes` are the notes `old` was built over (the same keys, by place; their
+/// current or not may differ now): the same base, bit for bit, made by a linear merge of `old`'s sorted arrays with
+/// the newer notes' suffixes sorted alone, instead of sorting every suffix again. A suffix ends at its note's
+/// separator, so suffixes of two sets of notes order without reading across them; the dictionary's new codes keep
+/// the old keys' order, so the old arrays stay sorted under them.
+pub fn merge(gpa: Allocator, old: *const Base, notes: []const Source, vwordy: []const bool) BuildError!*Base {
+    return buildOn(gpa, old, notes, vwordy);
+}
+
+/// Tests only: a merge that keeps each old note in the view the old base had it in (the bug its test must catch).
+pub var merge_plant_stale_views: bool = false;
+
+fn buildOn(gpa: Allocator, old_in: ?*const Base, notes: []const Source, vwordy: []const bool) BuildError!*Base {
     const b = try gpa.create(Base);
     b.* = .{ .mem = exact.Exact.init(gpa) };
     errdefer {
@@ -224,6 +240,14 @@ pub fn build(gpa: Allocator, notes: []const Source, vwordy: []const bool) BuildE
     for (notes) |n| {
         tokens += n.keys.len;
         if (n.cur) n_cur += n.keys.len;
+    }
+    var old = old_in;
+    if (old) |o| { // the old notes' tokens must be where the old base has them
+        var t: usize = 0;
+        if (o.notes <= notes.len) {
+            for (notes[0..o.notes]) |n| t += n.keys.len;
+        }
+        if (o.notes > notes.len or t != o.tokens) old = null;
     }
     // the dictionary: every key held, ascending (a hash set first: the store's distinct keys are few)
     var codes: std.AutoHashMapUnmanaged(u32, u32) = .empty;
@@ -273,14 +297,41 @@ pub fn build(gpa: Allocator, notes: []const Source, vwordy: []const bool) BuildE
     const cw = widthFor(distinct);
     b.text = try Packed.alloc(a, positions, cw);
     for (text[0..positions], 0..) |c, i| b.text.put(i, c);
-    // each view's suffixes radix-sorted by their first three codes, then runs of an equal sep-free prefix sorted whole
+    // each view's suffixes radix-sorted by their first three codes, then runs of an equal sep-free prefix sorted whole;
+    // with an old base, only the newer notes' (from place `from`, position `from_pos`) are sorted here
+    const from: usize = if (old) |o| o.notes else 0;
+    const from_pos: usize = if (old) |o| o.tokens + o.notes else 0;
+    var new_tokens: usize = 0;
+    var new_cur: usize = 0;
+    for (notes[from..]) |n| {
+        new_tokens += n.keys.len;
+        if (n.cur) new_cur += n.keys.len;
+    }
     const fits = 3 * @as(usize, cw) <= 63;
-    const ents = try gpa.alloc(Entry, tokens);
+    // the old base's last token: its sort prefix read the padding after the old text, and reads a newer note's
+    // first codes now, so it is sorted again with the newer notes' suffixes, not taken from the old arrays
+    const moved: ?usize = if (old != null and from_pos >= 2 and text[from_pos - 2] != sep) from_pos - 2 else null;
+    const moved_cur = if (moved) |q| notes[old.?.placeOf(q)].cur else false;
+    if (moved) |_| {
+        new_tokens += 1;
+        if (moved_cur) new_cur += 1;
+    }
+    const ents = try gpa.alloc(Entry, new_tokens);
     defer gpa.free(ents);
     var ci: usize = 0;
-    var hi_at: usize = n_cur;
-    at = 0;
-    for (notes) |n| {
+    var hi_at: usize = new_cur;
+    if (moved) |q| {
+        const e: Entry = .{ .prefix = if (fits) (@as(u64, text[q]) << @intCast(2 * cw)) | (@as(u64, text[q + 1]) << cw) | text[q + 2] else 0, .pos = @intCast(q) };
+        if (moved_cur) {
+            ents[0] = e;
+            ci = 1;
+        } else {
+            ents[new_cur] = e;
+            hi_at = new_cur + 1;
+        }
+    }
+    at = from_pos;
+    for (notes[from..]) |n| {
         for (0..n.keys.len) |j| {
             const p = at + j;
             const pre: u64 = if (fits) (@as(u64, text[p]) << @intCast(2 * cw)) | (@as(u64, text[p + 1]) << cw) | text[p + 2] else 0;
@@ -295,10 +346,10 @@ pub fn build(gpa: Allocator, notes: []const Source, vwordy: []const bool) BuildE
         }
         at += n.keys.len + 1;
     }
-    const tmp = try gpa.alloc(Entry, tokens);
+    const tmp = try gpa.alloc(Entry, new_tokens);
     defer gpa.free(tmp);
     const ctx: SortCtx = .{ .text = text };
-    for ([2][2]usize{ .{ 0, n_cur }, .{ n_cur, tokens } }) |r| {
+    for ([2][2]usize{ .{ 0, new_cur }, .{ new_cur, new_tokens } }) |r| {
         const view = ents[r[0]..r[1]];
         if (!fits) {
             std.sort.pdq(Entry, view, ctx, SortCtx.less);
@@ -317,12 +368,95 @@ pub fn build(gpa: Allocator, notes: []const Source, vwordy: []const bool) BuildE
     }
     const pw = widthFor(@max(positions, 1) - 1);
     b.sa_cur = try Packed.alloc(a, n_cur, pw);
-    for (ents[0..n_cur], 0..) |e, i| b.sa_cur.put(i, e.pos);
     b.sa_hist = try Packed.alloc(a, tokens - n_cur, pw);
-    for (ents[n_cur..], 0..) |e, i| b.sa_hist.put(i, e.pos);
+    if (old) |o| {
+        const order: Order = .{ .text = text, .cw = cw, .fits = fits };
+        const skip: u32 = if (moved) |q| @intCast(q) else std.math.maxInt(u32);
+        mergeView(o, notes, order, skip, true, ents[0..new_cur], b.sa_cur);
+        mergeView(o, notes, order, skip, false, ents[new_cur..], b.sa_hist);
+    } else {
+        for (ents[0..n_cur], 0..) |e, i| b.sa_cur.put(i, e.pos);
+        for (ents[n_cur..], 0..) |e, i| b.sa_hist.put(i, e.pos);
+    }
     b.notes = @intCast(notes.len);
     b.tokens = tokens;
     return b;
+}
+
+/// build()'s order of two suffixes: their first three codes as its radix sort reads them (across a separator,
+/// as the packed prefix does), then within an equal prefix SortCtx.less (positions, when a separator ends both).
+const Order = struct {
+    text: []const u32,
+    cw: u6,
+    fits: bool,
+
+    inline fn prefix(o: Order, p: u32) u64 {
+        const t = o.text;
+        return (@as(u64, t[p]) << @intCast(2 * @as(u7, o.cw))) | (@as(u64, t[p + 1]) << o.cw) | t[p + 2];
+    }
+
+    inline fn before(o: Order, x: u32, y: u32) bool {
+        if (o.fits) {
+            const px = o.prefix(x);
+            const py = o.prefix(y);
+            if (px != py) return px < py;
+        }
+        return SortCtx.less(.{ .text = o.text }, .{ .prefix = 0, .pos = x }, .{ .prefix = 0, .pos = y });
+    }
+};
+
+/// One view of a merge: the old base's suffixes of notes in that view now (from either old array, each already in
+/// suffix order) and the newer notes' (sorted), merged three ways into `out`.
+fn mergeView(old: *const Base, notes: []const Source, order: Order, skip: u32, cur: bool, fresh: []const Entry, out: Packed) void {
+    const Run = struct {
+        arr: Packed,
+        view: bool, // the view this old array held
+        i: usize = 0,
+        skip: u32,
+        fn next(r: *@This(), o: *const Base, ns: []const Source, want: bool) ?u32 {
+            while (r.i < r.arr.len) {
+                const p = r.arr.get(r.i);
+                r.i += 1;
+                if (p == r.skip) continue; // sorted with the newer notes' suffixes
+                const now = if (merge_plant_stale_views) r.view else ns[o.placeOf(p)].cur;
+                if (now == want) return p;
+            }
+            return null;
+        }
+    };
+    var ra: Run = .{ .arr = old.sa_cur, .view = true, .skip = skip };
+    var rb: Run = .{ .arr = old.sa_hist, .view = false, .skip = skip };
+    var ha = ra.next(old, notes, cur);
+    var hb = rb.next(old, notes, cur);
+    var fi: usize = 0;
+    var o: usize = 0;
+    while (true) {
+        const hc: ?u32 = if (fi < fresh.len) fresh[fi].pos else null;
+        var best: ?u32 = null;
+        var which: u2 = 0;
+        if (ha) |x| {
+            best = x;
+            which = 0;
+        }
+        if (hb) |x| if (best == null or order.before(x, best.?)) {
+            best = x;
+            which = 1;
+        };
+        if (hc) |x| if (best == null or order.before(x, best.?)) {
+            best = x;
+            which = 2;
+        };
+        const p = best orelse break;
+        if (o >= out.len) break; // only a planted bug gets here
+        out.put(o, p);
+        o += 1;
+        switch (which) {
+            0 => ha = ra.next(old, notes, cur),
+            1 => hb = rb.next(old, notes, cur),
+            else => fi += 1,
+        }
+    }
+    if (!merge_plant_stale_views) std.debug.assert(o == out.len);
 }
 
 /// The distinct n-grams of one view (n_min to n_max; a 1-gram only of a key `keep1` passes), from its sorted suffixes.
@@ -416,4 +550,63 @@ test "a range holds every occurrence of a pattern and nothing else, never across
         }
     }
     try std.testing.expect(b.codes(&.{ 5, 6 }, &buf) == null); // 6 is in no note
+}
+
+test "a merge of an old base and newer notes is the base built from nothing, bit for bit" {
+    const a = std.testing.allocator;
+    var rng = std.Random.DefaultPrng.init(11);
+    const r = rng.random();
+    for (0..40) |round| {
+        const n = 1 + r.uintLessThan(usize, 60);
+        const keep = r.uintLessThan(usize, n + 1);
+        const keys = try a.alloc([]u32, n);
+        defer {
+            for (keys) |k| a.free(k);
+            a.free(keys);
+        }
+        var src = try a.alloc(Source, n);
+        defer a.free(src);
+        const ids: [16]u32 = @splat(0);
+        const vocab: u32 = if (round % 2 == 0) 4 else 300; // few keys (long equal runs) or many
+        for (keys, src) |*k, *s| {
+            k.* = try a.alloc(u32, r.uintLessThan(usize, 12));
+            for (k.*) |*x| x.* = 1 + r.uintLessThan(u32, vocab);
+            s.* = .{ .keys = k.*, .ids = ids[0..k.len], .cur = r.boolean() };
+        }
+        const old = try build(a, src[0..keep], &.{});
+        defer old.release();
+        for (src[0..keep]) |*s| if (r.uintLessThan(u8, 4) == 0) {
+            s.cur = !s.cur; // retired (or, in this test, back again) since the old base
+        };
+        const want = try build(a, src, &.{});
+        defer want.release();
+        const got = try merge(a, old, src, &.{});
+        defer got.release();
+        try std.testing.expectEqualSlices(u32, want.dict, got.dict);
+        try std.testing.expectEqualSlices(u8, want.text.bytes, got.text.bytes);
+        try std.testing.expectEqualSlices(u8, want.sa_cur.bytes, got.sa_cur.bytes);
+        try std.testing.expectEqualSlices(u8, want.sa_hist.bytes, got.sa_hist.bytes);
+        try std.testing.expectEqualSlices(u64, want.wordy, got.wordy);
+        try std.testing.expectEqual(want.tokens, got.tokens);
+    }
+}
+
+test "negative control: a merge that keeps retired notes in their old view differs from the build" {
+    const a = std.testing.allocator;
+    const ids: [4]u32 = @splat(0);
+    var src = [_]Source{
+        .{ .keys = &.{ 3, 4 }, .ids = ids[0..2], .cur = true },
+        .{ .keys = &.{ 4, 5 }, .ids = ids[0..2], .cur = true },
+        .{ .keys = &.{ 3, 5 }, .ids = ids[0..2], .cur = true },
+    };
+    const old = try build(a, src[0..2], &.{});
+    defer old.release();
+    src[0].cur = false; // retired since the old base
+    const want = try build(a, &src, &.{});
+    defer want.release();
+    merge_plant_stale_views = true;
+    defer merge_plant_stale_views = false;
+    const got = try merge(a, old, &src, &.{});
+    defer got.release();
+    try std.testing.expect(!std.mem.eql(u8, want.sa_cur.bytes, got.sa_cur.bytes));
 }

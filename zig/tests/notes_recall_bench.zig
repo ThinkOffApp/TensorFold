@@ -1,4 +1,4 @@
-//! notes-recall MODEL_DIR DIR off|all:MAX|longest: recall at the cap on recall_export.py's sets, with sa.
+//! notes-recall MODEL_DIR DIR off|all:MAX|longest [postings|sa]: recall at the cap on recall_export.py's sets.
 const std = @import("std");
 const server = @import("server");
 const Store = server.notes_store.Store;
@@ -16,10 +16,11 @@ pub fn main(init: std.process.Init) !u8 {
     const io = init.io;
     const a = init.arena.allocator();
     const argv = try init.minimal.args.toSlice(a);
-    if (argv.len != 4) {
-        std.debug.print("usage: notes-recall MODEL_DIR DIR off|all:MAX|longest\n", .{});
+    if (argv.len != 4 and argv.len != 5) {
+        std.debug.print("usage: notes-recall MODEL_DIR DIR off|all:MAX|longest [postings|sa (default sa)]\n", .{});
         return 2;
     }
+    const kind = if (argv.len == 5) std.meta.stringToEnum(index.Kind, argv[4]) orelse return 2 else index.default_kind;
     var long: index.Long = .{};
     if (std.mem.eql(u8, argv[3], "longest")) {
         long.mode = .longest;
@@ -61,7 +62,7 @@ pub fn main(init: std.process.Init) !u8 {
             const stem = st.strField("stem").?;
             const snap = try std.Io.Dir.cwd().readFileAlloc(io, try std.fmt.allocPrint(a, "{s}/{s}.snap.json", .{ argv[2], stem }), gpa, .unlimited);
             defer gpa.free(snap);
-            const store = Store.loadIndexed(gpa, io, snap, text, .sa, &problem) catch |e| {
+            const store = Store.loadIndexed(gpa, io, snap, text, kind, &problem) catch |e| {
                 std.debug.print("{s}: {s} ({s})\n", .{ stem, problem, @errorName(e) });
                 return 1;
             };
@@ -116,9 +117,9 @@ pub fn main(init: std.process.Init) !u8 {
         }
         try out.writer.print("{{\"group\":\"{s}\",\"long\":\"{s}\",\"questions\":{d},\"with_needed\":{d},\"recall\":{d},\"python_recall\":{d},\"gained\":{d},\"lost\":{d}," ++
             "\"ids_as_python\":{d},\"block_as_python\":{d},\"past_as_python\":{d},\"tokens_p50\":{d},\"tokens_p95\":{d},\"python_tokens_p50\":{d},\"python_tokens_p95\":{d},\"notes_per_block\":{d:.2},\"unneeded_per_block\":{d:.2},\"questions_with_long\":{d},\"long_ngrams\":{d}}}\n", .{
-            group,                   argv[3],                   asked,                     with_needed,              hit,                        py_hit,               gained, lost,
-            same_ids,                same_block,                past_same,                 pct(tokens.items, 50),    pct(tokens.items, 95),      pct(py_tokens.items, 50), pct(py_tokens.items, 95),
-            @as(f64, @floatFromInt(notes_total)) / @as(f64, @floatFromInt(asked)), @as(f64, @floatFromInt(unneeded)) / @as(f64, @floatFromInt(asked)), long_q, long_n,
+            group,                                                              argv[3],    asked,     with_needed,           hit,                   py_hit,                   gained,                   lost,
+            same_ids,                                                           same_block, past_same, pct(tokens.items, 50), pct(tokens.items, 95), pct(py_tokens.items, 50), pct(py_tokens.items, 95), @as(f64, @floatFromInt(notes_total)) / @as(f64, @floatFromInt(asked)),
+            @as(f64, @floatFromInt(unneeded)) / @as(f64, @floatFromInt(asked)), long_q,     long_n,
         });
     }
     try std.Io.File.stdout().writeStreamingAll(io, out.written());

@@ -1,6 +1,7 @@
 //! The notes' writes over HTTP: add, change, take back, erase, list; each on disk before it is seen or answered.
 const std = @import("std");
 const store_mod = @import("notes_store.zig");
+const bounded = @import("notes/bounded.zig");
 const records_mod = @import("notes_records.zig");
 const model_mod = @import("notes/model.zig");
 const write = @import("notes/write.zig");
@@ -107,7 +108,9 @@ pub fn perform(s: *Store, a: Allocator, ask: Ask, why: *Refusal) Error!Written {
     };
     var applied = true;
     defer if (applied) write.revert(m, &undo);
-    const v: ?*store_mod.Version = if (out.verdict.learn()) (s.build() catch return error.OutOfMemory) else null;
+    const gone = try a.alloc(u32, undo.gone.items.len); // the places it retires
+    for (undo.gone.items, gone) |x, *p| p.* = x.place;
+    const v: ?*store_mod.Version = if (out.verdict.learn()) (bounded.build(s, gone) catch return error.OutOfMemory) else null;
     errdefer if (v) |x| {
         x.idx.deinit();
         s.gpa.destroy(x);
@@ -115,6 +118,7 @@ pub fn perform(s: *Store, a: Allocator, ask: Ask, why: *Refusal) Error!Written {
     const shown: ?u32 = if (out.note != 0) out.note else if (out.same_as.len > 0) out.same_as[0] else null;
     var reply: Written = .{ .verdict = out.verdict, .source = source, .told = r.told, .note = if (shown) |id| try view(m, a, m.placeOf(id).?) else null, .retired = out.retired, .same_as = out.same_as };
     try s.current.garbage.ensureUnusedCapacity(s.gpa, undo.gone.items.len); // the replaced lines, kept by the version it retires
+    try s.bw.core_retired.ensureUnusedCapacity(s.gpa, gone.len);
     var entry = try s.log.prepare(r, out, m);
     errdefer records_mod.freeEntry(s.gpa, &entry);
     s.journal.?.append(a, r) catch |e| return switch (e) {
@@ -128,8 +132,10 @@ pub fn perform(s: *Store, a: Allocator, ask: Ask, why: *Refusal) Error!Written {
     s.log.push(entry);
     if (v) |x| {
         s.swap(x, false);
+        bounded.settle(s, x, gone);
         reply.ver = x.idx.ver;
         s.next_ver += 1;
+        bounded.maybeMerge(s);
     }
     s.reclaim(false);
     return reply;
@@ -147,6 +153,7 @@ pub fn erase(s: *Store, a: Allocator, id: u32, why: *Refusal) Error!Erased {
     defer s.writer.unlock(s.io);
     if (s.read_only.len > 0) return refuse(why, 503, s.read_only);
     if (poisoned(s)) return refuse(why, 503, needs_recovery);
+    s.bw.stop(); // a merge in flight reads the model this erase replaces, and would keep the note's keys
     const old = s.model;
     const p = old.placeOf(id) orelse return refuse(why, 404, "no note has this id");
     if (p < old.base_notes) return refuse(why, 409, "this note comes from the snapshot: erase it in LLWZ (NoteStore.delete) and export again");
@@ -212,6 +219,7 @@ pub fn erase(s: *Store, a: Allocator, id: u32, why: *Refusal) Error!Erased {
     log_owned = false;
     s.swap(v, true);
     s.next_ver += 1;
+    s.bw.core_retired.clearRetainingCapacity(); // a full build: no core notes retired since
     s.model = fresh;
     var old_log = s.log;
     s.log = log;

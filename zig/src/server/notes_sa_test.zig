@@ -75,7 +75,10 @@ test "subject aliases reject ambiguous names and recover after take back" {
     try testing.expect(!live.nameJustWritten(ids)); // unresolved collisions must not expand live fetch
     // Once all candidates' current notes are held, the same name cannot
     // trigger another fetch. A collision never chooses an arbitrary entity.
-    for (candidates) |e| for (store.current.idx.ent_cur.of(e)) |p| try live.held.append(a, store.current.idx.idAt(p));
+    for (candidates) |e| {
+        var cur = store.current.idx.entCur(e);
+        while (cur.next()) |p| try live.held.append(a, store.current.idx.idAt(p));
+    }
     try testing.expect(!live.nameJustWritten(ids));
     const newest = store.model.notes.items[store.model.notes.items.len - 1].id;
     const path = try std.fmt.allocPrint(a, "/v1/notes/{d}", .{newest});

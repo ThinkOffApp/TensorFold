@@ -189,7 +189,14 @@ fn walkModel(r: *Report, m: *const model_mod.Model) !usize {
     for (m.phrases.items) |p| phrases += p.keys.len * 4;
     try r.add("entities", "model: entity phrases (keys)", phrases, "measured");
     try r.add("other", "model: Model struct", @sizeOf(model_mod.Model), "measured");
-    return @sizeOf(model_mod.Model) + recs + spare + text + line + ids * 4 + source + names + attrs + pairs + phrases;
+    const x = &m.ix; // the write path's lookups (model_ix.zig): names, pairs, sources, current facts' normal forms
+    var looks = try mapBytes(@TypeOf(x.entity), x.entity.capacity()) + try mapBytes(@TypeOf(x.attribute), x.attribute.capacity());
+    looks += try mapBytes(@TypeOf(x.pair), x.pair.capacity()) + try mapBytes(@TypeOf(x.source), x.source.capacity());
+    var facts = try mapBytes(@TypeOf(x.facts), x.facts.capacity()) + x.lists.capacity * @sizeOf(std.ArrayList(u32)) + x.spare.capacity * 4;
+    for (x.lists.items) |l| facts += l.capacity * 4;
+    try r.add("entities", "model: lookups by name, pair and source (hash tables)", looks, "measured");
+    try r.add("notes", "model: current facts by normal form (hash table and place lists)", facts, "measured");
+    return @sizeOf(model_mod.Model) + recs + spare + text + line + ids * 4 + source + names + attrs + pairs + phrases + looks + facts;
 }
 
 /// The model's arena: the vocabulary tables and the fixed strings.
@@ -212,7 +219,7 @@ fn walkIndex(r: *Report, idx: *const index.Index, m: *const model_mod.Model) !vo
     const u = exactUse(idx.arena);
     const cols = n * (@sizeOf(u32) * 5 + @sizeOf(index.State) + @sizeOf(i64) + @sizeOf(i32));
     const lines: usize = n * @sizeOf([]const u8); // slices of the model's lines: the bytes are counted there
-    const id_place = idx.id_place.len * 4;
+    const id_place = idx.own_id_place.len * 4;
     try r.add("notes", "index: per-note columns (id, state, told, rank, entity, pair, value, cost)", cols, "measured");
     try r.add("notes", "index: rendered lines (slices of the model's)", lines, "measured");
     try r.add("notes", "index: note id -> place", id_place, "measured");
@@ -220,10 +227,10 @@ fn walkIndex(r: *Report, idx: *const index.Index, m: *const model_mod.Model) !vo
     const post = idx.post.len * 4;
     try r.add("grams", "index: n-gram table (u128 key, 16-byte postings head, 1 control byte; 80% load)", grams, "measured");
     try r.add("grams", "index: postings (u32 note place per n-gram per note)", post, "measured");
-    const ent_cur = groupBytes(idx.ent_cur);
-    const ent_keys = groupBytes(idx.ent_keys);
-    const pair_notes = groupBytes(idx.pair_notes);
-    const phrases = try mapBytes(@TypeOf(idx.phrases), idx.phrases.capacity());
+    const ent_cur = groupBytes(idx.own_ent_cur);
+    const ent_keys = groupBytes(idx.own_ent_keys);
+    const pair_notes = groupBytes(idx.own_pair_notes);
+    const phrases = try mapBytes(@TypeOf(idx.own_phrases), idx.own_phrases.capacity());
     try r.add("entities", "index: entity -> current notes", ent_cur, "measured");
     try r.add("entities", "index: entity -> pairs", ent_keys, "measured");
     try r.add("entities", "index: pair -> notes", pair_notes, "measured");
