@@ -23,6 +23,9 @@ Known limitations:
   otherwise resolve to the user (for example, “my sister” falling back to “my”).
 - No general relation parser, implicit-subject resolution or ambiguous-name
   disambiguation is implemented.
+- Missing-pair absence lines are suppressed when the subject has a current
+  entity-valued link: a linked fact might supply the answer, so a missing
+  direct pair alone does not prove that the answer is unknown.
 - Attributes use stored names only, not a test-question keyword map. Optional
   topic metadata needs an explicit store export before it can be supported.
 - Filtering an already capped retrieval cannot recover a relevant note that
