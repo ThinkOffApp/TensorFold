@@ -124,7 +124,7 @@ pub const Groups = struct {
 };
 
 /// One note as the snapshot gives it.
-const Raw = struct { id: u32, state: State, entity: u32, pair: u32, value_ent: i32, told: i64, line: []const u8, cost: u32, tokens: []const u32 };
+const Raw = struct { id: u32, state: State, entity: u32, pair: u32, value_ent: i32, told: i64, line: []const u8, cost: u32, tokens: []const u32, single_takeback: bool = false };
 
 pub const Index = struct {
     arena: exact.Exact, // every array at its exact size: no arena node grown 1.5 times past the postings
@@ -144,6 +144,7 @@ pub const Index = struct {
     // the notes, by place (0..notes-1); ids are Python's note ids
     note_id: []const u32,
     state: []const State,
+    single_takeback: []const bool,
     told: []const i64,
     trank: []const u32, // place in the order (-told, id): Python's tie-break after the score
     entity: []const u32,
@@ -292,7 +293,7 @@ pub const Index = struct {
         self.vwordy = m.vwordy;
         const raw = try gpa.alloc(Raw, m.notes.items.len); // the build's own: freed when it returns
         defer gpa.free(raw);
-        for (m.notes.items, raw) |n, *r| r.* = .{ .id = n.id, .state = n.state, .entity = n.entity, .pair = n.pair, .value_ent = n.value_ent, .told = n.told, .line = n.line(), .cost = n.cost, .tokens = n.tokens() };
+        for (m.notes.items, raw) |n, *r| r.* = .{ .id = n.id, .state = n.state, .entity = n.entity, .pair = n.pair, .value_ent = n.value_ent, .told = n.told, .line = n.line(), .cost = n.cost, .tokens = n.tokens(), .single_takeback = n.kind == .tombstone and !n.multi };
         try self.placeNotes(gpa, raw);
         try self.groupsOf(m);
         const meta = self.arena.allocator();
@@ -387,6 +388,7 @@ pub const Index = struct {
         const n = raw.len;
         const note_id = try a.alloc(u32, n);
         const state = try a.alloc(State, n);
+        const single_takeback = try a.alloc(bool, n);
         const told = try a.alloc(i64, n);
         const entity = try a.alloc(u32, n);
         const pair = try a.alloc(u32, n);
@@ -404,6 +406,7 @@ pub const Index = struct {
             id_place[x.id] = @intCast(k);
             note_id[k] = x.id;
             state[k] = x.state;
+            single_takeback[k] = x.single_takeback;
             if (x.state == .current) n_cur += 1 else n_hist += 1;
             told[k] = x.told;
             entity[k] = x.entity;
@@ -428,6 +431,7 @@ pub const Index = struct {
         for (by, 0..) |x, r| trank[x] = @intCast(r);
         self.note_id = note_id;
         self.state = state;
+        self.single_takeback = single_takeback;
         self.told = told;
         self.trank = trank;
         self.entity = entity;

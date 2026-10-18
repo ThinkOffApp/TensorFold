@@ -23,11 +23,17 @@ pub fn missingBlock(a: std.mem.Allocator, idx: anytype, subjects: []const u32, q
         for (idx.attribute_names, 0..) |attribute, attr| {
             if (!matches(attribute, question)) continue;
             var current = false;
+            var taken_back = false;
+            var known = false;
             for (idx.ent_cur.of(entity)) |place| {
                 if (idx.pair_attributes[idx.pairAt(place)] == attr) {
                     current = true;
-                    break;
+                    if (idx.single_takeback[place]) taken_back = true else known = true;
                 }
+            }
+            if (taken_back and !known) {
+                try out.print(a, "The current {s} of {s} is not known: the earlier value was taken back. Keep the take-back as evidence that the earlier value no longer holds; do not invent a replacement.\n", .{ attribute, idx.entity_names[entity] });
+                continue;
             }
             if (current) continue;
             try out.print(a, "No note about {s}'s {s}. If asked, say you don't know.\n", .{ idx.entity_names[entity], attribute });
@@ -55,6 +61,7 @@ test "missing pairs preserve known pairs and list every attribute tie once" {
         entity_names: []const []const u8 = &.{ "my dog", "my cat" },
         attribute_names: []const []const u8 = &.{ "eye_colour", "fav_colour", "name" },
         pair_attributes: []const u32 = &.{0},
+        single_takeback: []const bool = &.{false},
         ent_cur: Groups = .{},
         pub fn pairAt(_: @This(), _: u32) u32 {
             return 0;
@@ -72,4 +79,33 @@ test "missing pairs preserve known pairs and list every attribute tie once" {
     const none = try missingBlock(a, Fixture{}, &.{}, "What colour?");
     defer a.free(none);
     try std.testing.expectEqual(@as(usize, 0), none.len);
+    const withdrawn = try missingBlock(a, Fixture{ .single_takeback = &.{true} }, &.{0}, "What eye colour?");
+    defer a.free(withdrawn);
+    try std.testing.expect(std.mem.indexOf(u8, withdrawn, "The current eye_colour of my dog is not known: the earlier value was taken back.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, withdrawn, "No note about my dog's eye_colour") == null);
+}
+
+test "a current value wins over a takeback and set takebacks do not erase an attribute" {
+    const Groups = struct {
+        pub fn of(_: @This(), _: u32) []const u32 {
+            return &.{ 0, 1 };
+        }
+    };
+    const Fixture = struct {
+        entity_names: []const []const u8 = &.{"my dog"},
+        attribute_names: []const []const u8 = &.{"colour"},
+        pair_attributes: []const u32 = &.{ 0, 0 },
+        single_takeback: []const bool = &.{ true, false },
+        ent_cur: Groups = .{},
+        pub fn pairAt(_: @This(), place: u32) u32 {
+            return place;
+        }
+    };
+    const a = std.testing.allocator;
+    const known = try missingBlock(a, Fixture{}, &.{0}, "What colour?");
+    defer a.free(known);
+    try std.testing.expectEqual(@as(usize, 0), known.len);
+    const set = try missingBlock(a, Fixture{ .single_takeback = &.{ false, false } }, &.{0}, "What colour?");
+    defer a.free(set);
+    try std.testing.expectEqual(@as(usize, 0), set.len);
 }

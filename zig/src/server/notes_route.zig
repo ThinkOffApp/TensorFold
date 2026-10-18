@@ -216,7 +216,7 @@ pub fn withBlockAt(cx: *Cx, raw: Value, block: []const u8, needs_user_after_tool
 }
 
 /// How the block is looked up and placed: the hop (null: the snapshot's), and before the last user message or first.
-pub const Shape = struct { hop: ?@import("notes/index.zig").Hop = null, before_user: bool = false, resolve_subjects: bool = false };
+pub const Shape = struct { hop: ?@import("notes/index.zig").Hop = null, before_user: bool = false, resolve_subjects: bool = false, unknown: bool = false };
 
 /// For a chat request that asks: the lookup on its last user message, and `normalized` with the block put first.
 pub fn apply(store: *Store, text: model_text.Text, needs_user_after_tool: bool, cx: *Cx, body: Value, normalized: *Value) errors.Refused!?Used {
@@ -236,7 +236,7 @@ pub fn applyShaped(store: *Store, text: model_text.Text, needs_user_after_tool: 
     const t1 = clock.nowNs(io);
     const past = ask.past orelse past_mod.isPast(question);
     const cap = ask.cap orelse store.settings().cap;
-    const found = store.retrieveSubjects(cx.a, text, qids, past, cap, ask.exclude, shape.hop, shape.resolve_subjects) catch |e| return switch (e) {
+    const found = store.retrieveQuestion(cx.a, text, qids, past, cap, ask.exclude, shape.hop, shape.resolve_subjects, shape.unknown) catch |e| return switch (e) {
         error.OutOfMemory => error.OutOfMemory,
         error.Tokenizer => cx.other("the tokenizer cannot count the notes block"),
     };
