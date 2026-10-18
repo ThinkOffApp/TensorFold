@@ -425,6 +425,7 @@ fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
         .{ .name = "tf-nemotron-dense", .path = "zig/tests/nemotron_dense.zig", .about = "Dense projection schedules bit-checked against the engine's kernels, then timed" },
         .{ .name = "tf-nemotron-experts", .path = "zig/tests/nemotron_experts.zig", .about = "Routed-expert pass shapes bit-checked against the engine's kernels, then timed by window width" },
         .{ .name = "tf-nemotron-sample-check", .path = "zig/tests/nemotron_sample_check.zig", .about = "tf_sample_full against its host reference on synthetic rows, timed beside tf_gpu_sample" },
+        .{ .name = "tf-nemotron-cut-check", .path = "zig/tests/nemotron_cut_check.zig", .about = "One Metal prompt pass against the same prompt cut in two at each P: first and next greedy tokens" },
         .{ .name = "tf-train-check", .path = "zig/tests/train_check.zig", .about = "The learning step's gradients against the engine's own forward by finite differences, on the real model" },
         .{ .name = "tf-train-pack", .path = "zig/tests/train_pack.zig", .about = "Training passes holding several sequences against one a pass, on the real model: differences and time" },
         .{ .name = "tf-pocket-fit-check", .path = "zig/tests/pocket_fit_check.zig", .about = "A dumped pocket lesson's read rows fitted as the learner fits them, timed, each fit's numbers and weights written" },
