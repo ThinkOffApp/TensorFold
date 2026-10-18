@@ -61,6 +61,7 @@ test {
     _ = @import("slide_found.zig");
     _ = @import("slide_untold.zig");
     _ = @import("slide_replace.zig");
+    _ = @import("slide_teacher_test.zig");
     _ = @import("slide_whom.zig");
     _ = @import("slide_subject.zig");
     _ = @import("slide_side.zig");

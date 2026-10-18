@@ -127,6 +127,7 @@ pub fn teachText(srv: *Server, a: Allocator, text: []const u8, source: []const u
         srv.slide.asked(id, questions(a, plan));
         const result = rounds(srv, a, &cx, plan, gone, id);
         const back = result.recalled.len == 1 and result.recalled[0];
+        srv.teacher.ended(back); // a lesson given up leaves the next one's checks as if it never ran
         if (!back) putBack(srv, a, gave, id);
         if (back) slide_teacher.refresh(srv, &cx, &srv.teacher, plan.stale, gone) catch srv.teacher.forgetAnswers(srv.io);
         if (result.why) |why| srv.slide.note(id, why);

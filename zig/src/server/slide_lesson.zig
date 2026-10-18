@@ -115,11 +115,11 @@ pub fn lesson(srv: *Server, cx: *Cx, teacher: *Teacher, told: []const []const u8
     // what the change must never touch: questions about the user and prompts of every kind, as the model answers them
     var keep: std.ArrayList(api.Example) = .empty;
     var checks: std.ArrayList(Check) = .empty;
-    teacher.lessons += 1;
+    const nth = teacher.nth(); // counted by slide.learn once the lesson is kept
     for (prompts.personal_prompts, 0..) |q, i| {
         if (try answeredByAny(srv, cx, told, kept, parts.own.items, q, document, gone)) continue;
         const reply = try ask(srv, cx, null, q, check_tokens, gone);
-        if (heldBack(teacher.lessons, i)) {
+        if (heldBack(nth, i)) {
             try checks.append(a, .{ .question = q, .before = reply.content });
             continue;
         }
@@ -155,14 +155,14 @@ pub fn lesson(srv: *Server, cx: *Cx, teacher: *Teacher, told: []const []const u8
             try stale_bank.append(a, i);
             continue;
         }
-        if ((i + teacher.lessons) % bank_checks == 0) try checks.append(a, .{ .question = b.question, .before = b.before }) else try keep.append(a, b.ex);
+        if ((i + nth) % bank_checks == 0) try checks.append(a, .{ .question = b.question, .before = b.before }) else try keep.append(a, b.ex);
     }
     // a fact in another language: its own language's prompts held and checked as the English ones are
     if (if (language) |name| try local(srv, cx, teacher, name, end, gone) else null) |l| {
         for (l.personal, 0..) |q, i| {
             if (try answeredByAny(srv, cx, told, kept, parts.own.items, q, document, gone)) continue;
             const reply = try ask(srv, cx, null, q, check_tokens, gone);
-            if (heldBack(teacher.lessons, i)) {
+            if (heldBack(nth, i)) {
                 try checks.append(a, .{ .question = q, .before = reply.content });
             } else try keep.append(a, try example(srv, cx, a, null, q, reply.content, ending(reply, end)));
         }
@@ -547,7 +547,7 @@ fn answeredByAny(srv: *Server, cx: *Cx, told: []const []const u8, kept: []const 
 }
 
 /// Whether personal prompt i is one this lesson asks again after it: three of them, turning with each lesson.
-fn heldBack(lessons: usize, i: usize) bool {
+pub fn heldBack(lessons: usize, i: usize) bool {
     const first = lessons * personal_checks % prompts.personal_prompts.len;
     return (i + prompts.personal_prompts.len - first) % prompts.personal_prompts.len < personal_checks;
 }
