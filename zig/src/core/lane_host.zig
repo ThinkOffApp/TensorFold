@@ -535,10 +535,7 @@ pub const LaneHost = struct {
                 continue;
             }
             h.unlock();
-            injects.take(h) catch |e| {
-                ends.failAll(h, @errorName(e));
-                continue;
-            };
+            injects.take(h); // a failed injection ends its own reply alone
             h.core.step() catch |e| {
                 ends.failAll(h, @errorName(e));
                 continue;

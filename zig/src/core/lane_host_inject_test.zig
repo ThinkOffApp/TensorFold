@@ -157,3 +157,89 @@ test "a lone driver hands its stream to the lane core for injected context, and 
     try std.testing.expectEqual(@as(u32, 1), back.handed);
     try std.testing.expectEqual(@as(u32, 1), back.resumed);
 }
+
+/// One reply's tokens and end; with `inject`, its first delivery pushes `extra`, then the queue's allocator fails.
+const Reply = struct {
+    inject: ?*api.Inject = null,
+    failing: ?*std.testing.FailingAllocator = null,
+    fail: usize = 0, // allocations the queue makes after the push before one fails
+    pushed: bool = false,
+    mutex: std.Io.Mutex = .init,
+    tokens: std.ArrayList(u32) = .empty,
+    done: ?Reason = null,
+
+    fn event(ctx: *anyopaque, _: Id, e: *const Event) void {
+        const r: *Reply = @ptrCast(@alignCast(ctx));
+        r.mutex.lockUncancelable(std.testing.io);
+        defer r.mutex.unlock(std.testing.io);
+        switch (e.*) {
+            .tokens => |t| {
+                r.tokens.appendSlice(gpa, t) catch {};
+                if (r.inject) |i| if (!r.pushed) {
+                    i.push(&extra) catch {};
+                    r.failing.?.fail_index = r.failing.?.alloc_index + r.fail;
+                    r.pushed = true;
+                };
+            },
+            .finished => |f| r.done = f.reason,
+            else => {},
+        }
+    }
+
+    fn wait(r: *Reply) Reason {
+        while (true) {
+            r.mutex.lockUncancelable(std.testing.io);
+            const d = r.done;
+            r.mutex.unlock(std.testing.io);
+            if (d) |x| return x;
+            std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
+        }
+    }
+};
+
+test "an injection whose take runs out of memory fails its reply alone; a neighbour finishes as it would alone" {
+    var failed: usize = 0;
+    for (0..3) |fail| {
+        var costs: [16]lanes.config.Cost = undefined;
+        for (&costs, 1..) |*c, w| c.* = .{ .width = @intCast(w), .ms = 5.0 + 0.8 * @as(f64, @floatFromInt(w)) };
+        var cfg = try lanes.Config.init(gpa, .{ .exact_width = 16, .gpu_tokens = true, .mtp = true, .speculate = true, .speculate_early = false, .drafts = 4, .window_costs = &costs, .mtp_step_ms = 0.5, .hidden_rows = true, .batch_rows = 32, .max_streams = 8, .draft_streams = true }, 16, 15);
+        defer cfg.deinit(gpa);
+        var target: lanes.fake.Fake = .{ .gpa = gpa };
+        defer target.deinit();
+        var clock: lanes.fake.FixedClock = .{};
+        var core = lanes.Engine.init(gpa, &cfg, target.backend(), clock.clock());
+        defer core.deinit();
+        var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 2, .inject = true });
+        try host.start();
+        defer host.stop();
+        var failing = std.testing.FailingAllocator.init(gpa, .{});
+        var inject: api.Inject = .{ .io = std.testing.io, .gpa = failing.allocator(), .room = extra.len };
+        defer inject.deinit();
+        const other = [_]u32{ 3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5 };
+        var neighbour: Reply = .{};
+        defer neighbour.tokens.deinit(gpa);
+        var injecting: Reply = .{ .inject = &inject, .failing = &failing, .fail = fail };
+        defer injecting.tokens.deinit(gpa);
+        const plain: Request = .{ .prompt = &other, .max_tokens = 30 };
+        const taking: Request = .{ .prompt = &prompt, .max_tokens = 30, .inject = &inject };
+        try host.engine().submit(1, &plain, .{ .ctx = &neighbour, .event = Reply.event });
+        try host.engine().submit(2, &taking, .{ .ctx = &injecting, .event = Reply.event });
+        try std.testing.expectEqual(Reason.length, neighbour.wait()); // the neighbour's reply is the one it gives alone
+        var history: std.ArrayList(u32) = .empty;
+        defer history.deinit(gpa);
+        try history.appendSlice(gpa, &other);
+        for (neighbour.tokens.items) |t| {
+            try std.testing.expectEqual(lanes.fake.next(history.items, null, history.items.len), t);
+            try history.append(gpa, t);
+        }
+        try std.testing.expectEqual(@as(usize, 30), neighbour.tokens.items.len);
+        const reason = injecting.wait();
+        const where = try inject.where(gpa);
+        defer gpa.free(where);
+        if (reason == .failed) {
+            failed += 1;
+            try std.testing.expectEqual(@as(usize, 0), where.len); // no point for context that never went in
+        } else try std.testing.expectEqual(@as(usize, 1), where.len);
+    }
+    try std.testing.expect(failed > 0); // the sweep reached a failing take
+}

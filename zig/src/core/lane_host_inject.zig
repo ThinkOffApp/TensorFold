@@ -16,8 +16,8 @@ pub fn waits(job: *const Job) bool {
     return i.waiting();
 }
 
-/// Before a round: each decoding stream's waiting context goes in as a prompt pass, its own tokens so far sent first.
-pub fn take(h: *LaneHost) !void {
+/// Before a round: each stream's waiting context goes in as a prompt pass; a failure ends that reply alone.
+pub fn take(h: *LaneHost) void {
     var got: std.ArrayList(u32) = .empty;
     defer got.deinit(h.gpa);
     for (h.admitted.items) |job| {
@@ -26,20 +26,33 @@ pub fn take(h: *LaneHost) !void {
         const s = &job.stream;
         // a prompt still going in or a forced close under way keeps it waiting; a grammar's reply never takes it
         if (s.finished or s.pending == null or s.force.items.len > 0 or s.grammar != null) continue;
-        try h.core.settle(s);
+        h.core.settle(s) catch |e| {
+            h.send(job); // only the reply's own tokens stand in the context yet
+            fail(job, e);
+            continue;
+        };
         if (s.finished) continue; // the step in flight ended the reply: the round's delivery ends the job
         h.send(job);
         got.clearRetainingCapacity();
-        try i.take(h.gpa, &got, @intCast(job.delivered - i.count()));
+        i.take(h.gpa, &got, @intCast(job.delivered - i.count())) catch |e| {
+            fail(job, e);
+            continue;
+        };
         if (got.items.len == 0) continue;
         const before = job.delivered;
         h.core.extend(s, got.items) catch |e| {
-            s.finished = true; // this reply fails alone: the others' rounds go on
-            s.reason = .@"error";
-            s.problem = @errorName(e);
-            job.delivered = s.emitted().len; // context that went in is never sent as the reply's
+            fail(job, e);
             continue;
         };
         job.delivered = before + got.items.len; // the reply's next token is its first after the context
     }
+}
+
+/// The job's reply ends failed with what it has sent: context that went in is never sent as the reply's.
+fn fail(job: *Job, e: anyerror) void {
+    const s = &job.stream;
+    s.finished = true;
+    s.reason = .@"error";
+    s.problem = @errorName(e);
+    job.delivered = s.emitted().len;
 }

@@ -47,8 +47,11 @@ pub const Inject = struct {
         i.mutex.lockUncancelable(i.io);
         defer i.mutex.unlock(i.io);
         if (i.queued.items.len == 0) return;
-        try i.points.append(i.gpa, .{ .at = own, .tokens = @intCast(i.queued.items.len) });
-        try out.appendSlice(a, i.queued.items);
+        // both lists grow first: a failure leaves the tokens queued and no point recorded
+        try i.points.ensureUnusedCapacity(i.gpa, 1);
+        try out.ensureUnusedCapacity(a, i.queued.items.len);
+        i.points.appendAssumeCapacity(.{ .at = own, .tokens = @intCast(i.queued.items.len) });
+        out.appendSliceAssumeCapacity(i.queued.items);
         i.taken += @intCast(i.queued.items.len);
         i.queued.clearRetainingCapacity();
         i.ready.store(false, .release);
@@ -101,4 +104,29 @@ test "pushes wait until taken, stay within the room, and fail once the reply end
     try std.testing.expect(!i.waiting());
     try std.testing.expectEqual(@as(u32, 3), i.count());
     try std.testing.expectError(error.Ended, i.push(&.{6}));
+}
+
+test "a take that runs out of memory changes nothing, and its retry records one point" {
+    const gpa = std.testing.allocator;
+    for (0..4) |fail| {
+        var failing = std.testing.FailingAllocator.init(gpa, .{});
+        var i: Inject = .{ .io = std.testing.io, .gpa = failing.allocator(), .room = 8 };
+        defer i.deinit();
+        try i.push(&.{ 7, 8, 9 });
+        failing.fail_index = failing.alloc_index + fail; // the take's allocations fail from the fail-th on
+        var out: std.ArrayList(u32) = .empty;
+        defer out.deinit(failing.allocator());
+        const got = i.take(failing.allocator(), &out, 2);
+        if (got) |_| {} else |e| {
+            try std.testing.expectEqual(error.OutOfMemory, e);
+            try std.testing.expectEqual(@as(usize, 0), i.points.items.len); // no point for tokens that did not go in
+            try std.testing.expectEqual(@as(usize, 0), out.items.len);
+            try std.testing.expect(i.waiting());
+            failing.fail_index = std.math.maxInt(usize);
+            try i.take(failing.allocator(), &out, 2);
+        }
+        try std.testing.expectEqualSlices(u32, &.{ 7, 8, 9 }, out.items);
+        try std.testing.expectEqualSlices(Inject.Point, &.{.{ .at = 2, .tokens = 3 }}, i.points.items);
+        try std.testing.expectEqual(@as(u32, 3), i.count());
+    }
 }
