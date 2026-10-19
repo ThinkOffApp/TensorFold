@@ -150,6 +150,20 @@ pub fn set(a: Allocator, keep: []const *Fact, noted: []const *Fact, targeted: []
     return .{ .asks = asks.items, .kind = kind.items, .text = text.items, .ref = ref.items };
 }
 
+/// Every probe of `r` once more with thinking on, after the ones with it off: the server's chats think by default.
+pub fn withThinking(a: Allocator, r: Regress) !Regress {
+    const n = r.asks.len;
+    const out: Regress = .{ .asks = try a.alloc(Ask, 2 * n), .kind = try a.alloc(Kind, 2 * n), .text = try a.alloc([]const u8, 2 * n), .ref = try a.alloc([]const u8, 2 * n) };
+    for (0..2) |m| for (0..n) |i| {
+        out.asks[m * n + i] = r.asks[i];
+        out.asks[m * n + i].think = m == 1;
+        out.kind[m * n + i] = r.kind[i];
+        out.text[m * n + i] = r.text[i];
+        out.ref[m * n + i] = r.ref[i];
+    };
+    return out;
+}
+
 /// Whether a fact's or a pair's reply gives what its reference gives (a yes/no reference: the same yes or no).
 fn right(b: anytype, r: Regress, i: usize, reply: []const u8) bool {
     if (r.kind[i] == .pair) if (yesNo(r.ref[i])) |want| return yesNo(reply) == want;
@@ -191,11 +205,12 @@ pub fn worse(a: Allocator, b: anytype, r: Regress, after: []const []const u8, lo
             // "I don't know for sure, but your rabbit is named Floppy." gives a new value: worse
             .neighbour => if (unknown(was)) unknown(now) and !judge.newValue(q.q, was, now, try b.texts(a)) else std.mem.eql(u8, was, now) or try b.same(a, q.q, was, now),
         };
-        b.recordProbe(.{ .night = log.night, .kind = @tagName(r.kind[i]), .key = of, .q = q.q, .before = was, .after = now, .ok = ok });
+        b.recordProbe(.{ .night = log.night, .kind = @tagName(r.kind[i]), .key = of, .q = q.q, .before = was, .after = now, .ok = ok, .thinking = q.think });
         if (ok) continue;
         n += 1;
         if (list.items.len > 0) try list.appendSlice(a, " | ");
-        try list.print(a, "{s}: {s} -> {s} (was {s})", .{ @tagName(r.kind[i]), q.q, now[0..@min(now.len, 80)], was[0..@min(was.len, 80)] });
+        const mode = if (q.think) " (thinking)" else "";
+        try list.print(a, "{s}{s}: {s} -> {s} (was {s})", .{ @tagName(r.kind[i]), mode, q.q, now[0..@min(now.len, 80)], was[0..@min(was.len, 80)] });
     }
     // the list of a rejected plan stays in the log beside any later one; a one-by-one check's starts with its fact
     const named = if (of.len > 0) try std.mem.concat(a, u8, &.{ of, ": ", list.items }) else list.items;

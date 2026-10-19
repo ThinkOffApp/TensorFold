@@ -232,7 +232,7 @@ test "promotion: the regression set asks every current note's own question; a ni
         _ = try f.add("w1", "cat=green");
         f.retrieved.items.len = 0; // the cat's note is never in a block: never due, a bystander
         _ = try f.add("w2", "boat=blue");
-        var s = promote.State.init(testing.allocator, .{ .regress_notes = sample });
+        var s = promote.State.init(testing.allocator, .{ .regress_notes = sample, .thinking = false });
         defer s.deinit();
         const n = try run(&s, &f, &arena);
         if (sample == null) {
@@ -252,7 +252,7 @@ test "promotion: the regression set asks every current note's own question; a ni
     _ = try g.add("w1", "cat=green");
     _ = try g.add("w2", "boat=blue");
     _ = try g.add("w3", "tent=red");
-    var s3 = promote.State.init(testing.allocator, .{ .regress_notes = 1 });
+    var s3 = promote.State.init(testing.allocator, .{ .regress_notes = 1, .thinking = false });
     defer s3.deinit();
     const n3 = try run(&s3, &g, &arena);
     try testing.expectEqual(@as(u32, 1 + 3 + probes.untold.len + promote.controls.len), n3.probes); // 1 note, 3 neighbours
@@ -399,7 +399,7 @@ test "promotion: with the targeted probes off a night asks only the facts' and n
     var f: Fake = .{ .a = arena.allocator(), .leaks = "cat eyes=green" };
     _ = try f.add("w1", "cat eyes=green");
     _ = try f.add("w2", "my eyes=green");
-    var s = promote.State.init(testing.allocator, .{ .targeted = false });
+    var s = promote.State.init(testing.allocator, .{ .targeted = false, .thinking = false });
     defer s.deinit();
     const n = try run(&s, &f, &arena);
     try testing.expectEqual(@as(u32, 2 + promote.controls.len), n.probes); // the two notes' questions, the controls

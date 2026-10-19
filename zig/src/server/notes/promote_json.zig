@@ -258,5 +258,6 @@ pub fn probeLine(a: Allocator, r: promote.Record) ![]u8 {
     if (r.ref.len > 0) try o.put(a, "ref", .{ .string = r.ref });
     try o.put(a, "ok", .{ .bool = r.ok });
     if (r.why.len > 0) try o.put(a, "why", .{ .string = r.why });
+    if (r.thinking) try o.put(a, "thinking", .{ .bool = true });
     return json.stringify(a, .{ .object = o }, .{});
 }

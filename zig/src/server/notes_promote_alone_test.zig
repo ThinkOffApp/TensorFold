@@ -23,7 +23,7 @@ test "promotion alone: every alone ask is recorded with its night, fact, questio
     const a = arena.allocator();
     var f: Fake = .{ .a = a };
     const dog = try f.add("w1", "dog=Luna");
-    var s = promote.State.init(testing.allocator, .{});
+    var s = promote.State.init(testing.allocator, .{ .thinking = false }); // one ask per probe
     defer s.deinit();
     for (1..3) |night| {
         const n = try promote.night(&s, a, &f);
@@ -123,7 +123,7 @@ test "promotion alone: two candidates that answer only through each other's note
     var f: Fake = .{ .a = a, .weaks = &.{ "cat eyes", "my eyes" } };
     _ = try greenPair(&f);
     _ = try f.add("w3", "dog=Luna"); // a third candidate the neurons carry
-    var s = promote.State.init(testing.allocator, .{});
+    var s = promote.State.init(testing.allocator, .{ .thinking = false }); // one ask per probe
     defer s.deinit();
     for (0..3) |_| {
         const n = try promote.night(&s, a, &f);
@@ -150,7 +150,7 @@ test "promotion alone: the rest are asked again with the failures' notes back, w
     const mine = try f.add("w1", "fav colour=blue");
     _ = try f.add("w2", "sister colour=orange");
     _ = try f.addBridge("w9", "fav colour", "sister colour");
-    var s = promote.State.init(testing.allocator, .{});
+    var s = promote.State.init(testing.allocator, .{ .thinking = false }); // one ask per probe
     defer s.deinit();
     for (1..3) |night| {
         const n = try promote.night(&s, a, &f);

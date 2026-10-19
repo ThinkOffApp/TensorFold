@@ -48,6 +48,7 @@ pub const Record = struct {
     round: u32 = 0, // the alone check's round (1: every candidate's note out; later: the failures' notes back in)
     ref: []const u8 = "", // the reference the reply was judged against
     why: []const u8 = "", // why a probe was dropped or its reference written again
+    thinking: bool = false, // asked with thinking on
 };
 
 /// One night as the report shows it.
@@ -88,11 +89,11 @@ pub const Note = struct { id: u32, key: []const u8, text: []const u8, told: i64,
 /// What teaching one fact did.
 pub const Taught = struct { kept: bool, neurons: []const Neuron = &.{}, questions: []const []const u8 = &.{}, why: []const u8 = "" };
 
-/// A question to ask as production does, with these note ids left out of its block (null: no notes at all).
-pub const Ask = struct { q: []const u8, exclude: ?[]const u32 = &.{} };
+/// A question asked as production asks it, these note ids out of its block (null: no notes); think: thinking on.
+pub const Ask = struct { q: []const u8, exclude: ?[]const u32 = &.{}, think: bool = false };
 
-/// regress_notes: current notes whose own question joins the regression set (null: all); retries: tries after a miss.
-pub const Settings = struct { hold: u32 = 1, alone: u32 = 2, tolerance: u32 = 0, probes_per_fact: usize = 4, regress_notes: ?u32 = null, retries: u32 = 1, targeted: bool = true };
+/// regress_notes: notes whose question joins the set (null: all); retries: tries after a miss; thinking: both modes.
+pub const Settings = struct { hold: u32 = 1, alone: u32 = 2, tolerance: u32 = 0, probes_per_fact: usize = 4, regress_notes: ?u32 = null, retries: u32 = 1, targeted: bool = true, thinking: bool = true };
 
 /// Prompts that no lesson should change, asked before and after each night.
 pub const controls = [_][]const u8{ "What is the capital of France?", "How many legs does a spider have?", "Tell me something interesting about the ocean.", "What is my teacher's name?" };
@@ -368,6 +369,7 @@ fn runPlans(s: *State, a: Allocator, b: anytype, k: u32, notes: []const Note, st
     try probes.askOf(s, a, b, targeted);
     try probes.build(s, a, b, targeted, notes);
     var set = try probes.set(a, keep, noted, targeted, excl, s.settings.targeted);
+    if (s.settings.thinking) set = try probes.withThinking(a, set);
     try probes.before(b, &set, a, try b.askAll(a, set.asks));
     log.asks += @intCast(set.asks.len);
     const r = set;
@@ -521,11 +523,13 @@ fn alone(s: *State, a: Allocator, b: anytype, notes: []const Note, log: *NightLo
     const Cand = struct { f: *Fact, id: u32, ok: bool, right: []bool };
     // bridged by "My cat's eyes are the same colour as mine."; they left together, failed, came back: a 3-night loop.
     var cands: std.ArrayList(Cand) = .empty;
+    // each probe in each mode the server answers in: a fact right only with thinking off stays in the prompt
+    const modes: []const bool = if (s.settings.thinking) &.{ false, true } else &.{false};
     for (s.facts.items) |*f| {
         if (!active(f.status)) continue;
         const own = noteOf(notes, f.key) orelse continue;
         // a fact with no probe left cannot be asked alone: its note stays in the prompt
-        try cands.append(a, .{ .f = f, .id = own.id, .ok = f.probes.len > 0, .right = try a.alloc(bool, f.probes.len) });
+        try cands.append(a, .{ .f = f, .id = own.id, .ok = f.probes.len > 0, .right = try a.alloc(bool, f.probes.len * modes.len) });
     }
     var round: u32 = 0;
     // a fixpoint: every round but the last drops a candidate at least, so at most one round per candidate
@@ -536,8 +540,8 @@ fn alone(s: *State, a: Allocator, b: anytype, notes: []const Note, log: *NightLo
         for (cands.items) |c| if (c.ok) try excl.append(a, c.id);
         var asks: std.ArrayList(Ask) = .empty;
         var at: std.ArrayList([2]usize) = .empty; // each ask's candidate and probe
-        for (cands.items, 0..) |c, ci| if (c.ok) for (c.f.probes, 0..) |p, pi| {
-            try asks.append(a, .{ .q = p.q, .exclude = excl.items });
+        for (cands.items, 0..) |c, ci| if (c.ok) for (c.f.probes, 0..) |p, pi| for (modes) |think| {
+            try asks.append(a, .{ .q = p.q, .exclude = excl.items, .think = think });
             try at.append(a, .{ ci, pi });
         };
         if (asks.items.len == 0) break;
@@ -549,8 +553,8 @@ fn alone(s: *State, a: Allocator, b: anytype, notes: []const Note, log: *NightLo
             const c = cands.items[x[0]];
             const p = c.f.probes[x[1]];
             const ok = b.agrees(c.f.text, q.q, p.ref, reply);
-            b.recordProbe(.{ .night = log.night, .kind = "alone", .key = c.f.key, .q = q.q, .exclude = q.exclude, .round = round, .reply = reply, .ref = p.ref, .ok = ok });
-            c.right[x[1]] = ok;
+            b.recordProbe(.{ .night = log.night, .kind = "alone", .key = c.f.key, .q = q.q, .exclude = q.exclude, .round = round, .reply = reply, .ref = p.ref, .ok = ok, .thinking = q.think });
+            c.right[x[1] * modes.len + @intFromBool(q.think)] = ok;
         }
         // the round's failures stay in the prompt, so the rest are asked again with their notes back in the block,
         var dropped = false;

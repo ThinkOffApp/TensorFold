@@ -6,6 +6,7 @@ const json = @import("json.zig");
 const promote = @import("notes/promote.zig");
 const pjson = @import("notes/promote_json.zig");
 const notes_promote = @import("notes_promote.zig");
+const slide_ask = @import("slide_ask.zig");
 const testing = std.testing;
 
 const cat_fact = "My cat's eyes are green."; // s2 in the L6 snapshot
@@ -18,6 +19,9 @@ const mine_q = "Do you know which colour my eyes are?"; // run6's s10 probe: its
 const Reader = struct {
     cat: bool = false, // its neurons carry the cat's green eyes
     mine: bool = false, // and mine
+    cat_unthought: bool = false, // with thinking on, its reasoning talks it out of the cat's eyes its neurons carry
+    thought: u32 = 0, // thinking asks it answered
+    thought_blocked: u32 = 0, // of them, with a notes block before the question
 
     fn engine(e: *Reader) api.Engine {
         return .{ .ctx = e, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
@@ -25,7 +29,7 @@ const Reader = struct {
     fn info(_: *anyopaque) api.Info {
         return .{};
     }
-    fn reply(e: *const Reader, prompt: []const u8) []const u8 {
+    fn reply(e: *const Reader, prompt: []const u8, thinking: bool) []const u8 {
         const has = struct {
             fn f(text: []const u8, part: []const u8) bool {
                 return std.mem.indexOf(u8, text, part) != null;
@@ -35,7 +39,7 @@ const Reader = struct {
         const block = prompt[0..at];
         const q = prompt[at..];
         if (has(q, "cat's eyes")) {
-            const told = has(block, cat_fact) or (has(block, bridge) and has(block, mine_fact)) or e.cat;
+            const told = has(block, cat_fact) or (has(block, bridge) and has(block, mine_fact)) or (e.cat and !(thinking and e.cat_unthought));
             return if (told) "Your cat's eyes are green." else "Your cat's eyes are brown.";
         }
         if (has(q, "my eyes")) {
@@ -49,8 +53,14 @@ const Reader = struct {
         var text: [16384]u8 = undefined;
         const n = @min(request.prompt.len, text.len);
         for (request.prompt[0..n], text[0..n]) |id_, *c| c.* = @intCast(id_ & 0xff);
-        const out = e.reply(text[0..n]);
-        var ids: [64]u32 = undefined;
+        // a thinking ask (its 320-token limit tells; no budget reaches this engine): its reasoning, then the reply
+        const thinking = request.max_tokens == slide_ask.think_reply;
+        const said = e.reply(text[0..n], thinking);
+        e.thought += @intFromBool(thinking);
+        e.thought_blocked += @intFromBool(thinking and std.mem.indexOf(u8, text[0..n], "[system]") != null);
+        var both: [96]u8 = undefined;
+        const out = if (thinking) std.fmt.bufPrint(&both, "I read the notes.</think>{s}", .{said}) catch unreachable else said;
+        var ids: [96]u32 = undefined;
         for (out, ids[0..out.len]) |c, *x| x.* = c;
         sink.event(sink.ctx, id, &.{ .prefilled = 0 });
         sink.event(sink.ctx, id, &.{ .tokens = ids[0..out.len] });
@@ -73,8 +83,13 @@ fn chat(a: std.mem.Allocator, r: *rig.Rig, q: []const u8, exclude: []const u8) !
     return choice.get("message").?.strField("content").?;
 }
 
-/// One night over the snapshot's cat and my-eyes facts, each promoted and right alone once already.
+/// One night over the snapshot's cat and my-eyes facts, each promoted and right alone once already; thinking off.
 fn night(a: std.mem.Allocator, r: *rig.Rig) !*notes_promote.Promoter {
+    return nightWith(a, r, false);
+}
+
+/// night() with each alone ask asked with thinking on too, or not.
+fn nightWith(a: std.mem.Allocator, r: *rig.Rig, thinking: bool) !*notes_promote.Promoter {
     var st = promote.State.init(testing.allocator, .{});
     defer st.deinit();
     const cat_probe = [_]promote.Probe{.{ .q = cat_q, .ref = "Your cat's eyes are green." }};
@@ -83,7 +98,7 @@ fn night(a: std.mem.Allocator, r: *rig.Rig) !*notes_promote.Promoter {
     try st.facts.append(st.alloc(), .{ .key = "s10", .text = mine_fact, .status = .promoted, .alone = 1, .probes = &mine_probe });
     try pjson.writeFile(a, try std.fmt.allocPrint(a, "{s}.promote", .{r.snap}), try pjson.encode(&st, a));
     var why: []const u8 = "";
-    const p = try notes_promote.Promoter.init(testing.allocator, testing.io, r.srv, r.store(), r.snap, .{ .every_ms = 600_000 }, &why);
+    const p = try notes_promote.Promoter.init(testing.allocator, testing.io, r.srv, r.store(), r.snap, .{ .every_ms = 600_000, .settings = .{ .thinking = thinking } }, &why);
     p.runNight();
     return p;
 }
@@ -222,4 +237,37 @@ test "promotion alone rig: a state file's probe whose reference does not give it
     const again = try notes_promote.Promoter.init(testing.allocator, testing.io, r.srv, r.store(), r.snap, .{ .every_ms = 600_000 }, &why);
     again.deinit();
     try testing.expectEqual(@as(usize, 2), (try linesOf(a, r, "dropped")).len);
+}
+
+test "promotion alone rig: with thinking on, a fact its neurons answer only with thinking off stays in the prompt" {
+    for ([_]bool{ true, false }) |thinking| {
+        var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const r = try rig.Rig.init(testing.allocator);
+        defer r.deinit();
+        var e: Reader = .{ .cat = true, .mine = true, .cat_unthought = true };
+        r.srv.engine = e.engine();
+        const p = try nightWith(a, r, thinking);
+        defer p.deinit();
+        try testing.expectEqual(promote.Status.in_weights, statusOf(p, "s10"));
+        if (!thinking) { // control: asked with thinking off only, the cat's eyes pass and leave the prompt too
+            try testing.expectEqual(promote.Status.in_weights, statusOf(p, "s2"));
+            for (try aloneLines(a, r)) |l| try testing.expect(l.get("thinking") == null);
+            continue;
+        }
+        try testing.expectEqual(promote.Status.promoted, statusOf(p, "s2"));
+        try testing.expectEqual(@as(u32, 0), p.state.find("s2").?.alone); // its streak starts again
+        // the thinking asks went through the store's block and the server's reasoning split: the reply after it
+        var seen: u32 = 0;
+        for (try aloneLines(a, r)) |l| if (l.get("thinking") != null) {
+            seen += 1;
+            const cat = std.mem.eql(u8, l.strField("key").?, "s2");
+            try testing.expectEqualStrings(if (cat) "Your cat's eyes are brown." else "Yes, your eyes are green.", l.strField("reply").?);
+            try testing.expectEqual(!cat, l.get("ok").?.bool);
+        };
+        try testing.expect(seen >= 2);
+        try testing.expectEqual(seen, e.thought);
+        try testing.expectEqual(e.thought, e.thought_blocked); // each with the store's block, as production asks
+    }
 }

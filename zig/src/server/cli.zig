@@ -121,6 +121,7 @@ pub const flags = [_]Flag{
     .{ .name = "--notes-promote-alone", .native = true },
     .{ .name = "--notes-promote-regress", .native = true },
     .{ .name = "--notes-promote-targeted", .choices = &.{ "on", "off" }, .native = true },
+    .{ .name = "--notes-promote-thinking", .choices = &.{ "on", "off" }, .native = true },
 };
 
 /// The variables this binary honours as the Python engine does, then the CUDA build's.
@@ -183,6 +184,7 @@ pub const Args = struct {
     notes_promote_every_ms: ?i64 = null, // nightly promotion of the notes into the pocket, a night this often (null: off)
     notes_promote_hold: u32 = 1, // nights a used note stays unchanged before it is taught
     notes_promote_targeted: bool = true, // neighbour, two-note and untold probes in each night's regression set
+    notes_promote_thinking: bool = true, // each night's checks asked with thinking on too
     notes_promote_regress: ?u32 = null, // current notes whose own question joins each night's regression set (null: all)
     notes_promote_alone: u32 = 2, // nights running a taught fact answers alone before its note leaves the prompt
     cortheon: bool = false, // Cortheon's program, research before building, and cortheon_search/cortheon_fetch run by the server
@@ -300,6 +302,8 @@ fn promoteFlag(a: Allocator, out: *Args, name: []const u8, v: []const u8, u: *Us
         out.notes_promote_every_ms = @import("notes_promote.zig").parseDuration(v) orelse return fail(u, a, "argument --notes-promote-every: a duration of a second or more, as 600, 600s, 10m or 24h: '{s}'", .{v});
     } else if (std.mem.eql(u8, name, "--notes-promote-targeted")) {
         out.notes_promote_targeted = std.mem.eql(u8, v, "on");
+    } else if (std.mem.eql(u8, name, "--notes-promote-thinking")) {
+        out.notes_promote_thinking = std.mem.eql(u8, v, "on");
     } else if (std.mem.eql(u8, name, "--notes-promote-regress")) {
         out.notes_promote_regress = if (std.mem.eql(u8, v, "all")) null else std.math.cast(u32, try int(u, a, name, v)) orelse return fail(u, a, "argument --notes-promote-regress: all, or a count of notes from 0: '{s}'", .{v});
     } else if (std.mem.eql(u8, name, "--notes-promote-hold") or std.mem.eql(u8, name, "--notes-promote-alone")) {

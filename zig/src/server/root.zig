@@ -116,4 +116,5 @@ test {
     _ = @import("notes_promote_alone_test.zig");
     _ = @import("notes_promote_alone_rig_test.zig");
     _ = @import("notes_promote_spill_test.zig");
+    _ = @import("notes_promote_thinking_test.zig");
 }

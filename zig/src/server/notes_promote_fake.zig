@@ -31,6 +31,9 @@ pub const Fake = struct {
     leaks: []const u8 = "", // a text whose neurons, while live, answer every neighbour question with its value
     flips: []const u8 = "", // a text whose neurons, while live, answer two-note questions "No"
     invents: []const u8 = "", // a text whose neurons, while live, make up an answer to the untold questions
+    thinking_breaks: []const u8 = "", // a text whose neurons, while live, change a control's answer with thinking on only
+    thinking_weak: []const u8 = "", // a topic the neurons answer alone with thinking off only
+    thinking_asks: u32 = 0, // questions asked with thinking on
     hedged_invent: bool = false, // the made-up answer wrapped in a don't-know
     crash_at_teach: ?u32 = null, // the teach call to stop at (a crash): error.Crash
     refits: []const u8 = "", // a text whose lesson fits every earlier live fact's neurons again, as the pocket's refits do
@@ -168,6 +171,7 @@ pub const Fake = struct {
         for (@import("notes/promote_probes.zig").untold) |u| if (std.mem.eql(u8, u, q.q)) return if (f.live(f.invents) == null) "I don't know your rabbit's name." else if (f.hedged_invent) "I don't know for sure, but your rabbit is named Floppy." else "Floppy.";
         if (!std.mem.startsWith(u8, q.q, "Q:")) {
             for (f.pocket.items) |l| if (l.live and l.breaks) return "Lyon";
+            if (q.think and f.live(f.thinking_breaks) != null) return "Lyon";
             return "Paris";
         }
         const t = q.q[2..];
@@ -178,6 +182,7 @@ pub const Fake = struct {
         };
         if (q.exclude) |ex| if (f.bridged(ex, t)) |v| return v;
         if (std.mem.eql(u8, t, f.weak)) return "unknown";
+        if (q.think and std.mem.eql(u8, t, f.thinking_weak)) return "unknown";
         for (f.weaks) |w| if (std.mem.eql(u8, t, w)) return "unknown";
         var i = f.pocket.items.len;
         while (i > 0) : (i -= 1) {
@@ -209,7 +214,10 @@ pub const Fake = struct {
     }
     pub fn askAll(f: *Fake, a: Allocator, qs: []const promote.Ask) ![]const []const u8 {
         const out = try a.alloc([]const u8, qs.len);
-        for (qs, out) |q, *r| r.* = f.answer(q);
+        for (qs, out) |q, *r| {
+            f.thinking_asks += @intFromBool(q.think);
+            r.* = f.answer(q);
+        }
         return out;
     }
     pub fn agrees(_: *Fake, _: []const u8, _: []const u8, ref: []const u8, reply: []const u8) bool {

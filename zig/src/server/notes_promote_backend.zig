@@ -168,7 +168,8 @@ pub const Backend = struct {
                     const found = try st.retrieve(j.a, s.text, qids, past_mod.isPast(q.q), st.settings().cap, ex);
                     if (found.block.len > 0) block = found.block;
                 }
-                j.out[i] = (try slide_ask.ask(s, &cx, block, q.q, answer_tokens, j.b.stopper())).content;
+                const reply = if (q.think) try slide_ask.askThinkingAfter(s, &cx, block, q.q, j.b.stopper()) else try slide_ask.ask(s, &cx, block, q.q, answer_tokens, j.b.stopper());
+                j.out[i] = reply.content;
             }
         };
         try side.each(asks.len, &Job{ .b = b, .a = a, .asks = asks, .out = out });
