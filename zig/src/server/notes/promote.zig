@@ -210,6 +210,18 @@ fn probesOf(s: *State, a: Allocator, b: anytype, f: *Fact, t: Taught) !void {
 
 const Plan = enum { add, rebuild, @"rebuild-old", source };
 
+/// The pocket and each fact's neurons as the night found them: a refused plan puts the state back to these.
+const Marked = struct { pocket: []const Neuron, neurons: []const []const Neuron };
+
+/// A refused plan undone: the learner rewinds to its mark (refits and 4-bit roundings too), then the state follows.
+fn rewind(s: *State, a: Allocator, b: anytype, k: u32, m: Marked) !void {
+    try b.rewind(a);
+    s.pocket = m.pocket;
+    for (s.facts.items[0..m.neurons.len], m.neurons) |*f, ns| f.neurons = ns;
+    s.open = .{ .night = k, .placed = s.pocket };
+    try b.persist(s);
+}
+
 /// night(); a failure marks a rebuild, allocating nothing (the pocket and the open lesson record every neuron placed).
 pub fn nightOrRebuild(s: *State, a: Allocator, b: anytype) !NightLog {
     return night(s, a, b) catch |e| {
@@ -292,7 +304,12 @@ fn runPlans(s: *State, a: Allocator, b: anytype, k: u32, notes: []const Note, st
     }
     s.open = .{ .night = k, .placed = s.pocket };
     try b.persist(s);
+    const neurons = try a.alloc([]const Neuron, s.facts.items.len);
+    for (s.facts.items, neurons) |f, *n| n.* = f.neurons;
+    const marked: Marked = .{ .pocket = s.pocket, .neurons = neurons };
     for (plans.items) |plan| {
+        // every plan starts from the pocket as the night found it, which the learner keeps until a rewind
+        try b.mark(a);
         log.tries += 1;
         log.plan = @tagName(plan);
         const list: []const *Fact = switch (plan) {
@@ -302,7 +319,6 @@ fn runPlans(s: *State, a: Allocator, b: anytype, k: u32, notes: []const Note, st
             .source => &.{},
         };
         if (plan != .add) try zeroAll(s, a, b);
-        const before_add = s.pocket;
         const sorted = try a.dupe(*Fact, list);
         std.mem.sort(*Fact, sorted, {}, byTold);
         const taught = try teachAll(s, a, b, k, sorted, log);
@@ -318,10 +334,8 @@ fn runPlans(s: *State, a: Allocator, b: anytype, k: u32, notes: []const Note, st
             return;
         }
         log.rejected += 1;
+        try rewind(s, a, b, k, marked);
         if (plan == .add) {
-            const tonight = s.pocket[before_add.len..];
-            if (tonight.len > 0) try b.retire(a, tonight);
-            s.pocket = before_add;
             const again = try b.askAll(a, set.asks);
             log.asks += @intCast(set.asks.len);
             log.worse = try probes.worse(a, b, r, again, log);

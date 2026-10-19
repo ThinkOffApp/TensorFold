@@ -9,14 +9,16 @@ Grades: **MEASURED** we ran it; **READ** we read it in code or a document; **INF
 
 ## Open questions (for petrus and codexmb)
 
-1. **Rollback is not exact.** The learner has no "put the pocket back as it was" (READ: `LearnRequest` has `undo` and
-   `drop` for the last lesson only, `retire` to zero given neurons). A rejected night zeroes the neurons it placed and
-   asks the regression set again; a later lesson can also have refitted an earlier fact's input weights away from its
-   own rows ("refits", READ `pocket.zig`), and zeroing does not undo that. If the second ask is still worse, every
-   promotion neuron is zeroed (the untaught model, for promotion's part). Is that good enough, or do we want a pocket
-   checkpoint op in the learner (an engine change, not done here)?
+1. **Rollback is exact (answered on branch `promotion-exact-rewind`).** Each plan of a night starts with the learner's
+   `mark` (a host copy of the pocket: every neuron's f32 weights, the counts, the neurons' records, the last retire,
+   and the learner's replay of earlier lessons); a rejected plan is undone with `rewind` and saved. Refits of earlier
+   facts' neurons ("refits", READ `pocket.zig`) and the 4-bit roundings of the night's saves go with it (MEASURED in
+   a host test on synthetic shards, `pocket_mark_test.zig`: the same f32 and the same shard bytes as before the night;
+   zeroing alone left both). If the second ask is still worse, every promotion neuron is zeroed (the untaught model,
+   for promotion's part).
 2. **Zeroed neurons keep their places** (READ `pocket.retire`: "their places stay taken"). Every rebuild uses new slots;
-   64 per MoE layer, about ten per fact. A long-lived server needs pocket compaction; not built.
+   64 per MoE layer, about ten per fact (a rejected plan's places come back with its rewind). A long-lived server needs
+   pocket compaction; not built.
 3. **No answer key.** "Right" means the learner's own test: `wording.recalls(fact, question, reference, reply)`, with
    the reference the untaught model's answer with the fact in front of it (`told_note`), as the learner's held-out
    answers are written. Control prompts count as worse when the reply changes and the model's own judge
@@ -68,7 +70,10 @@ fact's probes, at most 4, each with its reference answer.
 **Regress.** Before the night the probes of the facts that still hold plus 4 fixed control prompts are asked as
 production asks them (notes in, in-weights notes out); after the teach they are asked again. A probe right before and
 wrong after, or a control that changed in substance, counts as worse; more than the tolerance (0) rejects the plan.
-A rejected `add` zeroes tonight's neurons and asks again; still worse goes to `source`.
+A rejected plan is rewound to the night's mark and saved; a rejected `add` then asks again, and still worse goes to
+`source`. Each rebuild plan starts from the mark too, so a rejected one's refits and places never reach the next. The
+slide graph's facts go back with it (those taught by the plan are `missed`, "taken back"), and so do the teacher's kept
+lessons and its keep and bank answers.
 
 **Regression set (since `4274b6b9`).** Besides the promoted facts' learner questions and the 4 controls, every
 current fact note's own question joins it (`--notes-promote-regress N`: a sample of N by key hash; default all). The
@@ -147,6 +152,7 @@ bypassed the test switch, and a try with nothing to zero never refreshed). A sta
 and the pocket back as the file has them, without allocating (an allocation-failure test found the first version of
 this relied on a reload that itself allocates). Zeroing one fact's neurons removes their output exactly (READ `pocket.retire`:
 input and output weights set to zero); what it cannot undo is a later lesson's refit of an earlier neuron (question 1).
+An erase while a night runs waits for the night's end, after any rewind, so a rewind never brings its neurons back.
 Take-backs and changes do not zero anything at once: the note answers, and the next night rebuilds the pocket.
 
 **A failed night.** Any error inside a night (an allocation, the learner, a stop) marks the state to rebuild and

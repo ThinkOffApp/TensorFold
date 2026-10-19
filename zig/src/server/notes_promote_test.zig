@@ -11,9 +11,9 @@ const Neuron = promote.Neuron;
 const FNote = struct { id: u32, key: []const u8, text: []const u8, told: i64, fact: bool = true, current: bool = true };
 
 /// A taught fact in the fake pocket: its topic, value and neurons (live until retired).
-const Live = struct { topic: []const u8, value: []const u8, neurons: []const Neuron, live: bool = true, breaks: bool = false, clobbers: bool = false, text: []const u8 = "" };
+pub const Live = struct { topic: []const u8, value: []const u8, neurons: []const Neuron, live: bool = true, breaks: bool = false, clobbers: bool = false, text: []const u8 = "", fits: u32 = 0 };
 
-const Fake = struct {
+pub const Fake = struct {
     a: Allocator,
     store: std.ArrayList(FNote) = .empty,
     pocket: std.ArrayList(Live) = .empty,
@@ -31,6 +31,9 @@ const Fake = struct {
     invents: []const u8 = "", // a text whose neurons, while live, make up an answer to the untold questions
     hedged_invent: bool = false, // the made-up answer wrapped in a don't-know
     crash_at_teach: ?u32 = null, // the teach call to stop at (a crash): error.Crash
+    refits: []const u8 = "", // a text whose lesson fits every earlier live fact's neurons again, as the pocket's refits do
+    marked: ?[]Live = null, // the pocket as the last mark kept it, and its next neuron
+    marked_next: u16 = 0,
     teaches: u32 = 0,
     retires: u32 = 0,
     retired: std.ArrayList(Neuron) = .empty,
@@ -47,7 +50,7 @@ const Fake = struct {
         return text[at + 1 ..];
     }
 
-    fn add(f: *Fake, key: []const u8, text: []const u8) !u32 {
+    pub fn add(f: *Fake, key: []const u8, text: []const u8) !u32 {
         const id: u32 = @intCast(f.store.items.len + 1);
         try f.store.append(f.a, .{ .id = id, .key = key, .text = text, .told = @as(i64, id) * 100 });
         try f.retrieved.append(f.a, key);
@@ -55,7 +58,7 @@ const Fake = struct {
     }
 
     /// A change: the old note is no longer current, a new one (a new key) is.
-    fn change(f: *Fake, old: []const u8, key: []const u8, text: []const u8) !void {
+    pub fn change(f: *Fake, old: []const u8, key: []const u8, text: []const u8) !void {
         for (f.store.items) |*n| if (std.mem.eql(u8, n.key, old)) {
             n.current = false;
         };
@@ -86,6 +89,9 @@ const Fake = struct {
             f.miss_once = "";
             return .{ .kept = false, .why = "missed once" };
         }
+        if (std.mem.eql(u8, text, f.refits)) for (f.pocket.items) |*l| if (l.live) {
+            l.fits += 1;
+        };
         const ns = try f.a.alloc(Neuron, 2);
         for (ns) |*n| {
             n.* = .{ .layer = 1, .neuron = f.next_neuron, .key = .reply };
@@ -166,6 +172,17 @@ const Fake = struct {
         for (f.pocket.items) |*l| for (l.neurons) |n| if (promote.has(ns, n)) {
             l.live = false;
         };
+    }
+    pub fn mark(f: *Fake, _: Allocator) !void {
+        f.marked = try f.a.dupe(Live, f.pocket.items);
+        f.marked_next = f.next_neuron;
+    }
+    pub fn rewind(f: *Fake, _: Allocator) !void {
+        const m = f.marked orelse return error.NothingToRewind;
+        f.pocket.clearRetainingCapacity();
+        try f.pocket.appendSlice(f.a, m);
+        f.next_neuron = f.marked_next;
+        f.marked = null;
     }
     pub fn persist(f: *Fake, s: *const promote.State) !void {
         f.saves += 1;
