@@ -235,6 +235,9 @@ fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     test_step.?.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/core/template/tests.zig"), .target = target, .optimize = .Debug, .link_libc = true }) })).step);
     // the engine seam's own tests (lane_host.zig), as zig/tests/server/zig_test.sh runs them
     test_step.?.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = api })).step);
+    const core_filter = b.option([]const u8, "test-core-filter", "Run core tests whose names hold this text");
+    const core_run = b.addRunArtifact(b.addTest(.{ .root_module = api, .filters = if (core_filter) |f| &.{f} else &.{} }));
+    b.step("test-core", "The engine API and prompt-cache unit tests").dependOn(&core_run.step);
     // the frozen server parity goldens, checked by Zig driving fake_serve
     golden_build.step(b, target, server_tests, api, tokenizer, template);
     // the live notes' lookups beside writes, with the model's tokenizer, built as the server's HTTP side is

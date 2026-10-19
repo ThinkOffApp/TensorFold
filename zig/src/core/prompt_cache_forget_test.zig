@@ -14,6 +14,37 @@ const system = [_]u32{ 1, 2, 3 };
 const with_note = system ++ note ++ [_]u32{ 9, 9, 4 }; // a block holding the note after the client's system prompt
 const without = system ++ [_]u32{ 60, 61, 62, 63 } ++ [_]u32{ 9, 9, 4 }; // an unrelated block
 
+test "forgetSpan drops states cut inside an erased span" {
+    var f: Fake = .{ .gpa = testing.allocator };
+    var s = Store.init(testing.allocator, f.snapshots(), .{ .min_gap = 1, .min_prompt = 0 }, 1 << 20);
+    defer s.deinit();
+    _ = f.pass(&s, &with_note, .{ .marks = &.{ 4, 5, 6 } });
+    try testing.expect(s.entries.items.len > 0);
+    const out = s.forgetSpan(&note, &.{});
+    try testing.expect(out.states > 0);
+    try testing.expectEqual(@as(usize, 0), s.entries.items.len);
+}
+
+test "forgetSpan removes learned index records cut inside an erased span" {
+    var root_buf: [128]u8 = undefined;
+    const root = try std.fmt.bufPrint(&root_buf, "/tmp/tf-learn-cut-{d}", .{std.c.getpid()});
+    defer rmTree(root);
+    var im = try imprint.Imprint.open(testing.allocator, root, 3, 1 << 20);
+    defer im.deinit();
+    for ([_]usize{ 4, 5, 6 }) |cut| {
+        const tokens = with_note[0..cut];
+        try im.add(imprint.Imprint.keyOf(tokens), @intCast(cut), tokens, &.{}, 0);
+    }
+    try testing.expectEqual(@as(usize, 3), im.metas.items.len);
+    var f: Fake = .{ .gpa = testing.allocator };
+    var s = Store.init(testing.allocator, f.learned(), .{}, 1 << 20);
+    defer s.deinit();
+    s.imprint = &im;
+    const out = s.forgetSpan(&note, &.{});
+    try testing.expectEqual(@as(u32, 3), out.learned);
+    try testing.expectEqual(@as(usize, 0), im.metas.items.len);
+}
+
 /// Whether any kept state's tokens or last prompt still hold `span`.
 fn holds(s: *const Store, span: []const u32) bool {
     for (s.entries.items) |e| if (std.mem.indexOf(u32, e.tokens, span) != null or std.mem.indexOf(u32, e.last, span) != null) return true;
