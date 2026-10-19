@@ -257,6 +257,7 @@ pub fn noteKeys(gpa: Allocator, b: *const Base) Allocator.Error!struct { keys: [
 
 /// Tests only: a merge that keeps each old note in the view the old base had it in (the bug its test must catch).
 pub var merge_plant_stale_views: bool = false;
+pub var cancel_view_test: ?bool = null;
 
 fn buildOn(gpa: Allocator, old_in: ?*const Base, notes: []const Source, vwordy: []const bool, cancel: ?*const std.atomic.Value(bool)) BuildError!*Base {
     try cancelled(cancel);
@@ -498,13 +499,33 @@ fn mergeView(old: *const Base, notes: []const Source, order: Order, skip: u32, c
         if (o >= out.len) break; // only a planted bug gets here
         out.put(o, p);
         o += 1;
+        if (cancel_view_test == cur and o == 1) if (cancel) |f| {
+            @constCast(f).store(true, .release);
+            break;
+        };
         switch (which) {
             0 => ha = ra.next(old, notes, cur),
             1 => hb = rb.next(old, notes, cur),
             else => fi += 1,
         }
     }
+    if (cancel) |f| if (f.load(.acquire)) return;
     if (!merge_plant_stale_views) std.debug.assert(o == out.len);
+}
+
+test "merge cancellation in either suffix view returns without a short output assertion" {
+    const src = [_]Source{
+        .{ .keys = &.{ 1, 2 }, .ids = &.{ 1, 2 }, .cur = true },
+        .{ .keys = &.{ 3, 4 }, .ids = &.{ 3, 4 }, .cur = false },
+    };
+    const old = try build(std.testing.allocator, &src, &.{ false, true, true, true, true });
+    defer old.release();
+    defer cancel_view_test = null;
+    for ([_]bool{ true, false }) |view| {
+        var flag: std.atomic.Value(bool) = .init(false);
+        cancel_view_test = view;
+        try std.testing.expectError(error.Unsupported, mergeCancellable(std.testing.allocator, old, &src, &.{ false, true, true, true, true }, &flag));
+    }
 }
 
 /// The distinct n-grams of one view (n_min to n_max; a 1-gram only of a key `keep1` passes), from its sorted suffixes.
