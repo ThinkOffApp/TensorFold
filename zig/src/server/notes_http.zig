@@ -202,6 +202,7 @@ fn erasedValue(srv: *Server, a: Allocator, id: u32, e: ops.Erased) Allocator.Err
         const err = try json.newObject(a);
         try err.put(a, "message", .{ .string = warning });
         try err.put(a, "type", .{ .string = "server_error" });
+        try err.put(a, "code", try json.intValue(a, 500));
         try o.put(a, "error", .{ .object = err });
     }
     var remaining: std.ArrayList(Value) = .empty;

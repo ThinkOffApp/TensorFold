@@ -2,6 +2,8 @@
 
 ## Integration-3 erase corrections (19 October 2026, branch work)
 
+With the current conservative historical-file reporting, `complete: true` is unreachable: an erase always remains pending. Today's disabled flags do not prove earlier files or saved Sliding Weights absent. The older erase description below is historical; this section overrides any suggestion that disabling today's writers establishes global completion. A durable writer-history record would be a separate product/design change, not implemented here.
+
 Erase clears the tokenizer memo again after discovering the engine-forget spans. It replaces the alias memo with one built from the rebuilt model, and scratch buffers carry the acquired version's erase epoch rather than the epoch at scratch allocation.
 
 An erase applied in memory whose journal rename could not be synced still runs engine forgetting. Its HTTP 500 retains the error message and includes the normal place report, with `journal: may_hold` and `complete: false`.
