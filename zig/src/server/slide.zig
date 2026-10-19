@@ -12,6 +12,7 @@ const wording = @import("slide_words.zig");
 const check = @import("slide_verify.zig");
 const replace = @import("slide_replace.zig");
 const slide_graph = @import("slide_graph.zig");
+const graph_marks = @import("slide_graph_marks.zig");
 const slide_teacher = @import("slide_teacher.zig");
 const log = @import("log.zig");
 const Gone = @import("openai.zig").Gone;
@@ -140,18 +141,20 @@ pub fn teachText(srv: *Server, a: Allocator, text: []const u8, source: []const u
     }
 }
 
-/// Neurons zeroed in the live pocket and the pocket saved into the model's files; false when the learner refused.
+/// Neurons zeroed in the live pocket and saved into the model's files, then let go by the graph; false if not both.
 pub fn retire(srv: *Server, a: Allocator, neurons: []const api.Neuron) bool {
-    const ok = switch (run(srv, a, &.{ .retire = neurons }, 0)) {
-        .failed, .refused => false,
-        else => true,
-    };
-    if (ok) _ = saveAll(srv, a);
-    return ok;
+    switch (run(srv, a, &.{ .retire = neurons }, 0)) {
+        .failed, .refused => return false,
+        else => {},
+    }
+    // a save that fails leaves the files holding them: they stay the graph's, and the caller's to zero again
+    if (!saveAll(srv, a)) return false;
+    graph_marks.zeroed(&srv.slide, neurons);
+    return true;
 }
 
 /// What a mark keeps beside the learner's copy of the pocket: the graph's facts and the teacher as they are.
-pub const Mark = struct { graph: slide_graph.Kept, teacher: slide_teacher.Kept };
+pub const Mark = struct { graph: graph_marks.Kept, teacher: slide_teacher.Kept };
 
 /// The learner keeps the pocket and its lessons as they are (a second mark replaces the first); null when refused.
 pub fn mark(srv: *Server, a: Allocator) ?Mark {
@@ -163,7 +166,7 @@ pub fn mark(srv: *Server, a: Allocator) ?Mark {
         .refused => return null,
         else => {},
     }
-    return .{ .graph = srv.slide.keep(a) catch return null, .teacher = srv.teacher.keepNow(srv.io, a) catch return null };
+    return .{ .graph = graph_marks.keep(&srv.slide, a) catch return null, .teacher = srv.teacher.keepNow(srv.io, a) catch return null };
 }
 
 /// The pocket put back as mark `m` found it and saved, the graph (later facts' message `why`) and teacher with it.
@@ -176,7 +179,7 @@ pub fn rewind(srv: *Server, a: Allocator, m: Mark, why: []const u8) bool {
         .refused => return false,
         else => {},
     }
-    srv.slide.rewound(m.graph, why);
+    graph_marks.rewound(&srv.slide, m.graph, why);
     srv.teacher.putBack(srv.io, m.teacher);
     return saveAll(srv, a);
 }

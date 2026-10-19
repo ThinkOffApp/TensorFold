@@ -323,7 +323,7 @@ pub const Promoter = struct {
         out.facts = targets.items.len;
         out.neurons = gone.items.len;
         if (gone.items.len > 0 and !slide.retire(p.srv, a, gone.items)) {
-            out.failed = "the learner refused to zero the neurons: they stay recorded and are zeroed at the next try";
+            out.failed = "the neurons were not zeroed and saved: they stay recorded and are zeroed at the next try";
             log.line("notes promotion: {s}", .{out.failed.?});
             return out;
         }
