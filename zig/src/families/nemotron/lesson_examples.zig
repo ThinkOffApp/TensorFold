@@ -24,6 +24,8 @@ pub const Lesson = struct {
     save: bool = false,
     retire: []const [2]u16 = &.{}, // (layer, neuron) of facts a newer one replaces, zeroed
     unretire: bool = false, // the last retire's neurons put back
+    mark: bool = false, // the pocket and the lessons kept as they are, for a rewind
+    rewind: bool = false, // the pocket and the lessons put back as the mark kept them
 };
 
 /// A prompt by its rows through its decision row: what a router reads of it.

@@ -8,6 +8,7 @@ const joint = @import("pocket_joint.zig");
 const pocket_dump = @import("pocket_dump.zig");
 const clock = @import("pocket_clock.zig");
 const reading = @import("pocket_read.zig");
+const marking = @import("pocket_mark.zig");
 
 const Example = examples.Example;
 const Acting = lesson_route.Acting;
@@ -134,6 +135,8 @@ pub fn Pocket(comptime T: type) type {
         v: values.State = .{}, // the open fact's outputs as they are fitted
         clock: clock.Clock = .{}, // where the open round's time goes
         read: reading.Seen = .{}, // what the last read pass read, which a lesson begun again over the same keeps
+        marked: ?*marking.Kept(Self) = null, // the pocket as the last mark kept it, which a rewind puts back
+        written: bool = false, // a save wrote the shards this session: an empty pocket is written again
 
         pub fn init(gpa: std.mem.Allocator) Self {
             const asked: Mode = if (std.c.getenv("TF_SLIDE_POCKET_KEY")) |v| std.meta.stringToEnum(Mode, std.mem.span(v)) orelse .auto else .auto;
@@ -144,6 +147,7 @@ pub fn Pocket(comptime T: type) type {
             inline for (.{ "moe", "up", "down", "used", "taken", "rows", "labels", "keeps", "refits", "refit_up", "retired_lessons", "retired", "retired_w", "joint", "joint_down", "joint_answers", "learned", "pos", "subjects", "leads" }) |f| @field(p, f).deinit(p.gpa);
             p.read.deinit(p.gpa);
             p.v.deinit(p.gpa);
+            marking.drop(p);
         }
 
         /// The fact's neurons per key: as asked, or by how many answers show a value and questions name the subject.
@@ -189,7 +193,7 @@ pub fn Pocket(comptime T: type) type {
         }
 
         /// The pocket's neurons as the shards hold them, read once: every MoE layer but the last.
-        fn load(p: *Self, t: *T, host: anytype) !void {
+        pub fn load(p: *Self, t: *T, host: anytype) !void {
             if (p.moe.items.len > 0) return;
             const c = t.config();
             // every MoE layer but the last (a nudge after it has no gradient to read), its neurons as loaded
@@ -521,6 +525,7 @@ pub fn Pocket(comptime T: type) type {
         /// Learned neurons into the shards, then into the forward as the shards hold them (4-bit); the bytes written.
         pub fn save(p: *Self, t: *T, host: anytype) !usize {
             const bytes = try host.pocketSave(p.moe.items, neurons, p.up.items, p.down.items);
+            p.written = true;
             for (0..p.slots()) |j| if (p.used.items[j] > 0) try p.upload(t, host, j);
             return bytes;
         }

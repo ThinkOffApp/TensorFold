@@ -2,6 +2,7 @@
 const std = @import("std");
 const examples = @import("lesson_examples.zig");
 const adapters = @import("learn_shape.zig");
+const pocket_mark = @import("pocket_mark.zig");
 
 const Example = examples.Example;
 const Lesson = examples.Lesson;
@@ -163,12 +164,80 @@ pub fn save(l: anytype) !bool {
         try l.pockets.undo(l.trainer.?, hooks(l));
         l.pocketed = false;
     }
-    if (l.pockets.empty()) return true;
+    if (l.pockets.empty() and !l.pockets.written) return true;
     const t0 = H.seconds(l.io);
     const bytes = try l.pockets.save(l.trainer.?, hooks(l));
     const back = try l.recalls(l.owned.held, false);
     std.log.info("slide pocket: the learned neurons are in the model's shards ({d} MB written in {d:.1} s); the last fact's held-out answers {s} with them as written", .{ bytes >> 20, H.seconds(l.io) - t0, if (back) "come back" else "do not all come back" });
     return true;
+}
+
+/// The pocket and the lessons kept as they are, the open lesson settled first as the next lesson's begin does.
+pub fn mark(l: anytype) !void {
+    if (!l.whole or l.method != .pocket) return error.MarksUnsupported;
+    try settle(l); // a rewind never comes back to a lesson half open, which a later round could continue
+    const kept = try keepLessons(l);
+    errdefer freeLessons(l.gpa, kept);
+    try pocket_mark.mark(&l.pockets, l.trainer.?, hooks(l));
+    dropLessons(l);
+    l.marked = kept;
+}
+
+/// The pocket and the lessons put back as the mark kept them, then the mark let go; an error when there is none.
+pub fn rewind(l: anytype) !void {
+    if (!l.whole or l.method != .pocket) return error.MarksUnsupported;
+    const kept = l.marked orelse return error.NothingToRewind;
+    try l.replay.ensureTotalCapacity(l.gpa, kept.replay.len);
+    try l.replay_of.ensureTotalCapacity(l.gpa, kept.replay_of.len);
+    try pocket_mark.rewind(&l.pockets, l.trainer.?, hooks(l));
+    putLessonsBack(l, kept);
+    l.marked = null;
+}
+
+/// The learner's own lessons as a mark found them: earlier lessons' answers, the last lesson's, the counts.
+pub const Marked = struct { replay: []Example, replay_of: []u32, last: []Example, last_lesson: u32, lessons: u32, kept_rounds: u32 };
+
+/// Copies of the earlier lessons' answers, the last lesson's and the counts: what a rewind puts back.
+fn keepLessons(l: anytype) !Marked {
+    const replay = try examples.own(l.gpa, l.replay.items);
+    errdefer examples.disown(l.gpa, replay);
+    const last = try examples.own(l.gpa, l.last);
+    errdefer examples.disown(l.gpa, last);
+    return .{ .replay = replay, .replay_of = try l.gpa.dupe(u32, l.replay_of.items), .last = last, .last_lesson = l.last_lesson, .lessons = l.lessons, .kept_rounds = l.kept_rounds };
+}
+
+/// The lessons as `kept` holds them, its copies taken over (the replay's room made first: nothing here fails).
+fn putLessonsBack(l: anytype, kept: Marked) void {
+    for (l.replay.items) |ex| l.gpa.free(ex.ids);
+    l.replay.clearRetainingCapacity();
+    l.replay.appendSliceAssumeCapacity(kept.replay);
+    l.gpa.free(kept.replay);
+    l.replay_of.clearRetainingCapacity();
+    l.replay_of.appendSliceAssumeCapacity(kept.replay_of);
+    l.gpa.free(kept.replay_of);
+    examples.disown(l.gpa, l.last);
+    l.last = kept.last;
+    l.last_lesson = kept.last_lesson;
+    l.lessons = kept.lessons;
+    l.kept_rounds = kept.kept_rounds;
+    l.pocketed = false;
+    // the borrowed views of the replay are made again when the next lesson begins
+    l.live.clearRetainingCapacity();
+    l.live_of.clearRetainingCapacity();
+    l.stay = @splat(&.{});
+}
+
+/// The lessons' mark let go, if there is one.
+pub fn dropLessons(l: anytype) void {
+    const kept = l.marked orelse return;
+    freeLessons(l.gpa, kept);
+    l.marked = null;
+}
+
+fn freeLessons(gpa: std.mem.Allocator, kept: Marked) void {
+    examples.disown(gpa, kept.replay);
+    gpa.free(kept.replay_of);
+    examples.disown(gpa, kept.last);
 }
 
 /// When the next lesson begins: a kept edit folded into the codes, a pocket lesson that never came back taken out.

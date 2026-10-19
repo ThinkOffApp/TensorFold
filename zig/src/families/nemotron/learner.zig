@@ -40,7 +40,7 @@ const replay_cap = 256; // earlier lessons' answers a new lesson leaves as they 
 const replay_each = 8; // of a lesson's answers, its first (plain questions) join the replay, so every fact keeps some
 
 /// A lesson builds (build) and learns (steps); an edit is written at its subject (edit), more rounds report (again).
-const Phase = enum { idle, build, steps, undo, reroute, drop, save, edit, again, probe, pocket, retire };
+const Phase = enum { idle, build, steps, undo, reroute, drop, save, edit, again, probe, pocket, retire, mark, rewind };
 
 /// The lessons over host H: its Trainer, max_rows, Ctx, layers, trainer, free, attach, write and seconds.
 pub fn Learner(comptime H: type) type {
@@ -94,6 +94,7 @@ pub fn Learner(comptime H: type) type {
         probe: Probes,
         pockets: Pockets, // every MoE layer's pocket of learned neurons
         pocketed: bool = false, // the last lesson put neurons in the pocket
+        marked: ?whole_lessons.Marked = null, // the lessons as the last mark kept them, beside the pocket's copy
 
         pub fn init(gpa: std.mem.Allocator, io: std.Io, b: H.Ctx) Self {
             return .{ .gpa = gpa, .io = io, .b = b, .whole = std.c.getenv("TF_SLIDE_ROUTED") == null, .edits = if (has_edits) Edits.init(gpa) else {}, .method = if (has_edits) whole_lessons.method() else .pocket, .probe = if (has_edits) Probes.init(gpa) else {}, .pockets = if (has_pocket) Pockets.init(gpa) else {} };
@@ -103,6 +104,7 @@ pub fn Learner(comptime H: type) type {
             if (has_edits) l.edits.deinit();
             if (has_edits) l.probe.deinit();
             if (has_pocket) l.pockets.deinit();
+            whole_lessons.dropLessons(l);
             disownLesson(l.gpa, l.owned);
             for (l.extra.items) |ex| l.gpa.free(ex.ids);
             l.extra.deinit(l.gpa);
@@ -164,6 +166,11 @@ pub fn Learner(comptime H: type) type {
             if (lesson.retire.len > 0 or lesson.unretire) {
                 try l.ready();
                 l.phase = .retire;
+                return;
+            }
+            if (lesson.mark or lesson.rewind) {
+                try l.ready();
+                l.phase = if (lesson.mark) .mark else .rewind;
                 return;
             }
             if (lesson.train.len == 0) return;
@@ -264,6 +271,12 @@ pub fn Learner(comptime H: type) type {
                     l.phase = .idle;
                     if (has_whole and l.whole and try whole_lessons.retire(l, l.lesson.retire, l.lesson.unretire)) return .{ .done = true, .changed = true };
                     return .{ .done = true };
+                },
+                .mark, .rewind => |p| {
+                    l.phase = .idle;
+                    if (comptime !has_pocket) return error.MarksUnsupported;
+                    if (p == .mark) try whole_lessons.mark(l) else try whole_lessons.rewind(l);
+                    return .{ .done = true, .changed = true };
                 },
                 .edit => return if (has_edits) whole_lessons.editOnce(l) else unreachable,
                 .probe => return if (has_edits) whole_lessons.probeOnce(l) else unreachable,
