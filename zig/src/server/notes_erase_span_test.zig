@@ -38,11 +38,14 @@ test "on Nemotron 3.5 Lightning's tokenizer the span of each note is inside ever
     const told = line.ordinalOf(2026, 10, 16) * line.tpd;
     for (cases) |case| {
         errdefer std.debug.print("case: {s}\n", .{case.name});
-        const span = (try places.spanOf(a, t, case.raw)) orelse return error.TestNoSpan;
+        const note = try std.fmt.allocPrint(a, "Remember carefully {s} for many coming years.", .{case.raw});
+        if (std.mem.eql(u8, case.name, "plain")) try testing.expect((try places.spanOf(a, t, case.raw)) == null);
+        const span = (try places.spanOf(a, t, note)) orelse return error.TestNoSpan;
+        try testing.expect(span.len >= 4);
         // the note as cached: current under one id, later superseded, later renumbered, between other lines
-        const as_cached = try line.render(a, 31, case.raw, .none, .plain);
-        const superseded = try line.render(a, 31, case.raw, .{ .superseded = .{ .by = 32, .told = told } }, .plain);
-        const renumbered = try line.render(a, 30, case.raw, .none, .plain);
+        const as_cached = try line.render(a, 31, note, .none, .plain);
+        const superseded = try line.render(a, 31, note, .{ .superseded = .{ .by = 32, .told = told } }, .plain);
+        const renumbered = try line.render(a, 30, note, .none, .plain);
         const other = "[5] \"My dog has grey eyes.\"";
         const wraps = [_][]const []const u8{ &.{as_cached}, &.{ other, as_cached }, &.{ as_cached, other }, &.{ other, superseded, other }, &.{renumbered} };
         for (wraps) |w| {
@@ -55,6 +58,6 @@ test "on Nemotron 3.5 Lightning's tokenizer the span of each note is inside ever
         if (!std.mem.eql(u8, case.raw, case.rendered[1 .. case.rendered.len - 1]))
             try testing.expect(std.mem.indexOf(u32, try prompt(a, t, &.{as_cached}), old) == null);
     }
-    // a note of two words gives no span: the erase cannot show its prompts gone
+    // Too few inner words, or fewer than four stable tokens, cannot establish a searchable span.
     try testing.expect((try places.spanOf(a, t, "Zanzibar, quixotically.")) == null);
 }

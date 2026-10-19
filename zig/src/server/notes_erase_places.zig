@@ -21,7 +21,7 @@ pub const Place = enum {
     pub fn why(p: Place) []const u8 {
         return switch (p) {
             .journal => "the rewritten journal's folder could not be synced; a power cut may restore the old journal containing the note",
-            .prompt_cache => "the engine's prompt cache may still hold prompt states (and their tokens) of requests that carried this note's block: the engine could not forget them, or could not show they are gone (a note of two words or fewer, a state a running request restores); serve with --prompt-cache-gib 0 for an erase that reaches every cache",
+            .prompt_cache => "the engine could not show this note's prompt states gone: an unsupported hook, fewer than four stable span tokens, or requests restoring states may prevent clearance",
             .learn_files => "this or an earlier run may have written learned prompt states; not every possible learned folder has been shown free of this note's tokens",
             .responses => "stored Responses (/v1/responses with store) keep their conversations in memory, and one may quote this note",
             .cortheon => "Cortheon keeps the hidden rounds of its replies in memory, and one may quote this note",
@@ -63,7 +63,7 @@ pub const Forget = struct {
 /// first and last word can merge with the quote marks, the id or the label. That part is checked against the
 /// tokenizer itself: it must lie inside every wrapper the block can give the line (any id, every label, a line
 /// before and after or none, the line first or last), else one more word goes from each side; a note without such
-/// a part (two words or fewer) gives null, and the erase cannot show its prompts gone.
+/// a part with at least four stable tokens gives null; then the erase cannot show its prompts gone.
 pub fn spanOf(a: std.mem.Allocator, text: model_text.Text, note: []const u8) !?[]const u32 {
     var q: std.ArrayList(u8) = .empty;
     try line.quote(a, &q, note);
