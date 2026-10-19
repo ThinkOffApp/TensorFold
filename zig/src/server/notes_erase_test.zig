@@ -31,9 +31,16 @@ test "erase replaces alias memo with only the rebuilt model" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const made = try rig.request(r.srv, a, "POST", "/v1/notes", "{\"text\":\"My dog is called Zyqora now.\",\"replaces\":5}");
+    const made = try rig.request(r.srv, a, "POST", "/v1/notes", "{\"text\":\"My dog is called Zyqora now.\",\"replaces\":13}");
     const id = made.value.get("id").?.int64().?;
     _ = try rig.request(r.srv, a, "POST", "/v1/notes", "{\"text\":\"My dog likes apples.\",\"subject\":\"my dog\"}");
+    {
+        const s0 = r.store();
+        var keys: [8]u32 = @splat(0xffff_ffff);
+        const ids = try r.text.text().encode(a, " Zyqora", false);
+        for (ids, keys[0..ids.len]) |token, *key| key.* = s0.current.idx.keyOf(token);
+        try testing.expect(s0.bw.alias_memo.by_key.contains(keys));
+    }
     const erased = try rig.request(r.srv, a, "DELETE", try std.fmt.allocPrint(a, "/v1/notes/{d}?erase=true", .{id}), "");
     try testing.expectEqual(@as(u16, 200), erased.status);
     try testing.expectEqual(@as(usize, 0), r.text.encodes_since_forget.load(.monotonic));

@@ -266,9 +266,9 @@ test "tool reply prose survives whole chat, Messages and Responses and their war
         backend.foreground_held = false;
         backend.background_held = false;
         const got = try exchange(srv, request.path, request.body);
+        defer std.testing.allocator.free(got.body);
         try std.testing.expect(backend.foreground_held and backend.background_held);
         try std.testing.expectEqual(@as(u64, 0), srv.prompt_holders.load(.acquire));
-        defer std.testing.allocator.free(got.body);
         try std.testing.expectEqual(@as(u16, 200), got.status);
         const body = (try json.parse(a, got.body)).ok;
         var call_id: []const u8 = undefined;

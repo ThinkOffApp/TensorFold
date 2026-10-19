@@ -1,5 +1,5 @@
 //! The erase reply's "complete": false, with the place named, whenever a place outside the store may hold the note.
-//! Each test turns one place on and shows it named, then off (or empty) and shows it gone: its own negative control.
+//! Exact place sets distinguish clear in-memory stores from unsearched historical disk writers.
 const std = @import("std");
 const server = @import("root.zig");
 const json = server.json;
@@ -188,7 +188,7 @@ test "erase reply: the request log remains uncertain when the writer is disabled
     }.set);
 }
 
-test "erase reply: promotion records are named while --slide is on or its fact graph holds a fact, and only then" {
+test "erase reply: promotion residue stays uncertain when slide is off or its graph is empty" {
     try onThenOff(.promotion, .may_hold, struct {
         fn set(srv: *server.Server, on: bool) !void {
             srv.config.slide = on;

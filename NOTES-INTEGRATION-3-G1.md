@@ -33,6 +33,8 @@ Full server suite at code commit 4f0d26de: 353/353 passed, 3/3 build steps, 10 m
 
 ## Existing assertions changed (not just added)
 
+- Alias regression: replaces snapshot note 5 (a likes fact) -> 13 (the dog's name fact), and now proves the Zyqora alias key is present before erase; after erase the actual memo key arrays and map must lack it. Checking rebuilt-model text alone was insufficient and has been replaced.
+- Promotion on/off tests: expected off -> may_hold when slide is disabled or its graph is empty, because older saved weights are not searched. Exact remaining sets now include promotion.
 - notes_erase_test.eraseRun: tokenizer forget count 1 -> 2. The first clear precedes engine span discovery, which re-encodes erased text; the second clears those encodes. Exact count retained, not relaxed.
 - notes_http_test endpoint erase: complete true -> false. Earlier-run disk files were not searched, so no-cache engine alone cannot establish completion.
 - notes_erase_cache_test successful cache/learn forget: complete true/state complete -> false/pending. The specific prompt_cache and learn_files forgotten assertions remain; compaction/log uncertainty prevents a global completion claim.
