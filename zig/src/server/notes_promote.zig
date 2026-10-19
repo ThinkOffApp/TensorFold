@@ -102,8 +102,20 @@ pub const Promoter = struct {
             return e;
         }
         p.* = .{ .gpa = gpa, .io = io, .srv = srv, .store = store, .path = path, .every_ms = o.every_ms, .state = state, .nights_done = state.nights_done, .last_end_ms = clockMs(io) };
+        p.repairProbes();
         _ = p.tryPublish(); // a failure leaves it marked: the start's first step refreshes it
         return p;
+    }
+
+    /// Stored probes whose reference does not give its fact (or a degenerate wording): dropped once, logged.
+    fn repairProbes(p: *Promoter) void {
+        var arena: std.heap.ArenaAllocator = .init(p.gpa);
+        defer arena.deinit();
+        var b: Backend = .{ .p = p, .arena = arena.allocator() };
+        const n = promote.repair(&p.state, arena.allocator(), &b) catch return; // memory short: the next start tries again
+        if (n == 0) return;
+        log.line("notes promotion: {d} stored probes dropped on load (each logged above and in {s}-probes.jsonl)", .{ n, p.path });
+        b.persist(&p.state) catch log.line("notes promotion: the repaired state was not written; the next start repairs it again", .{});
     }
 
     pub fn start(p: *Promoter) !void {

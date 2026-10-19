@@ -1,6 +1,7 @@
 //! The night's backend in the server: the learner, the store's notes and the model's questions and answers.
 const std = @import("std");
 const errors = @import("errors.zig");
+const log = @import("log.zig");
 const np = @import("notes_promote.zig");
 const promote = @import("notes/promote.zig");
 const pjson = @import("notes/promote_json.zig");
@@ -29,6 +30,9 @@ const pair_prompt = "The user once told you: \"{s}\" and \"{s}\"\nWrite one shor
 
 /// Tokens a night's question is answered in at most (the learner's own checks read 48).
 pub const answer_tokens = 48;
+
+/// A reference written again is sampled at the lesson's wording temperature, so it can differ from the greedy one.
+const again_temperature = 0.9;
 
 /// The night's learner, notes and questions: the server's own (slide.teachText, slide_ask, the store's lookup).
 pub const Backend = struct {
@@ -133,6 +137,18 @@ pub const Backend = struct {
         return out;
     }
 
+    /// A reference written once more, sampled (seeded by the prompt) like a lesson's extra wordings: greedy repeats.
+    pub fn referenceAgain(b: *Backend, a: Allocator, fact: []const u8, q: []const u8) ![]const u8 {
+        var cx: errors.Cx = .{ .a = a };
+        const note = try std.fmt.allocPrint(a, prompts.told_note, .{fact});
+        return (try slide_ask.askBaseAt(b.srv(), &cx, note, q, answer_tokens, again_temperature, b.stopper())).content;
+    }
+
+    /// Whether a reference answer gives its fact, as the judge reads a reply against the fact's own words.
+    pub fn gives(b: *Backend, fact: []const u8, question: []const u8, ref: []const u8) bool {
+        return judge.gives(fact, question, ref, b.knownOf(fact));
+    }
+
     /// Each question as production asks it: the store's block for it (these notes left out) first, on the live weights.
     pub fn askAll(b: *Backend, a: Allocator, asks: []const promote.Ask) ![]const []const u8 {
         const out = try a.alloc([]const u8, asks.len);
@@ -195,6 +211,7 @@ pub const Backend = struct {
     /// A regression probe (two replies) or an alone ask (one), judged: a line of SNAPSHOT.promote-probes.jsonl.
     pub fn recordProbe(b: *Backend, r: promote.Record) void {
         pjson.appendProbe(b.arena, b.p.path, r);
+        if (r.why.len > 0) log.line("notes promotion: {s} \"{s}\" of {s}: {s}", .{ r.kind, r.q, r.key, r.why });
     }
 
     pub fn agrees(b: *Backend, fact: []const u8, question: []const u8, ref: []const u8, reply: []const u8) bool {

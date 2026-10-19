@@ -187,6 +187,12 @@ const Night = struct {
         return &.{};
     }
     pub fn recordProbe(_: *Night, _: promote.Record) void {}
+    pub fn gives(_: *Night, _: []const u8, _: []const u8, _: []const u8) bool {
+        return true;
+    }
+    pub fn referenceAgain(_: *Night, _: Allocator, _: []const u8, _: []const u8) ![]const u8 {
+        return "o";
+    }
     pub fn references(_: *Night, a: Allocator, _: []const u8, qs: []const []const u8) ![]const []const u8 {
         const out = try a.alloc([]const u8, qs.len);
         @memset(out, "o");

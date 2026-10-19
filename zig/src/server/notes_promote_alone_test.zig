@@ -168,3 +168,96 @@ test "promotion alone: the rest are asked again with the failures' notes back, w
     try testing.expectEqual(promote.Status.promoted, status(&s, "w1")); // never out of the prompt
     try testing.expectEqual(promote.Status.promoted, status(&s, "w2"));
 }
+
+fn ofKind(a: std.mem.Allocator, f: *const Fake, kind: []const u8) ![]const promote.Record {
+    var out: std.ArrayList(promote.Record) = .empty;
+    for (f.records.items) |r| if (std.mem.eql(u8, r.kind, kind)) try out.append(a, r);
+    return out.items;
+}
+
+test "promotion alone: a reference that does not give its fact is written once more, and dropped if it still does not" {
+    for ([_]bool{ true, false }) |twice| {
+        var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        var f: Fake = .{ .a = a, .garbage = &.{"dog=Luna"}, .garbage_twice = twice };
+        _ = try f.add("w1", "dog=Luna");
+        var s = promote.State.init(testing.allocator, .{});
+        defer s.deinit();
+        const n = try promote.night(&s, a, &f);
+        const dog = s.find("w1").?;
+        try testing.expectEqual(@as(u32, 1), f.rewrites);
+        try testing.expectEqual(@as(usize, if (twice) 3 else 4), dog.probes.len);
+        for (dog.probes) |p| try testing.expectEqualStrings("Luna", p.ref); // never the off-topic one
+        try testing.expectEqual(@as(u32, @intFromBool(twice)), n.dropped);
+        const refs = try ofKind(a, &f, "reference");
+        try testing.expectEqual(@as(usize, 1), refs.len);
+        try testing.expectEqualStrings(@import("notes_promote_fake.zig").nemotron, refs[0].before.?);
+        try testing.expectEqual(!twice, refs[0].ok);
+        try testing.expect(refs[0].why.len > 0);
+        // the facts' probes that stay are asked alone and pass
+        _ = try promote.night(&s, a, &f);
+        try testing.expectEqual(promote.Status.in_weights, status(&s, "w1"));
+    }
+}
+
+test "promotion alone: a degenerate wording of the learner's is never a probe" {
+    const degenerate = @import("notes/promote_probes.zig").degenerate;
+    // run6's boat: its two held-out questions, then sound wordings
+    try testing.expect(degenerate("What is the colour of the boat's colour's colour's colour's colour's colour's colour's colour?"));
+    try testing.expect(degenerate("What is the colour of the boat's colour's colour's colour's colour's colour's colour's colour's colour?"));
+    try testing.expect(degenerate("What is the boat’s colour’s colour’s colour?"));
+    for ([_][]const u8{ "What is the colour of the vessel?", "What colour is stated for the boat?", "What colour is the boat's colour?", "What is my sister's brother's name?", "Who is who?" }) |q| try testing.expect(!degenerate(q));
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // the fake model cannot answer the degenerate wording: asked alone it would keep the boat in the prompt for ever
+    var f: Fake = .{ .a = a, .wordings = &.{ "Q:boat's colour's colour's colour", "Q:boat", "Q:boat" } };
+    _ = try f.add("w1", "boat=blue");
+    var s = promote.State.init(testing.allocator, .{});
+    defer s.deinit();
+    const n = try promote.night(&s, a, &f);
+    try testing.expectEqual(@as(u32, 1), n.dropped);
+    try testing.expectEqual(@as(usize, 2), s.find("w1").?.probes.len);
+    for (s.find("w1").?.probes) |p| try testing.expectEqualStrings("Q:boat", p.q);
+    try testing.expectEqual(@as(usize, 1), (try ofKind(a, &f, "dropped")).len);
+    _ = try promote.night(&s, a, &f);
+    try testing.expectEqual(promote.Status.in_weights, status(&s, "w1"));
+}
+
+test "promotion alone: stored probes a night would not build are dropped once on load; a fact left with none goes back" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const nemotron = @import("notes_promote_fake.zig").nemotron;
+    var f: Fake = .{ .a = a };
+    _ = try f.add("w1", "dog=Luna");
+    _ = try f.add("w2", "boat=blue");
+    for ([_][2][]const u8{ .{ "dog", "dog=Luna" }, .{ "boat", "boat=blue" } }, 0..) |x, i| {
+        const ns = try a.dupe(promote.Neuron, &.{.{ .layer = 1, .neuron = @intCast(i), .key = .reply }});
+        try f.pocket.append(a, .{ .topic = x[0], .value = x[1][x[0].len + 1 ..], .neurons = ns, .text = x[1] }); // both taught
+    }
+    var st = promote.State.init(testing.allocator, .{});
+    defer st.deinit();
+    const dog = [_]promote.Probe{ .{ .q = "Q:dog", .ref = "Luna" }, .{ .q = "Q:dog", .ref = nemotron }, .{ .q = "Q:dog's dog's dog", .ref = "Luna" } };
+    const boat = [_]promote.Probe{.{ .q = "Q:boat", .ref = nemotron }};
+    try st.facts.append(st.alloc(), .{ .key = "w1", .text = "dog=Luna", .status = .in_weights, .alone = 2, .probes = &dog });
+    try st.facts.append(st.alloc(), .{ .key = "w2", .text = "boat=blue", .status = .in_weights, .alone = 2, .probes = &boat });
+    // the state file as an earlier build wrote it, read back
+    var s = try pjson.decode(testing.allocator, try pjson.encode(&st, a), .{});
+    defer s.deinit();
+    try testing.expectEqual(@as(u32, 3), try promote.repair(&s, a, &f));
+    try testing.expectEqual(@as(usize, 1), s.find("w1").?.probes.len);
+    try testing.expectEqualStrings("Luna", s.find("w1").?.probes[0].ref);
+    try testing.expectEqual(@as(usize, 0), s.find("w2").?.probes.len);
+    const dropped = try ofKind(a, &f, "dropped");
+    try testing.expectEqual(@as(usize, 3), dropped.len);
+    for (dropped) |r| try testing.expect(r.why.len > 0);
+    try testing.expectEqual(@as(u32, 0), try promote.repair(&s, a, &f)); // once: nothing left to drop
+    // the next night: the dog's sound probe still answers alone; the boat, with none left, goes back to the prompt
+    const n = try promote.night(&s, a, &f);
+    try testing.expectEqual(promote.Status.in_weights, status(&s, "w1"));
+    try testing.expectEqual(promote.Status.promoted, status(&s, "w2"));
+    try testing.expectEqual(@as(u32, 1), n.back_to_prompt);
+    try testing.expectEqualStrings("back in the prompt: no probe left to ask it alone", s.find("w2").?.why);
+}

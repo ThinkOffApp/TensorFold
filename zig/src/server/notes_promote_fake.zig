@@ -11,6 +11,9 @@ const FNote = struct { id: u32, key: []const u8, text: []const u8, told: i64, fa
 /// A taught fact in the fake pocket: its topic, value and neurons (live until retired).
 pub const Live = struct { topic: []const u8, value: []const u8, neurons: []const Neuron, live: bool = true, breaks: bool = false, clobbers: bool = false, text: []const u8 = "", fits: u32 = 0 };
 
+/// run6's off-topic reference answer.
+pub const nemotron = "My name is Nemotron. I am created by NVIDIA researchers.";
+
 pub const Fake = struct {
     a: Allocator,
     store: std.ArrayList(FNote) = .empty,
@@ -41,6 +44,10 @@ pub const Fake = struct {
     saves: u32 = 0,
     clock: i64 = 1000,
     records: std.ArrayList(promote.Record) = .empty, // every probe the nights recorded, the alone asks among them
+    garbage: []const []const u8 = &.{}, // fact texts whose second question gets an off-topic reference
+    garbage_twice: bool = false, // and written again, it is off topic again
+    rewrites: u32 = 0, // references written again
+    wordings: []const []const u8 = &.{}, // a lesson's questions in place of five "Q:topic" ones
 
     pub fn topic(text: []const u8) []const u8 {
         return text[0 .. std.mem.indexOfScalar(u8, text, '=') orelse text.len];
@@ -99,6 +106,7 @@ pub const Fake = struct {
         }
         try f.pocket.append(f.a, .{ .topic = topic(text), .value = val(text), .neurons = ns, .breaks = std.mem.eql(u8, text, f.breaks), .clobbers = std.mem.eql(u8, text, f.clobbers), .text = text });
         const q = try std.fmt.allocPrint(a, "Q:{s}", .{topic(text)});
+        if (f.wordings.len > 0) return .{ .kept = true, .neurons = ns, .questions = f.wordings };
         return .{ .kept = true, .neurons = ns, .questions = try a.dupe([]const u8, &.{ q, q, q, q, q }) };
     }
     pub fn placedFor(f: *Fake, a: Allocator, text: []const u8) ![]const Neuron {
@@ -124,16 +132,30 @@ pub const Fake = struct {
         x.key = f.a.dupe(u8, r.key) catch return;
         if (r.exclude) |ids| x.exclude = f.a.dupe(u32, ids) catch return;
         if (r.reply) |s| x.reply = f.a.dupe(u8, s) catch return;
+        if (r.before) |s| x.before = f.a.dupe(u8, s) catch return;
+        if (r.after) |s| x.after = f.a.dupe(u8, s) catch return;
+        x.ref = f.a.dupe(u8, r.ref) catch return;
         f.records.append(f.a, x) catch {};
     }
     pub fn questionOf(f: *Fake, a: Allocator, text: []const u8) ![]const u8 {
         f.questions += 1;
         return std.fmt.allocPrint(a, "Q:{s}", .{topic(text)});
     }
-    pub fn references(_: *Fake, a: Allocator, fact: []const u8, qs: []const []const u8) ![]const []const u8 {
+    pub fn references(f: *Fake, a: Allocator, fact: []const u8, qs: []const []const u8) ![]const []const u8 {
         const out = try a.alloc([]const u8, qs.len);
         for (out, qs) |*r, q| r.* = if (std.mem.startsWith(u8, q, "P:")) "Yes." else val(fact);
+        // the second question of a fact in `garbage` gets an off-topic reference, as run6's "Who is my dog?" did
+        for (f.garbage) |g| if (std.mem.eql(u8, g, fact) and out.len > 1) {
+            out[1] = nemotron;
+        };
         return out;
+    }
+    pub fn referenceAgain(f: *Fake, _: Allocator, fact: []const u8, _: []const u8) ![]const u8 {
+        f.rewrites += 1;
+        return if (f.garbage_twice) nemotron else val(fact);
+    }
+    pub fn gives(_: *Fake, fact: []const u8, _: []const u8, ref: []const u8) bool {
+        return std.mem.eql(u8, ref, val(fact));
     }
     fn live(f: *Fake, text: []const u8) ?Live {
         if (text.len == 0) return null;

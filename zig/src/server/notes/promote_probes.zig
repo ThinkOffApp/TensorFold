@@ -45,6 +45,19 @@ pub fn swapSubject(a: Allocator, question: []const u8, who: []const u8) !?[]cons
     return null;
 }
 
+/// Whether a question says a possessive twice in a row ("the boat's colour's colour's colour?"): a wording gone wrong.
+pub fn degenerate(q: []const u8) bool {
+    var it = std.mem.tokenizeAny(u8, q, " \t\r\n,;:!?\"()*");
+    var last: []const u8 = "";
+    while (it.next()) |raw| {
+        const w = std.mem.trimEnd(u8, raw, ".");
+        const possessive = std.mem.endsWith(u8, w, "'s") or std.mem.endsWith(u8, w, "\u{2019}s");
+        if (possessive and std.ascii.eqlIgnoreCase(w, last)) return true;
+        last = w;
+    }
+    return false;
+}
+
 /// Whether a reply says it does not know (the judge's list, which a reply stating its value plainly must not match).
 pub const unknown = judge.unknown;
 

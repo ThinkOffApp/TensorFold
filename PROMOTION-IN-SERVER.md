@@ -66,7 +66,14 @@ due ones), then `source` (zero every promotion neuron, teach nothing), always la
 **Teach.** Each fact's own text goes through `slide.teachText`, the body of `POST /v1/slide/learn` (source `chat`)
 moved into a function the route calls too: the same lesson writer, rounds, held-out checks and save. The learner's
 checks decide kept or missed. Its questions (held-out and never-learned wordings, from the slide graph) become the
-fact's probes, at most 4, each with its reference answer.
+fact's probes, at most 4, each with its reference answer. A degenerate wording (a possessive said twice in a row, run6's
+"the boat's colour's colour's ...") is skipped. A reference must give its own fact (`judge.gives`: the reference read as a
+reply, the fact's words as its reference); run6 stored "My name is Nemotron. ..." for "Who is my dog?", which only the
+judge's lenient path let pass. One that does not is written once more, sampled at the lesson's wording temperature
+(greedy would repeat it), and the probe is dropped if the second does not either (kind `reference` in the probe log,
+`dropped` in the night's log). At a start, stored probes a night would not build now are dropped once, logged (kind
+`dropped`) and the state written back; on E1's 44 gate probes that drops the five off-topic references and the
+craving question's doubted list.
 
 **Regress.** Before the night the probes of the facts that still hold plus 4 fixed control prompts are asked as
 production asks them (notes in, in-weights notes out); after the teach they are asked again. A probe right before and
@@ -284,8 +291,8 @@ prompt, which is the design), and the 2 in-weights facts cost one question when 
 ## Not done
 
 - No pocket checkpoint op (exact rollback) or pocket compaction (open questions 1 and 2).
-- The regression set does not log which probe went worse; the learner's degenerate wordings ("the boat's colour's
-  colour's ...") are used as probes as the learner wrote them.
+- The regression set does not log which probe went worse. The learner's degenerate wordings ("the boat's colour's
+  colour's ...") are no longer promotion probes, but the learner still writes them.
 - Missed and rejected facts are never retried; only 2 of 29 facts reached in weights on the GB10 run.
 - A Metal run of the full nights set; Metal was the two-fact gate only.
 - Not pushed; no pull request.

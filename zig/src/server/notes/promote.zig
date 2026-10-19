@@ -47,6 +47,7 @@ pub const Record = struct {
     exclude: ?[]const u32 = null, // the note ids left out of an alone ask's block
     round: u32 = 0, // the alone check's round (1: every candidate's note out; later: the failures' notes back in)
     ref: []const u8 = "", // the reference the reply was judged against
+    why: []const u8 = "", // why a probe was dropped or its reference written again
 };
 
 /// One night as the report shows it.
@@ -67,6 +68,7 @@ pub const NightLog = struct {
     alone_asked: u32 = 0,
     alone_right: u32 = 0,
     alone_rounds: u32 = 0, // rounds until no candidate dropped (each asks the candidates still standing)
+    dropped: u32 = 0, // probes left out tonight: a reference not giving its fact twice, or a degenerate wording
     left_prompt: u32 = 0, // facts that became in_weights tonight
     back_to_prompt: u32 = 0,
     in_weights: u32 = 0,
@@ -214,14 +216,64 @@ fn teachAll(s: *State, a: Allocator, b: anytype, k: u32, list: []const *Fact, lo
     return out;
 }
 
-/// The fact's probes from its lesson's questions: at most a few, each with its reference answer.
-fn probesOf(s: *State, a: Allocator, b: anytype, f: *Fact, t: Taught) !void {
-    const qs = t.questions[0..@min(t.questions.len, s.settings.probes_per_fact)];
-    const refs = try b.references(a, f.text, qs);
-    const out = try s.alloc().alloc(Probe, qs.len);
-    for (qs, refs, out) |q, r, *p| p.* = .{ .q = try s.alloc().dupe(u8, q), .ref = try s.alloc().dupe(u8, r) };
-    f.probes = out;
+/// The fact's probes from its lesson's questions: at most a few, each with a reference answer that gives the fact.
+fn probesOf(s: *State, a: Allocator, b: anytype, f: *Fact, t: Taught, log: *NightLog) !void {
+    var qs: std.ArrayList([]const u8) = .empty;
+    for (t.questions) |q| {
+        if (qs.items.len == s.settings.probes_per_fact) break;
+        if (!probes.degenerate(q)) try qs.append(a, q) else drop(b, log, f, q, "", why_degenerate);
+    }
+    const refs = try b.references(a, f.text, qs.items);
+    var out: std.ArrayList(Probe) = .empty;
+    for (qs.items, refs) |q, first| {
+        var ref = first;
+        // run6's "My name is Nemotron." for "Who is my dog?" switched the judge to its lenient path: written once more
+        if (!b.gives(f.text, q, ref)) {
+            const again = try b.referenceAgain(a, f.text, q);
+            const kept = b.gives(f.text, q, again);
+            b.recordProbe(.{ .night = log.night, .kind = "reference", .key = f.key, .q = q, .before = first, .after = again, .ok = kept, .why = if (kept) "the first reference did not give the fact; the second does" else why_ref });
+            if (!kept) {
+                log.dropped += 1;
+                continue;
+            }
+            ref = again;
+        }
+        try out.append(s.alloc(), .{ .q = try s.alloc().dupe(u8, q), .ref = try s.alloc().dupe(u8, ref) });
+    }
+    f.probes = out.items;
     f.neurons = try s.alloc().dupe(Neuron, t.neurons);
+}
+
+const why_degenerate = "a degenerate wording (a possessive said twice in a row): never asked";
+const why_ref = "its reference does not give the fact, written twice: the probe is dropped";
+const why_stored = "on load: its stored reference does not give the fact";
+
+/// A probe left out, recorded with why.
+fn drop(b: anytype, log: *NightLog, f: *const Fact, q: []const u8, ref: []const u8, why: []const u8) void {
+    log.dropped += 1;
+    b.recordProbe(.{ .night = log.night, .kind = "dropped", .key = f.key, .q = q, .ref = ref, .why = why });
+}
+
+/// Stored probes a night would not build now (a reference not giving its fact, a degenerate wording), dropped.
+pub fn repair(s: *State, a: Allocator, b: anytype) !u32 {
+    var log: NightLog = .{ .night = s.nights_done };
+    for (s.facts.items) |*f| {
+        const whys = try a.alloc(?[]const u8, f.probes.len);
+        var kept: usize = 0;
+        for (f.probes, whys) |p, *why| {
+            why.* = if (probes.degenerate(p.q)) why_degenerate else if (!b.gives(f.text, p.q, p.ref)) why_stored else null;
+            kept += @intFromBool(why.* == null);
+        }
+        if (kept == f.probes.len) continue;
+        const keep = try s.alloc().alloc(Probe, kept);
+        var i: usize = 0;
+        for (f.probes, whys) |p, why| if (why) |w| drop(b, &log, f, p.q, p.ref, w) else {
+            keep[i] = p;
+            i += 1;
+        };
+        f.probes = keep;
+    }
+    return log.dropped;
 }
 
 const Plan = enum { add, rebuild, @"rebuild-old", source };
@@ -346,7 +398,7 @@ fn runPlans(s: *State, a: Allocator, b: anytype, k: u32, notes: []const Note, st
         log.asks += @intCast(asks2.len);
         log.worse = try probes.worse(a, b, r, after, log);
         if (log.worse <= s.settings.tolerance or plan == .source) {
-            try accept(s, a, b, k, plan, stale, keep, due, sorted, taught);
+            try accept(s, a, b, k, plan, stale, keep, due, sorted, taught, log);
             return;
         }
         log.rejected += 1;
@@ -360,7 +412,7 @@ fn runPlans(s: *State, a: Allocator, b: anytype, k: u32, notes: []const Note, st
                 log.tries += 1;
                 log.plan = "source";
                 try zeroAll(s, a, b);
-                try accept(s, a, b, k, .source, stale, keep, &.{}, &.{}, &.{});
+                try accept(s, a, b, k, .source, stale, keep, &.{}, &.{}, &.{}, log);
             } else log.plan = "none";
             return;
         }
@@ -373,7 +425,7 @@ fn reject(s: *State, f: *Fact, why: []const u8) void {
     f.why = why;
 }
 
-fn accept(s: *State, a: Allocator, b: anytype, k: u32, plan: Plan, stale: []*Fact, keep: []*Fact, due: []*Fact, sorted: []const *Fact, taught: []const Taught) !void {
+fn accept(s: *State, a: Allocator, b: anytype, k: u32, plan: Plan, stale: []*Fact, keep: []*Fact, due: []*Fact, sorted: []const *Fact, taught: []const Taught, log: *NightLog) !void {
     const keptOf = struct {
         fn of(list: []const *Fact, ts: []const Taught, f: *Fact) ?Taught {
             for (list, ts) |x, t| if (x == f) return t;
@@ -392,7 +444,7 @@ fn accept(s: *State, a: Allocator, b: anytype, k: u32, plan: Plan, stale: []*Fac
             f.status = .promoted;
             f.alone = 0;
             f.why = "taught again in the rebuilt pocket";
-            try probesOf(s, a, b, f, t.?);
+            try probesOf(s, a, b, f, t.?, log);
         } else {
             f.status = .note;
             f.alone = 0;
@@ -412,7 +464,7 @@ fn accept(s: *State, a: Allocator, b: anytype, k: u32, plan: Plan, stale: []*Fac
             f.night = k;
             f.alone = 0;
             f.why = "promoted";
-            try probesOf(s, a, b, f, t);
+            try probesOf(s, a, b, f, t, log);
         } else {
             f.status = .missed;
             f.why = if (t.why.len > 0) try s.alloc().dupe(u8, t.why) else "missed: the learner did not keep it; it stays a note";

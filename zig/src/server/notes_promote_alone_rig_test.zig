@@ -165,3 +165,62 @@ test "promotion alone rig: two facts that answer only through each other's note 
         }
     }
 }
+
+/// The probe log's lines of one kind, as JSON.
+fn linesOf(a: std.mem.Allocator, r: *rig.Rig, kind: []const u8) ![]const json.Value {
+    const bytes = r.tmp.dir.readFileAlloc(testing.io, "snap.json.promote-probes.jsonl", a, .limited(1 << 22)) catch |e| return if (e == error.FileNotFound) &.{} else e;
+    var out: std.ArrayList(json.Value) = .empty;
+    var it = std.mem.splitScalar(u8, bytes, '\n');
+    while (it.next()) |line| if (line.len > 0) {
+        const v = switch (try json.parse(a, line)) {
+            .ok => |x| x,
+            .err => return error.BadLine,
+        };
+        if (std.mem.eql(u8, v.strField("kind") orelse "", kind)) try out.append(a, v);
+    };
+    return out.items;
+}
+
+test "promotion alone rig: a state file's probe whose reference does not give its fact is dropped at the start, once" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const r = try rig.Rig.init(testing.allocator);
+    defer r.deinit();
+    // run6 stored "Who is my dog?" -> "My name is Nemotron..." beside sound probes; here the cat's, judged for real
+    var st = promote.State.init(testing.allocator, .{});
+    defer st.deinit();
+    const probes = [_]promote.Probe{
+        .{ .q = cat_q, .ref = "Your cat's eyes are green." },
+        .{ .q = "Who is my cat?", .ref = "My name is Nemotron. I am created by NVIDIA researchers." },
+        .{ .q = "What colour are my cat's eyes?", .ref = "I don't have access to your cat, so I can't see its eyes. Many cats have green eyes." },
+    };
+    try st.facts.append(st.alloc(), .{ .key = "s2", .text = cat_fact, .status = .in_weights, .alone = 2, .probes = &probes });
+    const path = try std.fmt.allocPrint(a, "{s}.promote", .{r.snap});
+    try pjson.writeFile(a, path, try pjson.encode(&st, a));
+    var why: []const u8 = "";
+    const p = try notes_promote.Promoter.init(testing.allocator, testing.io, r.srv, r.store(), r.snap, .{ .every_ms = 600_000 }, &why);
+    const kept = p.state.find("s2").?.probes;
+    try testing.expectEqual(@as(usize, 1), kept.len);
+    try testing.expectEqualStrings(cat_q, kept[0].q);
+    // the backend a night writes probes with: a reference written again (sampled), judged against the fact
+    var e: Reader = .{};
+    r.srv.engine = e.engine();
+    var b: @import("notes_promote_backend.zig").Backend = .{ .p = p, .arena = a };
+    try testing.expectEqualStrings("Your cat's eyes are green.", try b.referenceAgain(a, cat_fact, cat_q)); // the fact told
+    try testing.expect(b.gives(cat_fact, cat_q, "Your cat's eyes are green."));
+    try testing.expect(!b.gives(cat_fact, "Who is my cat?", probes[1].ref));
+    p.deinit();
+    const dropped = try linesOf(a, r, "dropped");
+    try testing.expectEqual(@as(usize, 2), dropped.len);
+    try testing.expectEqualStrings("Who is my cat?", dropped[0].strField("q").?);
+    try testing.expectEqualStrings("s2", dropped[0].strField("key").?);
+    try testing.expect(std.mem.startsWith(u8, dropped[1].strField("why").?, "on load"));
+    // written back: a second start finds nothing to drop
+    var back = try pjson.decode(testing.allocator, try r.tmp.dir.readFileAlloc(testing.io, "snap.json.promote", a, .limited(1 << 22)), .{});
+    defer back.deinit();
+    try testing.expectEqual(@as(usize, 1), back.find("s2").?.probes.len);
+    const again = try notes_promote.Promoter.init(testing.allocator, testing.io, r.srv, r.store(), r.snap, .{ .every_ms = 600_000 }, &why);
+    again.deinit();
+    try testing.expectEqual(@as(usize, 2), (try linesOf(a, r, "dropped")).len);
+}
