@@ -76,7 +76,7 @@ fn reply(srv: *Server, conn: *Conn, a: Allocator, r: Route) Allocator.Error!void
             error.OutOfMemory => error.OutOfMemory,
             error.Refused => fail(conn, a, why.status, why.message),
         };
-        return send(conn, a, 200, try erasedValue(srv, a, r.id.?, done));
+        return send(conn, a, if (done.warning != null) 500 else 200, try erasedValue(srv, a, r.id.?, done));
     }
     const allowed: []const []const u8 = if (delete) &.{"text"} else if (r.id != null) &.{"text"} else &.{ "text", "subject", "replaces" };
     if (v == .object) for (v.object.keys()) |k| {
@@ -180,6 +180,7 @@ fn writtenValue(a: Allocator, op: write.Op, w: ops.Written) Allocator.Error!Valu
 }
 
 fn erasedValue(srv: *Server, a: Allocator, id: u32, e: ops.Erased) Allocator.Error!Value {
+    defer srv.text.forget(); // span discovery itself encodes the erased text again
     const o = try json.newObject(a);
     try o.put(a, "erased", try json.intValue(a, id));
     const removed = try a.alloc(Value, e.removed.len);
@@ -195,7 +196,14 @@ fn erasedValue(srv: *Server, a: Allocator, id: u32, e: ops.Erased) Allocator.Err
     try o.put(a, "renumbered", .{ .array = moved });
     // the store's own structures and the journal hold it no more; every other place that may is named, and only
     // when none may is the erase complete
-    const status = places.check(srv, places.forget(srv, a, e.texts));
+    var status = places.check(srv, places.forget(srv, a, e.texts));
+    if (e.warning) |warning| {
+        status.set(.journal, .may_hold);
+        const err = try json.newObject(a);
+        try err.put(a, "message", .{ .string = warning });
+        try err.put(a, "type", .{ .string = "server_error" });
+        try o.put(a, "error", .{ .object = err });
+    }
     var remaining: std.ArrayList(Value) = .empty;
     var names: std.ArrayList(Value) = .empty;
     const checked = try json.newObject(a);

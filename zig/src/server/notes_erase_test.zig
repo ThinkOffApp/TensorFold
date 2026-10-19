@@ -7,6 +7,61 @@ const testing = std.testing;
 const Allocator = std.mem.Allocator;
 const Alignment = std.mem.Alignment;
 
+test "unsynced erase still forgets encodes and reports remaining places" {
+    const r = try rig.Rig.initKind(testing.allocator, .postings, 1024);
+    defer r.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const made = try rig.request(r.srv, a, "POST", "/v1/notes", "{\"text\":\"My zebra likes purple apples.\",\"subject\":\"my zebra\"}");
+    const id = made.value.get("id").?.int64().?;
+    var faults: @import("notes/journal.zig").Faults = .{ .dir = 0 };
+    r.store().journal.?.faults = &faults;
+    const before = r.text.forgot;
+    const result = try rig.request(r.srv, a, "DELETE", try std.fmt.allocPrint(a, "/v1/notes/{d}?erase=true", .{id}), "");
+    try testing.expectEqual(@as(u16, 500), result.status);
+    try testing.expect(r.text.forgot >= before + 2);
+    try testing.expect(result.value.get("places") != null);
+    try testing.expectEqualStrings("may_hold", result.value.get("places").?.get("journal").?.string);
+}
+
+test "erase replaces alias memo with only the rebuilt model" {
+    const r = try rig.Rig.initKind(testing.allocator, .postings, 1024);
+    defer r.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const made = try rig.request(r.srv, a, "POST", "/v1/notes", "{\"text\":\"My dog is called Zyqora now.\",\"replaces\":5}");
+    const id = made.value.get("id").?.int64().?;
+    _ = try rig.request(r.srv, a, "POST", "/v1/notes", "{\"text\":\"My dog likes apples.\",\"subject\":\"my dog\"}");
+    const erased = try rig.request(r.srv, a, "DELETE", try std.fmt.allocPrint(a, "/v1/notes/{d}?erase=true", .{id}), "");
+    try testing.expectEqual(@as(u16, 200), erased.status);
+    try testing.expectEqual(@as(usize, 0), r.text.encodes_since_forget.load(.monotonic));
+    const s = r.store();
+    try testing.expect(s.bw.alias_memo.model == @as(*const anyopaque, s.model));
+    try testing.expectEqual(s.model.notes.items.len - 1, s.bw.alias_memo.scanned);
+    for (s.bw.alias_memo.names.items) |entry| {
+        try testing.expect(entry.place < s.model.notes.items.len);
+        try testing.expect(std.mem.indexOf(u8, s.model.notes.items[entry.place].text(), "Zyqora") == null);
+    }
+}
+
+test "scratch acquired before erase cannot rejoin the new epoch pool" {
+    const r = try rig.Rig.initKind(testing.allocator, .postings, 1024);
+    defer r.deinit();
+    const s = r.store();
+    const v = s.acquire();
+    defer s.release(v);
+    // Pause the reader between acquire and take, across the erase's epoch bump.
+    s.lock.lockUncancelable(s.io);
+    s.epoch += 1;
+    s.lock.unlock(s.io);
+    const k = try s.take(v.idx, v.epoch);
+    s.give(k);
+    s.sweep();
+    try testing.expectEqual(@as(usize, 0), s.free.items.len);
+}
+
 /// Keeps every live allocation, so a test can search all the memory the store holds (as LLWZ's walk_for walks it).
 pub const Tracking = struct {
     child: Allocator,
@@ -173,7 +228,7 @@ fn eraseRun(kind: @import("notes_store.zig").IndexKind, deferred: bool) !Found {
         try r.store().merge(); // the later merge the deferred erase waited for
         return .{ .before = before, .after = after, .again = try look(&tracking, r, a, own.items, own_keys.items) };
     }
-    try testing.expectEqual(@as(u32, 1), r.text.forgot); // the tokenizer dropped its kept encodes (a block quoted it)
+    try testing.expectEqual(@as(u32, 2), r.text.forgot); // store cleanup, then cleanup of the erase span search's encodes
     // what stays is what never teaching it gives: the other zebra note, current, and the questions still answer
     const left = try r.store().retrieve(a, text, try text.encode(a, qs[2], false), false, 512, &.{});
     try testing.expect(std.mem.indexOf(u8, left.block, "My zebra likes apples.") != null);

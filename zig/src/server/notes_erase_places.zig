@@ -7,6 +7,7 @@ const line = @import("notes/line.zig");
 
 /// A place outside the store and the journal that can hold a note's text or tokens.
 pub const Place = enum {
+    journal,
     prompt_cache,
     learn_files,
     responses,
@@ -19,6 +20,7 @@ pub const Place = enum {
     /// What may still hold the note there, said to the client.
     pub fn why(p: Place) []const u8 {
         return switch (p) {
+            .journal => "the rewritten journal's folder could not be synced; a power cut may restore the old journal containing the note",
             .prompt_cache => "the engine's prompt cache may still hold prompt states (and their tokens) of requests that carried this note's block: the engine could not forget them, or could not show they are gone (a note of two words or fewer, a state a running request restores); serve with --prompt-cache-gib 0 for an erase that reaches every cache",
             .learn_files => "--learn keeps shared prompt states on disk, and the notes block lies inside a shared system block, so a learned state file may hold this note's tokens; the engine could not search and remove them",
             .responses => "stored Responses (/v1/responses with store) keep their conversations in memory, and one may quote this note",
@@ -37,6 +39,7 @@ pub const Status = enum { may_hold, off, empty, forgotten };
 
 /// What the engine's forget of the erased notes' tokens did (Engine.forgetPrompts, once per note).
 pub const Forget = struct {
+    holders: bool = false,
     asked: bool = false, // the engine was asked (the erase removed at least one note)
     ok: bool = false, // every call answered: none Unsupported, Closed or Busy
     short: bool = false, // a note too short to find by its tokens alone: a match cannot be shown
@@ -103,7 +106,7 @@ fn insideEveryWrapper(a: std.mem.Allocator, text: model_text.Text, note: []const
 /// Every erased note forgotten by the engine, by the tokens its quoted text has in a block: kept prompt states and
 /// --learn files that hold them.
 pub fn forget(srv: *Server, a: std.mem.Allocator, notes: []const []const u8) Forget {
-    var f: Forget = .{};
+    var f: Forget = .{ .holders = srv.prompt_holders.load(.acquire) > 0 or srv.preparing.load(.acquire) > 0 };
     for (notes) |note| {
         const found = spanOf(a, srv.text, note) catch null;
         const span = found orelse blk: {
@@ -136,15 +139,17 @@ pub fn forget(srv: *Server, a: std.mem.Allocator, notes: []const []const u8) For
 /// Each place's status, by the server's own flags and stores now and what the engine's forget showed.
 pub fn check(srv: *Server, forgot: Forget) std.EnumArray(Place, Status) {
     var out: std.EnumArray(Place, Status) = .initFill(.off);
-    out.set(.prompt_cache, if (!srv.info.prompt_cache) .off else if (forgot.cacheClear()) .forgotten else .may_hold);
-    out.set(.learn_files, if (!srv.config.learn) .off else if (srv.info.prompt_cache and forgot.diskClear()) .forgotten else .may_hold);
+    const held = forgot.holders or srv.prompt_holders.load(.acquire) > 0 or srv.preparing.load(.acquire) > 0;
+    out.set(.prompt_cache, if (!srv.info.prompt_cache) .off else if (!held and forgot.cacheClear()) .forgotten else .may_hold);
+    out.set(.learn_files, if (!held and srv.config.learn and srv.info.prompt_cache and forgot.diskClear()) .forgotten else .may_hold);
     out.set(.responses, if (srv.store.count(srv.io) > 0) .may_hold else .empty); // always on: empty is what shows it holds nothing
     out.set(.cortheon, if (srv.cortheon) |c| (if (c.memory.count() > 0) .may_hold else .empty) else .off);
-    out.set(.compaction_memory, if (srv.config.compact_memory != null) .may_hold else .off);
-    out.set(.request_log, if (srv.config.request_log != null) .may_hold else .off);
+    // Today's flags cannot locate or rule out files written by earlier runs.
+    out.set(.compaction_memory, .may_hold);
+    out.set(.request_log, .may_hold);
     out.set(.promotion, if (srv.config.slide) .may_hold else if (srv.slide.count() > 0) .may_hold else .off);
     var engine: @import("engine_api").Status = .{};
     srv.engine.status(&engine, &.{});
-    out.set(.requests, if (engine.running + engine.waiting > 0 or forgot.out.in_flight > 0) .may_hold else .empty);
+    out.set(.requests, if (held or engine.running + engine.waiting > 0 or forgot.out.in_flight > 0) .may_hold else .empty);
     return out;
 }

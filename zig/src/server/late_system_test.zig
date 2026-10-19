@@ -89,6 +89,9 @@ const Capture = struct {
     background_born: u32 = 0,
     reply: []const u8 = "hi",
     warm_turns: bool = false,
+    holder_server: ?*server.Server = null,
+    foreground_held: bool = false,
+    background_held: bool = false,
 
     fn engine(e: *@This()) api.Engine {
         return .{ .ctx = e, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
@@ -101,6 +104,9 @@ const Capture = struct {
 
     fn submit(ctx: *anyopaque, id: api.Id, request: *const api.Request, sink: api.Sink) api.SubmitError!void {
         const e: *Capture = @ptrCast(@alignCast(ctx));
+        if (e.holder_server) |srv| {
+            if (request.background) e.background_held = srv.prompt_holders.load(.acquire) >= 2 else e.foreground_held = srv.prompt_holders.load(.acquire) >= 1;
+        }
         if (request.background) {
             std.testing.allocator.free(e.background_prompt);
             e.background_prompt = std.testing.allocator.dupe(u32, request.prompt) catch return error.Busy;
@@ -247,6 +253,7 @@ test "tool reply prose survives whole chat, Messages and Responses and their war
         .use_drafts = false,
     }, null);
     defer srv.deinit();
+    backend.holder_server = srv;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -257,6 +264,8 @@ test "tool reply prose survives whole chat, Messages and Responses and their war
     };
     for (requests, 0..) |request, route| {
         const got = try exchange(srv, request.path, request.body);
+        try std.testing.expect(backend.foreground_held and backend.background_held);
+        try std.testing.expectEqual(@as(u64, 0), srv.prompt_holders.load(.acquire));
         defer std.testing.allocator.free(got.body);
         try std.testing.expectEqual(@as(u16, 200), got.status);
         const body = (try json.parse(a, got.body)).ok;

@@ -18,6 +18,7 @@ pub const Job = struct {
     mark: usize, // how many retired places the store had listed then: the ones after it are the new core's
     thread: std.Thread = undefined,
     done: std.atomic.Value(bool) = .init(false),
+    cancelled: std.atomic.Value(bool) = .init(false),
     result: ?*index.Index = null,
 
     /// Starts a merge of version `v` (a layered one), its index retained here. O(1) for the caller.
@@ -31,13 +32,17 @@ pub const Job = struct {
     }
 
     fn run(j: *Job) void {
-        while (hold.load(.acquire)) std.atomic.spinLoopHint();
-        j.result = core_build.fromVersion(j.gpa, j.from) catch null; // null: the next merge starts again
+        while (hold.load(.acquire) and !j.cancelled.load(.acquire)) std.Thread.yield() catch {};
+        if (!j.cancelled.load(.acquire)) j.result = core_build.fromVersionCancellable(j.gpa, j.from, &j.cancelled) catch null;
         j.done.store(true, .release);
     }
 
     pub fn ready(j: *const Job) bool {
         return j.done.load(.acquire);
+    }
+
+    pub fn cancel(j: *Job) void {
+        j.cancelled.store(true, .release);
     }
 
     /// Waits for the merge, lets its version go and frees the job; the core it made (the caller's reference), or null.

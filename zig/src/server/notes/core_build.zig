@@ -12,6 +12,11 @@ const Allocator = std.mem.Allocator;
 
 /// A full suffix-array index of `v`'s notes; `v` is a layered version (its core has a base).
 pub fn fromVersion(gpa: Allocator, v: *const Index) index.LoadError!*Index {
+    return fromVersionCancellable(gpa, v, null);
+}
+
+pub fn fromVersionCancellable(gpa: Allocator, v: *const Index, cancel: ?*const std.atomic.Value(bool)) index.LoadError!*Index {
+    try cancelled(cancel);
     const c = v.layer.core orelse return error.Unsupported;
     const cn = v.layer.core_n;
     const old = c.base orelse return error.Unsupported;
@@ -47,6 +52,7 @@ pub fn fromVersion(gpa: Allocator, v: *const Index) index.LoadError!*Index {
     const cost = try a.alloc(u32, n);
     var least: i64 = std.math.maxInt(i64);
     for (0..n) |k| {
+        if (k % 256 == 0) try cancelled(cancel);
         const p: u32 = @intCast(k);
         id[k] = v.idAt(p);
         state[k] = v.stateAt(p);
@@ -137,11 +143,16 @@ pub fn fromVersion(gpa: Allocator, v: *const Index) index.LoadError!*Index {
     }
     if (old.notes != cn) return error.Unsupported;
     self.retired = try index.retiredBits(a, n);
-    self.base = try sa.merge(gpa, old, src, self.vwordy);
+    try cancelled(cancel);
+    self.base = try sa.mergeCancellable(gpa, old, src, self.vwordy, cancel);
     self.side_keys = .{};
     self.grams = .empty;
     self.post = &.{};
     return self;
+}
+
+fn cancelled(flag: ?*const std.atomic.Value(bool)) index.LoadError!void {
+    if (flag) |f| if (f.load(.acquire)) return error.Unsupported;
 }
 
 fn groups(a: Allocator, gpa: Allocator, count: usize, v: *const Index, which: enum { cur, keys, pairs }) Allocator.Error!Groups {

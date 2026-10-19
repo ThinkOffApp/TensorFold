@@ -238,8 +238,8 @@ test "erase forgets the note's kept prompt state and --learn file as the block q
         const places = seen.reply.value.get("places").?;
         try testing.expectEqualStrings("forgotten", places.get("prompt_cache").?.string);
         try testing.expectEqualStrings("forgotten", places.get("learn_files").?.string);
-        try testing.expect(seen.reply.value.get("complete").?.bool);
-        try testing.expectEqualStrings("complete", seen.reply.value.get("state").?.string);
+        try testing.expect(!seen.reply.value.get("complete").?.bool);
+        try testing.expectEqualStrings("pending", seen.reply.value.get("state").?.string);
         // the first fix searched the raw text's tokens: for an escaped note they are not in the prompt at all
         if (!std.mem.eql(u8, case.raw, case.rendered[1 .. case.rendered.len - 1])) try testing.expect(!seen.old_search_found);
         // a restart: the store from its files, and the learned index read again

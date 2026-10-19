@@ -69,10 +69,11 @@ pub const Writes = struct {
     /// Waits for a merge in flight and drops what it made (an erase, an on-demand merge, the store's end).
     pub fn stop(w: *Writes) void {
         if (w.merging) |j| {
-            if (j.finish()) |c| c.deinit();
+            j.cancel();
+            if (j.finish()) |c| w.reaper.drop(c);
             w.merging = null;
         }
-        if (w.pending) |p| p.core.deinit();
+        if (w.pending) |p| w.reaper.drop(p.core);
         w.pending = null;
     }
 };

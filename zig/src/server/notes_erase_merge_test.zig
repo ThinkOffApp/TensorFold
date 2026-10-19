@@ -11,6 +11,47 @@ const testing = std.testing;
 const secret = "My zebra is called Quixotic Zanzibar.";
 const question = "What is my zebra called?";
 
+test "cancelled merge skips core construction and frees its held source" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const r = try rig.Rig.initWith(testing.allocator, .{ .kind = .sa, .side_max = 2 });
+    defer r.deinit();
+    merge.hold.store(true, .release);
+    defer merge.hold.store(false, .release);
+    _ = try add(r, a, secret, "my zebra");
+    _ = try add(r, a, "My zebra likes apples.", "my zebra");
+    _ = try add(r, a, "My sister is Anna.", "my sister");
+    const s = r.store();
+    const job = s.bw.merging.?;
+    var flag: std.atomic.Value(bool) = .init(true);
+    try testing.expectError(error.Unsupported, @import("notes/core_build.zig").fromVersionCancellable(testing.allocator, job.from, &flag));
+    job.cancel();
+    // Release the artificial hold too, so ignoring cancellation fails without hanging the test.
+    merge.hold.store(false, .release);
+    s.bw.merging = null;
+    const result = job.finish();
+    defer if (result) |core| core.deinit();
+    try testing.expect(result == null);
+}
+
+test "refused erase leaves a finished background merge available" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const r = try rig.Rig.initWith(testing.allocator, .{ .kind = .sa, .side_max = 2 });
+    defer r.deinit();
+    _ = try add(r, a, secret, "my zebra");
+    _ = try add(r, a, "My zebra likes apples.", "my zebra");
+    _ = try add(r, a, "My sister is Anna.", "my sister");
+    const s = r.store();
+    const job = s.bw.merging.?;
+    while (!job.ready()) std.atomic.spinLoopHint();
+    const refused = try rig.request(r.srv, a, "DELETE", "/v1/notes/999999?erase=true", null);
+    try testing.expectEqual(@as(u16, 404), refused.status);
+    try testing.expect(s.bw.merging == job);
+}
+
 fn add(r: *rig.Rig, a: std.mem.Allocator, text: []const u8, subject: []const u8) !i64 {
     const body = try std.fmt.allocPrint(a, "{{\"text\": \"{s}\", \"subject\": \"{s}\"}}", .{ text, subject });
     const got = try rig.request(r.srv, a, "POST", "/v1/notes", body);

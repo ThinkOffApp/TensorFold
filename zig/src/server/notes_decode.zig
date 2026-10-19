@@ -260,7 +260,7 @@ pub const Live = struct {
                 return null;
             },
         };
-        const k = try s.take(idx);
+        const k = try s.take(idx, v.epoch);
         defer s.give(k);
         const sc = &k.sc;
         const got = try lookup.lookup(idx, sc, qids, l.past, l.cap, try std.mem.concat(a, u32, &.{ l.exclude, l.held.items }), s.long);

@@ -1,5 +1,17 @@
 # The note lookup inside the native server (`--notes`), and writes to it while it runs
 
+## Integration-3 erase corrections (19 October 2026, branch work)
+
+Erase clears the tokenizer memo again after discovering the engine-forget spans. It replaces the alias memo with one built from the rebuilt model, and scratch buffers carry the acquired version's erase epoch rather than the epoch at scratch allocation.
+
+An erase applied in memory whose journal rename could not be synced still runs engine forgetting. Its HTTP 500 retains the error message and includes the normal place report, with `journal: may_hold` and `complete: false`.
+
+Disabled disk writers do not prove files from earlier runs empty. Without a search, learned files remain `may_hold`; compaction files and request logs remain `may_hold` regardless of today's flags. This conservative report does not search or delete those files and can keep an otherwise successful erase pending.
+
+Requests are counted from before prompt planning through reply and Cortheon remembering; asynchronous warm passes retain a separate count until completion. Erase latches outstanding holders before engine forgetting and reports requests, enabled prompt caches and learned files as uncertain while holders may restore old prompt states. This is accounting, not cancellation or a deadline guarantee.
+
+Refused erases preserve background merges. Applied erases cancel a merge cooperatively and hand discarded cores to the reaper, then wait for cleanup before answering. Cancellation checkpoints do not interrupt an allocation, zeroing operation or individual sort; no wall-clock bound is claimed.
+
 LLWZ's note lookup (paper section 4.2) run inside `tensorfold-native`, per chat request, before the prompt is rendered and prefilled, and checked against LLWZ's own Python question by question. Written 15 October 2026 on branch `notes-in-engine` of our fork (ThinkOffApp/TensorFold), from upstream `main` at `c7137bb3`. Not pushed; no pull request.
 
 Grades, as in LLWZ's NOTES-ZIG.md: **MEASURED** means we ran it, on the machine stated above each table. **READ** means we read it in code or a document. **INFERRED** means our own reasoning, not checked by a run. Every number below was measured on this Mac on 15 October 2026.

@@ -143,6 +143,7 @@ pub fn perform(s: *Store, a: Allocator, ask: Ask, why: *Refusal) Error!Written {
 
 /// What an erase did: the writes it took out, the ids that moved (old, new), and what it could not reach.
 pub const Erased = struct {
+    warning: ?[]const u8 = null,
     removed: []const []const u8,
     moved: []const [2]u32,
     /// The text of every note the removed writes made, copied out before the old model was freed: what the engine's
@@ -156,7 +157,6 @@ pub fn erase(s: *Store, a: Allocator, id: u32, why: *Refusal) Error!Erased {
     defer s.writer.unlock(s.io);
     if (s.read_only.len > 0) return refuse(why, 503, s.read_only);
     if (poisoned(s)) return refuse(why, 503, needs_recovery);
-    s.bw.stop(); // a merge in flight reads the model this erase replaces, and would keep the note's keys
     const old = s.model;
     const p = old.placeOf(id) orelse return refuse(why, 404, "no note has this id");
     if (p < old.base_notes) return refuse(why, 409, "this note comes from the snapshot: erase it in LLWZ (NoteStore.delete) and export again");
@@ -198,7 +198,9 @@ pub fn erase(s: *Store, a: Allocator, id: u32, why: *Refusal) Error!Erased {
     const idx = index.Index.buildKind(s.gpa, fresh, s.kind) catch return error.OutOfMemory;
     var idx_owned = true;
     defer if (idx_owned) idx.deinit();
-    @import("notes/alias.zig").populate(idx, fresh, s.text) catch return error.OutOfMemory;
+    var alias_memo: @import("notes/alias.zig").Memo = .{ .gpa = s.gpa };
+    defer alias_memo.deinit(s.gpa);
+    @import("notes/alias.zig").populateMemo(idx, fresh, s.text, &alias_memo) catch return error.OutOfMemory;
     const v = try s.gpa.create(store_mod.Version);
     var v_owned = true; // not an errdefer: an erase applied but not certain on disk returns a refusal after the swap
     defer if (v_owned) s.gpa.destroy(v);
@@ -220,6 +222,7 @@ pub fn erase(s: *Store, a: Allocator, id: u32, why: *Refusal) Error!Erased {
         error.JournalIo => return refuse(why, 500, "the journal could not be rewritten without the note; nothing was erased"),
         error.RenamedUnsynced => unsynced = true, // the file at the journal's name lacks it now: so must the memory
     };
+    s.bw.stop(); // only an applied erase invalidates the merge's old keys
     // the journal no longer holds it: swap, wait for every lookup of the old versions, free them all (zeroed)
     idx_owned = false;
     v_owned = false;
@@ -229,22 +232,23 @@ pub fn erase(s: *Store, a: Allocator, id: u32, why: *Refusal) Error!Erased {
     s.next_ver += 1;
     s.bw.core_retired.clearRetainingCapacity(); // a full build: no core notes retired since
     s.model = fresh;
+    s.bw.alias_memo.deinit(s.gpa);
+    s.bw.alias_memo = alias_memo;
+    alias_memo = .{};
     var old_log = s.log;
     s.log = log;
     old_log.deinit();
     if (s.defer_erase_merge) {
         // the negative control of the erase tests: the note hidden now, its bytes left to a later merge
         s.parked.append(s.gpa, old) catch old.deinit();
-        if (unsynced) return refuse(why, 500, erase_unsynced); // as below: applied, the disk state unknown
-        return .{ .removed = removed.items, .moved = moved.items, .texts = texts.items };
+        return .{ .removed = removed.items, .moved = moved.items, .texts = texts.items, .warning = if (unsynced) erase_unsynced else null };
     }
     s.reclaim(true);
     s.bw.reaper.join(); // an old core is freed (zeroed) on its own thread: done before the erase answers
     old.deinit();
     s.sweep();
     s.text.forget(); // the tokenizer's kept encodes: a block or a prompt that quoted it
-    if (unsynced) return refuse(why, 500, erase_unsynced); // the journal is poisoned: writes stop until a restart
-    return .{ .removed = removed.items, .moved = moved.items, .texts = texts.items };
+    return .{ .removed = removed.items, .moved = moved.items, .texts = texts.items, .warning = if (unsynced) erase_unsynced else null };
 }
 
 /// The snapshot as at startup: its file read again (and checked against the journal's hash), or the kept bytes.

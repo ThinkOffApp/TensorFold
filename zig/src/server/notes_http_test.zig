@@ -91,7 +91,7 @@ test "each endpoint answers, and refuses what it must with the status and messag
     const erased = try rig.request(srv, a, "DELETE", "/v1/notes/30?erase=true", null);
     try testing.expectEqual(@as(u16, 200), erased.status);
     try testing.expectEqual(@as(usize, 1), erased.value.get("removed").?.array.len);
-    try testing.expect(erased.value.get("complete").?.bool); // this engine keeps no prompt cache
+    try testing.expect(!erased.value.get("complete").?.bool); // earlier disk writers cannot be ruled out
 }
 
 test "without --notes the routes say so, and a store without a journal refuses writes" {

@@ -213,7 +213,7 @@ fn radix(xs: []Entry, tmp: []Entry, bits: usize) void {
 
 /// The base over `notes` (places 0..len-1); the ids of one key must agree on `vwordy` (Unsupported otherwise).
 pub fn build(gpa: Allocator, notes: []const Source, vwordy: []const bool) BuildError!*Base {
-    return buildOn(gpa, null, notes, vwordy);
+    return buildOn(gpa, null, notes, vwordy, null);
 }
 
 /// build() of `notes` whose first `old.notes` are the notes `old` was built over (the same keys, by place; their
@@ -222,7 +222,15 @@ pub fn build(gpa: Allocator, notes: []const Source, vwordy: []const bool) BuildE
 /// separator, so suffixes of two sets of notes order without reading across them; the dictionary's new codes keep
 /// the old keys' order, so the old arrays stay sorted under them.
 pub fn merge(gpa: Allocator, old: *const Base, notes: []const Source, vwordy: []const bool) BuildError!*Base {
-    return buildOn(gpa, old, notes, vwordy);
+    return mergeCancellable(gpa, old, notes, vwordy, null);
+}
+
+pub fn mergeCancellable(gpa: Allocator, old: *const Base, notes: []const Source, vwordy: []const bool, cancel: ?*const std.atomic.Value(bool)) BuildError!*Base {
+    return buildOn(gpa, old, notes, vwordy, cancel);
+}
+
+fn cancelled(flag: ?*const std.atomic.Value(bool)) BuildError!void {
+    if (flag) |f| if (f.load(.acquire)) return error.Unsupported;
 }
 
 /// Every note's keys as `b` holds them (its text decoded by the dictionary), flat, with each note's start: what a
@@ -250,7 +258,8 @@ pub fn noteKeys(gpa: Allocator, b: *const Base) Allocator.Error!struct { keys: [
 /// Tests only: a merge that keeps each old note in the view the old base had it in (the bug its test must catch).
 pub var merge_plant_stale_views: bool = false;
 
-fn buildOn(gpa: Allocator, old_in: ?*const Base, notes: []const Source, vwordy: []const bool) BuildError!*Base {
+fn buildOn(gpa: Allocator, old_in: ?*const Base, notes: []const Source, vwordy: []const bool, cancel: ?*const std.atomic.Value(bool)) BuildError!*Base {
+    try cancelled(cancel);
     const b = try gpa.create(Base);
     b.* = .{ .mem = exact.Exact.init(gpa) };
     errdefer {
@@ -276,6 +285,7 @@ fn buildOn(gpa: Allocator, old_in: ?*const Base, notes: []const Source, vwordy: 
     var codes: std.AutoHashMapUnmanaged(u32, u32) = .empty;
     defer codes.deinit(gpa);
     for (notes) |n| for (n.keys) |k| {
+        try cancelled(cancel);
         try codes.put(gpa, k, 0);
     };
     const distinct = codes.count();
@@ -390,6 +400,7 @@ fn buildOn(gpa: Allocator, old_in: ?*const Base, notes: []const Source, vwordy: 
         radix(view, tmp[0..view.len], 3 * @as(usize, cw));
         var lo: usize = 0;
         while (lo < view.len) {
+            try cancelled(cancel);
             var hi = lo + 1;
             while (hi < view.len and view[hi].prefix == view[lo].prefix) hi += 1;
             const p = view[lo].pos;
@@ -404,8 +415,10 @@ fn buildOn(gpa: Allocator, old_in: ?*const Base, notes: []const Source, vwordy: 
     if (old) |o| {
         const order: Order = .{ .text = text, .cw = cw, .fits = fits };
         const skip: u32 = if (moved) |q| @intCast(q) else std.math.maxInt(u32);
-        mergeView(o, notes, order, skip, true, ents[0..new_cur], b.sa_cur);
-        mergeView(o, notes, order, skip, false, ents[new_cur..], b.sa_hist);
+        mergeView(o, notes, order, skip, true, ents[0..new_cur], b.sa_cur, cancel);
+        try cancelled(cancel);
+        mergeView(o, notes, order, skip, false, ents[new_cur..], b.sa_hist, cancel);
+        try cancelled(cancel);
     } else {
         for (ents[0..n_cur], 0..) |e, i| b.sa_cur.put(i, e.pos);
         for (ents[n_cur..], 0..) |e, i| b.sa_hist.put(i, e.pos);
@@ -439,14 +452,16 @@ const Order = struct {
 
 /// One view of a merge: the old base's suffixes of notes in that view now (from either old array, each already in
 /// suffix order) and the newer notes' (sorted), merged three ways into `out`.
-fn mergeView(old: *const Base, notes: []const Source, order: Order, skip: u32, cur: bool, fresh: []const Entry, out: Packed) void {
+fn mergeView(old: *const Base, notes: []const Source, order: Order, skip: u32, cur: bool, fresh: []const Entry, out: Packed, cancel: ?*const std.atomic.Value(bool)) void {
     const Run = struct {
         arr: Packed,
         view: bool, // the view this old array held
         i: usize = 0,
         skip: u32,
+        cancel: ?*const std.atomic.Value(bool),
         fn next(r: *@This(), o: *const Base, ns: []const Source, want: bool) ?u32 {
             while (r.i < r.arr.len) {
+                if (r.i % 256 == 0) if (r.cancel) |f| if (f.load(.acquire)) return null;
                 const p = r.arr.get(r.i);
                 r.i += 1;
                 if (p == r.skip) continue; // sorted with the newer notes' suffixes
@@ -456,13 +471,14 @@ fn mergeView(old: *const Base, notes: []const Source, order: Order, skip: u32, c
             return null;
         }
     };
-    var ra: Run = .{ .arr = old.sa_cur, .view = true, .skip = skip };
-    var rb: Run = .{ .arr = old.sa_hist, .view = false, .skip = skip };
+    var ra: Run = .{ .arr = old.sa_cur, .view = true, .skip = skip, .cancel = cancel };
+    var rb: Run = .{ .arr = old.sa_hist, .view = false, .skip = skip, .cancel = cancel };
     var ha = ra.next(old, notes, cur);
     var hb = rb.next(old, notes, cur);
     var fi: usize = 0;
     var o: usize = 0;
     while (true) {
+        if (o % 256 == 0) if (cancel) |f| if (f.load(.acquire)) return;
         const hc: ?u32 = if (fi < fresh.len) fresh[fi].pos else null;
         var best: ?u32 = null;
         var which: u2 = 0;

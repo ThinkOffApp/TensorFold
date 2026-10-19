@@ -11,6 +11,34 @@ const places = @import("notes_erase_places.zig");
 const api = @import("engine_api");
 const testing = std.testing;
 
+test "prepared requests keep erase requests and prompt cache uncertain" {
+    const r = try rig.Rig.init(testing.allocator);
+    defer r.deinit();
+    r.srv.info.prompt_cache = true;
+    r.srv.preparing.store(1, .release);
+    const found = places.check(r.srv, .{ .asked = true, .ok = true });
+    try testing.expectEqual(places.Status.may_hold, found.get(.requests));
+    try testing.expectEqual(places.Status.may_hold, found.get(.prompt_cache));
+    r.srv.preparing.store(0, .release);
+    r.srv.prompt_holders.store(1, .release);
+    const held = places.check(r.srv, .{ .asked = true, .ok = true });
+    try testing.expectEqual(places.Status.may_hold, held.get(.requests));
+    try testing.expectEqual(places.Status.may_hold, held.get(.prompt_cache));
+    r.srv.prompt_holders.store(0, .release);
+    const finished = places.check(r.srv, .{ .asked = true, .ok = true, .holders = true });
+    try testing.expectEqual(places.Status.may_hold, finished.get(.requests));
+    try testing.expectEqual(places.Status.may_hold, finished.get(.prompt_cache));
+}
+
+test "disabled disk writers do not prove earlier files empty" {
+    const r = try rig.Rig.init(testing.allocator);
+    defer r.deinit();
+    const found = places.check(r.srv, .{});
+    for ([_]places.Place{ .learn_files, .compaction_memory, .request_log }) |place| {
+        try testing.expectEqual(places.Status.may_hold, found.get(place));
+    }
+}
+
 /// Teaches a note, erases it and returns the erase reply.
 fn teachAndErase(srv: *server.Server, a: std.mem.Allocator) !rig.Reply {
     const added = try rig.request(srv, a, "POST", "/v1/notes", "{\"text\": \"My favourite colour is green.\"}");
@@ -38,14 +66,14 @@ fn expectNamed(reply: rig.Reply, place: places.Place) !void {
     try testing.expectEqualStrings("may_hold", reply.value.get("places").?.get(@tagName(place)).?.string);
 }
 
-/// The reply with every place off or empty: complete, nothing named, `place` reported as `status`.
+/// This place is clear when shown so; unsearched earlier-run disk files still keep the reply pending.
 fn expectClear(reply: rig.Reply, place: places.Place, status: places.Status) !void {
     errdefer std.debug.print("{s}\n", .{reply.body});
-    try testing.expect(reply.value.get("complete").?.bool);
-    try testing.expectEqualStrings("complete", reply.value.get("state").?.string);
-    try testing.expect(!named(reply, place));
-    try testing.expectEqual(@as(usize, 0), reply.value.get("remaining").?.array.len);
-    try testing.expectEqual(@as(usize, 0), reply.value.get("remaining_places").?.array.len);
+    try testing.expect(!reply.value.get("complete").?.bool);
+    try testing.expectEqualStrings("pending", reply.value.get("state").?.string);
+    try testing.expectEqual(status == .may_hold, named(reply, place));
+    try testing.expect(named(reply, .compaction_memory));
+    try testing.expect(named(reply, .request_log));
     try testing.expectEqualStrings(@tagName(status), reply.value.get("places").?.get(@tagName(place)).?.string);
 }
 
@@ -71,8 +99,8 @@ test "erase reply: the engine's prompt cache is named while it is on, and only t
     }.set);
 }
 
-test "erase reply: --learn files are named while --learn is on, and only then" {
-    try onThenOff(.learn_files, .off, struct {
+test "erase reply: --learn files remain uncertain when the writer is disabled" {
+    try onThenOff(.learn_files, .may_hold, struct {
         fn set(srv: *server.Server, on: bool) !void {
             srv.config.learn = on;
         }
@@ -128,16 +156,16 @@ test "erase reply: Cortheon's hidden rounds are named while one is kept, not whe
     try expectClear(try teachAndErase(r.srv, arena.allocator()), .cortheon, .empty);
 }
 
-test "erase reply: compaction memory files are named while --compact-memory is set, and only then" {
-    try onThenOff(.compaction_memory, .off, struct {
+test "erase reply: compaction memory files remain uncertain when the writer is disabled" {
+    try onThenOff(.compaction_memory, .may_hold, struct {
         fn set(srv: *server.Server, on: bool) !void {
             srv.config.compact_memory = if (on) "/tmp/tf-compact-memory" else null;
         }
     }.set);
 }
 
-test "erase reply: the request log is named while TENSORFOLD_REQUEST_LOG is set, and only then" {
-    try onThenOff(.request_log, .off, struct {
+test "erase reply: the request log remains uncertain when the writer is disabled" {
+    try onThenOff(.request_log, .may_hold, struct {
         fn set(srv: *server.Server, on: bool) !void {
             srv.config.request_log = if (on) "/tmp/tf-request-log.jsonl" else null;
         }

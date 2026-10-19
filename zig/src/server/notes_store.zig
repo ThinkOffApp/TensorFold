@@ -25,7 +25,7 @@ pub const Check = enum { sha256, vocabulary_only };
 pub const tokenizer_limit: usize = 256 << 20;
 
 /// One build of the index, held by lookups; `garbage`: lines a write replaced, freed with it (oldest first).
-pub const Version = struct { idx: *index.Index, readers: std.atomic.Value(u32) = .init(0), garbage: std.ArrayList([]u8) = .empty };
+pub const Version = struct { idx: *index.Index, epoch: u64 = 0, readers: std.atomic.Value(u32) = .init(0), garbage: std.ArrayList([]u8) = .empty };
 
 /// A lookup's scratch in the pool, with the erase epoch it was made in (an older one is freed, not reused).
 const Kept = struct { sc: lookup.Scratch, epoch: u64 };
@@ -246,10 +246,9 @@ pub const Store = struct {
         return s.fixed_settings;
     }
 
-    pub fn take(s: *Store, idx: *const index.Index) Allocator.Error!*Kept {
+    pub fn take(s: *Store, idx: *const index.Index, epoch: u64) Allocator.Error!*Kept {
         s.lock.lockUncancelable(s.io);
         const kept = s.free.pop();
-        const epoch = s.epoch;
         s.lock.unlock(s.io);
         var room: usize = 0; // a scratch for fewer notes comes back with room for more: writes add them one by one
         if (kept) |k| {
@@ -294,7 +293,7 @@ pub const Store = struct {
             view.settings.resolve_subjects = resolve_subjects;
             break :blk &view;
         } else v.idx;
-        const k = try s.take(idx);
+        const k = try s.take(idx, v.epoch);
         defer s.give(k);
         const sc = &k.sc;
         const io = s.io;
@@ -359,6 +358,7 @@ pub const Store = struct {
         s.retired.appendAssumeCapacity(s.current);
         s.current = v;
         if (erase) s.epoch += 1;
+        v.epoch = s.epoch;
         if (erase) s.bw.alias_memo.model = null; // an erase's model may reuse the old one's address
     }
 

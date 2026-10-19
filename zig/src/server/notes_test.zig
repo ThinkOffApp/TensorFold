@@ -20,6 +20,7 @@ const cases_json = @embedFile("notes/testdata/l6_bytes_cases.json");
 /// Token ids are UTF-8 bytes, as the fixture's tokenizer; a prompt renders as "[role]content" lines.
 pub const Bytes = struct {
     forgot: u32 = 0, // how often a store asked it to drop what it keeps (it keeps nothing)
+    encodes_since_forget: std.atomic.Value(usize) = .init(0),
 
     pub fn text(t: *@This()) model_text.Text {
         return .{ .ctx = t, .vtable = &.{ .encode = encode, .decode = decode, .token_id = tokenId, .token_string = tokenString, .vocab_size = vocabSize, .eos_ids = eosIds, .render = render, .template_source = templateSource, .forget = forget } };
@@ -28,9 +29,12 @@ pub const Bytes = struct {
     fn forget(ctx: *anyopaque) void {
         const t: *Bytes = @ptrCast(@alignCast(ctx));
         t.forgot += 1;
+        t.encodes_since_forget.store(0, .monotonic);
     }
 
-    fn encode(_: *anyopaque, a: std.mem.Allocator, input: []const u8, _: bool) model_text.Error![]u32 {
+    fn encode(ctx: *anyopaque, a: std.mem.Allocator, input: []const u8, _: bool) model_text.Error![]u32 {
+        const t: *Bytes = @ptrCast(@alignCast(ctx));
+        _ = t.encodes_since_forget.fetchAdd(1, .monotonic);
         const ids = try a.alloc(u32, input.len);
         for (input, ids) |byte, *id| id.* = byte;
         return ids;

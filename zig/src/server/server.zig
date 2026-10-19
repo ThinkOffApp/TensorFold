@@ -93,6 +93,7 @@ pub const Server = struct {
     /// The idle keepalive on the engine's queue, armed by --keep-warm; null when off or not Metal.
     keepalive: ?*api.keepalive.Keepalive = null,
     preparing: std.atomic.Value(i64) = .init(0),
+    prompt_holders: std.atomic.Value(u64) = .init(0), // before plan through reply/remember; includes asynchronous warm passes
     arena: std.heap.ArenaAllocator,
     /// Structured output's compiler, opened by the first structured request (Python's grammar.compiler).
     grammars: ?*api.grammar.Compiler = null,
