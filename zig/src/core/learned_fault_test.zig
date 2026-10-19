@@ -321,6 +321,22 @@ test "unlink failure is observable and missing files are idempotently removed" {
     var absent: [180]u8 = undefined;
     try dirs.unlink(try std.fmt.bufPrintSentinel(&absent, "{s}/absent", .{dir}, 0));
 }
+
+test "single-file learned forget reports a blocked bin path and tolerates absent files" {
+    var buf: [128]u8 = undefined;
+    const r = try root(&buf, "single-forget");
+    var path: [160]u8 = undefined;
+    const dir = try std.fmt.bufPrintSentinel(&path, "{s}", .{r}, 0);
+    try std.testing.expectEqual(@as(c_int, 0), std.c.mkdir(dir, 0o700));
+    defer _ = std.c.rmdir(dir);
+    var binbuf: [200]u8 = undefined;
+    const blocked = try std.fmt.bufPrintSentinel(&binbuf, "{s}/{x:0>16}.bin", .{ dir, @as(u64, 7) }, 0);
+    try std.testing.expectEqual(@as(c_int, 0), std.c.mkdir(blocked, 0o700));
+    defer _ = std.c.rmdir(blocked);
+    var ctx: u8 = 0;
+    try std.testing.expectError(error.LearnedUnlink, pc.singleForgetChecked(&ctx, dir, 7));
+    try pc.singleForgetChecked(&ctx, dir, 8);
+}
 test "disk admission releases reservations and bounds repeated failure retries" {
     var admission: Admission = .{ .floor = 0, .free = Disk.free, .clock = Disk.clock };
     try std.testing.expectEqual(Admission.Result.ready, admission.reserve(".", 100));
