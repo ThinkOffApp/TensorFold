@@ -14,6 +14,36 @@ const system = [_]u32{ 1, 2, 3 };
 const with_note = system ++ note ++ [_]u32{ 9, 9, 4 }; // a block holding the note after the client's system prompt
 const without = system ++ [_]u32{ 60, 61, 62, 63 } ++ [_]u32{ 9, 9, 4 }; // an unrelated block
 
+test "forgetSpan preserves an ambiguous one-token state but reports it held" {
+    var f: Fake = .{ .gpa = testing.allocator };
+    var s = Store.init(testing.allocator, f.snapshots(), .{ .min_gap = 1, .min_prompt = 0 }, 1 << 20);
+    defer s.deinit();
+    const unrelated = system ++ [_]u32{ 60, 50, 99, 98 };
+    _ = f.pass(&s, &unrelated, .{ .marks = &.{5} });
+    try testing.expectEqual(@as(usize, 1), s.entries.items.len);
+    const out = s.forgetSpan(&note, &.{});
+    try testing.expectEqual(@as(u32, 0), out.states);
+    try testing.expectEqual(@as(u32, 1), out.held);
+    try testing.expect(!out.complete());
+    try testing.expect(keptAt(&s, &unrelated, 5));
+}
+
+test "forgetSpan scrubs a last prompt ending inside an erased span" {
+    for ([_]usize{ 4, 5, 6 }) |cut| {
+        var f: Fake = .{ .gpa = testing.allocator };
+        var s = Store.init(testing.allocator, f.snapshots(), .{ .min_gap = 1, .min_prompt = 0 }, 1 << 20);
+        defer s.deinit();
+        _ = f.pass(&s, with_note[0..cut], .{ .marks = &.{3} });
+        try testing.expectEqual(@as(usize, 1), s.entries.items.len);
+        try testing.expectEqualSlices(u32, with_note[0..cut], s.entries.items[0].last);
+        const out = s.forgetSpan(&note, &.{});
+        try testing.expectEqual(@as(u32, 0), out.states);
+        try testing.expectEqual(@as(u32, 1), out.scrubbed);
+        try testing.expect(out.complete());
+        try testing.expectEqualSlices(u32, &system, s.entries.items[0].last);
+    }
+}
+
 test "forgetSpan drops states cut inside an erased span" {
     var f: Fake = .{ .gpa = testing.allocator };
     var s = Store.init(testing.allocator, f.snapshots(), .{ .min_gap = 1, .min_prompt = 0 }, 1 << 20);
@@ -22,7 +52,8 @@ test "forgetSpan drops states cut inside an erased span" {
     try testing.expect(s.entries.items.len > 0);
     const out = s.forgetSpan(&note, &.{});
     try testing.expect(out.states > 0);
-    try testing.expectEqual(@as(usize, 0), s.entries.items.len);
+    try testing.expectEqual(@as(u32, 1), out.held);
+    try testing.expectEqual(@as(usize, 1), s.entries.items.len);
 }
 
 test "forgetSpan removes learned index records cut inside an erased span" {
@@ -41,8 +72,9 @@ test "forgetSpan removes learned index records cut inside an erased span" {
     defer s.deinit();
     s.imprint = &im;
     const out = s.forgetSpan(&note, &.{});
-    try testing.expectEqual(@as(u32, 3), out.learned);
-    try testing.expectEqual(@as(usize, 0), im.metas.items.len);
+    try testing.expectEqual(@as(u32, 2), out.learned);
+    try testing.expectEqual(@as(u32, 1), out.held);
+    try testing.expectEqual(@as(usize, 1), im.metas.items.len);
 }
 
 /// Whether any kept state's tokens or last prompt still hold `span`.

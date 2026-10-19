@@ -10,10 +10,14 @@ pub fn holdsSpan(tokens: []const u32, span: []const u32) bool {
     if (span.len == 0) return false;
     if (std.mem.indexOf(u32, tokens, span) != null) return true;
     var n = @min(tokens.len, span.len - 1);
-    while (n > 0) : (n -= 1) {
+    while (n >= 2) : (n -= 1) {
         if (std.mem.eql(u32, tokens[tokens.len - n ..], span[0..n])) return true;
     }
     return false;
+}
+
+pub fn weakSpanTail(tokens: []const u32, span: []const u32) bool {
+    return tokens.len > 0 and span.len > 0 and tokens[tokens.len - 1] == span[0];
 }
 
 /// A family's copy of one state.
@@ -350,7 +354,11 @@ pub const Store = struct {
             i -= 1;
             const e = s.entries.items[i];
             if (!holdsSpan(e.tokens, span)) {
-                if (std.mem.indexOf(u32, e.last, span) == null) continue;
+                if (weakSpanTail(e.tokens, span)) {
+                    out.held += 1;
+                    continue;
+                }
+                if (!holdsSpan(e.last, span) and !weakSpanTail(e.last, span)) continue;
                 const own = s.gpa.dupe(u32, e.tokens) catch @constCast(@as([]const u32, &.{})); // out of memory: an empty last prompt only loses a mark
                 std.crypto.secureZero(u32, e.last);
                 s.gpa.free(e.last);

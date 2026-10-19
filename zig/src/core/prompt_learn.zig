@@ -119,7 +119,10 @@ pub fn forget(s: *Store, im: *imprint.Imprint, span: []const u32, out: *pc.Forgo
         i -= 1;
         if (i >= im.metas.items.len) continue; // a failed removal's index rewrite may have shortened the list
         const meta = im.metas.items[i];
-        if (!pc.holdsSpan(meta.tokens, span)) continue;
+        if (!pc.holdsSpan(meta.tokens, span)) {
+            if (pc.weakSpanTail(meta.tokens, span)) out.held += 1;
+            continue;
+        }
         unlearnChecked(s, im, meta.key) catch |err| {
             note("forgetting a learned state that holds an erased span failed ({s})", .{@errorName(err)});
             out.failed += 1;
