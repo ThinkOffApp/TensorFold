@@ -199,6 +199,13 @@ pub fn run(r: *rig.Rig, a: std.mem.Allocator, case: Case, hook: bool) !Seen {
     const key = learned(&c.im, planted) orelse return error.TestNotLearned;
     try testing.expect(exists(c.im.dir, key));
     const other = learned(&c.im, unrelated) orelse return error.TestNotLearned;
+    const old_search_found = c.kept(old_span); // quoted-block-only observation, before raw teaching
+    // A teaching turn holds the unescaped text, independently of the quoted notes block.
+    try chat(r, a, false, case.raw);
+    const raw_span = try r.text.text().encode(a, case.raw[3 .. case.raw.len - 2], false);
+    try testing.expect(c.kept(raw_span));
+    const raw_key = learned(&c.im, raw_span) orelse return error.TestNotLearned;
+    try testing.expect(exists(c.im.dir, raw_key));
     switch (case.aged) {
         .none => {},
         .superseded => _ = try post(r, a, try std.fmt.allocPrint(a, "/v1/notes/{d}", .{id}), "\"My favourite colour is blue now.\""),
@@ -214,9 +221,13 @@ pub fn run(r: *rig.Rig, a: std.mem.Allocator, case: Case, hook: bool) !Seen {
             if (!c.kept(planted)) return error.TestFillerTookIt; // the other erase must not have taken this state
         },
     }
-    const old_search_found = c.kept(old_span);
 
     const reply = try erase(r, a, id);
+    if (hook) {
+        try testing.expect(!c.kept(raw_span));
+        try testing.expect(learned(&c.im, raw_span) == null);
+        try testing.expect(!exists(c.im.dir, raw_key));
+    }
     // the unrelated state and its learned file survive either way
     try testing.expect(c.kept(unrelated));
     try testing.expect(learned(&c.im, unrelated) != null and exists(c.im.dir, other));
