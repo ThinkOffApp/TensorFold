@@ -92,6 +92,7 @@ test "promotion alone: a fact another candidate's note answers for is asked with
     defer s.deinit();
     const n1 = try promote.night(&s, a, &f);
     try testing.expectEqual(@as(u32, 2), n1.kept);
+    try testing.expectEqual(@as(u32, 0), s.find("w1").?.alone); // the old check counted it right alone
     try testing.expectEqual(@as(u32, 2), n1.alone_rounds); // the cat dropped, my eyes asked again with its note back
     const r1 = try aloneOf(a, &f, 1);
     for (r1) |r| {

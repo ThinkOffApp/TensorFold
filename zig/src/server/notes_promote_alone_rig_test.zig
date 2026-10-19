@@ -120,11 +120,10 @@ test "promotion alone rig: a fact another candidate's note answers for passed th
     try testing.expectEqualStrings("Your cat's eyes are brown.", try chat(a, r, cat_q, "2, 10"));
     const p = try night(a, r);
     defer p.deinit();
-    const log = p.state.nights.items[0];
-    try testing.expectEqual(@as(u32, 2), log.alone_rounds);
-    try testing.expectEqual(promote.Status.promoted, statusOf(p, "s2"));
+    try testing.expectEqual(promote.Status.promoted, statusOf(p, "s2")); // the old check put it in weights tonight
     try testing.expectEqual(@as(u32, 0), p.state.find("s2").?.alone);
     try testing.expectEqual(promote.Status.in_weights, statusOf(p, "s10")); // its second night right
+    try testing.expectEqual(@as(u32, 2), p.state.nights.items[0].alone_rounds);
     // the log: round 1 with both notes out, the cat wrong; round 2 my eyes alone, the cat's note back in
     const lines = try aloneLines(a, r);
     try testing.expectEqual(@as(usize, 3), lines.len);
