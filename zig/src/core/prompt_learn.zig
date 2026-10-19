@@ -167,6 +167,33 @@ fn syncDir(dir: [:0]const u8) !void {
     if (!@import("learned_sync.zig").full(fd)) return error.SyncFailed;
 }
 
+/// Search every existing sibling identity afresh; the cached size at startup is not coverage evidence.
+pub fn forgetOthers(s: *Store, im: *imprint.Imprint, span: []const u32, out: *pc.Forgotten) void {
+    const dirs = @import("lanes").learned_dirs;
+    const before = out.failed;
+    defer if (out.failed > before) {
+        im.forget_pending = true;
+    };
+    var cursor: ?u64 = null;
+    while (true) {
+        const id = (dirs.next(im.root, im.dir, cursor) catch {
+            out.failed += 1;
+            return;
+        }) orelse break;
+        cursor = id;
+        var other = imprint.Imprint.inspect(s.gpa, im.root, id) catch {
+            out.failed += 1;
+            continue;
+        };
+        defer other.deinit();
+        // No shared writer-ownership protocol exists for another server's identity.
+        // Report its retained copies; rewriting its snapshot could discard concurrent writes.
+        for (other.metas.items) |meta| {
+            if (pc.holdsSpan(meta.tokens, span) or pc.weakSpanTail(meta.tokens, span)) out.held += 1;
+        }
+    }
+}
+
 pub fn unlearn(s: *Store, im: *imprint.Imprint, key: u64) void {
     unlearnChecked(s, im, key) catch |err| note("forgetting a learned state failed ({s})", .{@errorName(err)});
 }

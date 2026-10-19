@@ -14,6 +14,74 @@ const system = [_]u32{ 1, 2, 3 };
 const with_note = system ++ note ++ [_]u32{ 9, 9, 4 }; // a block holding the note after the client's system prompt
 const without = system ++ [_]u32{ 60, 61, 62, 63 } ++ [_]u32{ 9, 9, 4 }; // an unrelated block
 
+test "forgetSpan searches sibling identities created after the current index opened" {
+    var buf: [128]u8 = undefined;
+    const root = try std.fmt.bufPrint(&buf, "/tmp/tf-learn-sibling-{d}", .{std.c.getpid()});
+    defer rmTree(root);
+    var im = try imprint.Imprint.open(testing.allocator, root, 3, 1 << 20);
+    defer im.deinit();
+    try testing.expectEqual(@as(u64, 0), im.others);
+    const key = imprint.Imprint.keyOf(&with_note);
+    {
+        var other = try imprint.Imprint.open(testing.allocator, root, 4, 1 << 20);
+        defer other.deinit();
+        try other.add(key, with_note.len, &with_note, &.{}, 0);
+        try other.add(imprint.Imprint.keyOf(&without), without.len, &without, &.{}, 0);
+    }
+    var f: Fake = .{ .gpa = testing.allocator };
+    var s = Store.init(testing.allocator, f.learned(), .{}, 1 << 20);
+    defer s.deinit();
+    s.imprint = &im;
+    const out = s.forgetSpan(&note, &.{});
+    try testing.expectEqual(@as(u32, 0), out.learned);
+    try testing.expectEqual(@as(u32, 1), out.held);
+    try testing.expect(!out.complete());
+    var other = try imprint.Imprint.inspect(testing.allocator, root, 4);
+    defer other.deinit();
+    try testing.expect(other.has(key)); // do not rewrite a potentially active sibling server's index
+    try testing.expect(other.has(imprint.Imprint.keyOf(&without)));
+}
+
+test "learned sibling inspection refuses a torn index without repairing it" {
+    var buf: [128]u8 = undefined;
+    const root = try std.fmt.bufPrint(&buf, "/tmp/tf-learn-inspect-{d}", .{std.c.getpid()});
+    defer rmTree(root);
+    var im = try imprint.Imprint.open(testing.allocator, root, 3, 1 << 20);
+    defer im.deinit();
+    try im.add(imprint.Imprint.keyOf(&with_note), with_note.len, &with_note, &.{}, 0);
+    {
+        var scanned = try imprint.Imprint.inspect(testing.allocator, root, 3);
+        defer scanned.deinit();
+        try testing.expectEqual(@as(usize, 1), scanned.metas.items.len);
+    }
+    var path: [1100]u8 = undefined;
+    const fd = std.c.open(try std.fmt.bufPrintSentinel(&path, "{s}/index", .{im.dir}, 0), .{ .ACCMODE = .WRONLY, .APPEND = true }, @as(std.c.mode_t, 0));
+    if (fd < 0) return error.TestFile;
+    defer _ = std.c.close(fd);
+    try testing.expectEqual(@as(isize, 3), std.c.write(fd, "bad", 3));
+    const before = try im.indexScratchBytes();
+    try testing.expectError(error.ImprintRead, imprint.Imprint.inspect(testing.allocator, root, 3));
+    try testing.expectEqual(before, try im.indexScratchBytes());
+}
+
+test "forgetSpan reports a sibling with no readable index as uncertain" {
+    var buf: [128]u8 = undefined;
+    const root = try std.fmt.bufPrint(&buf, "/tmp/tf-learn-sibling-missing-{d}", .{std.c.getpid()});
+    defer rmTree(root);
+    var im = try imprint.Imprint.open(testing.allocator, root, 3, 1 << 20);
+    defer im.deinit();
+    var other = try imprint.Imprint.open(testing.allocator, root, 4, 1 << 20);
+    defer other.deinit(); // identity exists but has never written an index
+    var f: Fake = .{ .gpa = testing.allocator };
+    var s = Store.init(testing.allocator, f.learned(), .{}, 1 << 20);
+    defer s.deinit();
+    s.imprint = &im;
+    const out = s.forgetSpan(&note, &.{});
+    try testing.expectEqual(@as(u32, 1), out.failed);
+    try testing.expect(!out.complete());
+    try testing.expect(im.forget_pending);
+}
+
 test "learned batch removal preserves unrelated records across restart" {
     var buf: [128]u8 = undefined;
     const root = try std.fmt.bufPrint(&buf, "/tmp/tf-learn-batch-{d}", .{std.c.getpid()});

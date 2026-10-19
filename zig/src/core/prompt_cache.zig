@@ -378,6 +378,7 @@ pub const Store = struct {
         }
         if (s.imprint) |im| {
             learned.forget(s, im, span, &out);
+            learned.forgetOthers(s, im, span, &out);
             out.disk = true;
         }
         return out;

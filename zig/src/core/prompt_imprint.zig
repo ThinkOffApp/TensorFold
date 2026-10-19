@@ -20,6 +20,7 @@ pub const Imprint = struct {
     clock: u64 = 0, // a meta's `used`: the clock at its last write or read
     index_end: u64 = 0,
     forget_pending: bool = false, // failed erase may leave unindexed files until startup cleanup
+    inspect_only: bool = false, // strict sibling scan: never repair a torn index or perform startup cleanup
 
     /// The states learned under `identity` in `root` (made when missing); other identities past `cap` go, oldest first.
     pub fn open(gpa: Allocator, root: []const u8, identity: u64, cap: u64) !Imprint {
@@ -45,6 +46,21 @@ pub const Imprint = struct {
         m.metas.deinit(m.gpa);
         m.gpa.free(m.dir);
         m.gpa.free(m.root);
+    }
+
+    /// Inspect an existing identity without startup cleanup, stamps, directory creation or tail repair.
+    pub fn inspect(gpa: Allocator, root: []const u8, identity: u64) !Imprint {
+        const r = try gpa.dupe(u8, root);
+        errdefer gpa.free(r);
+        const dir = try std.fmt.allocPrintSentinel(gpa, "{s}/{x:0>16}", .{ root, identity }, 0);
+        var m: Imprint = .{ .gpa = gpa, .root = r, .dir = dir, .cap = 0, .inspect_only = true };
+        errdefer {
+            for (m.metas.items) |x| free(gpa, x);
+            m.metas.deinit(gpa);
+            gpa.free(dir);
+        }
+        try m.load();
+        return m;
     }
 
     fn free(gpa: Allocator, x: Meta) void {
@@ -221,8 +237,8 @@ pub const Imprint = struct {
     /// Keep a valid prefix across torn or invalid suffixes; unknown versions and I/O errors refuse learning.
     fn load(m: *Imprint) !void {
         var path: [1100]u8 = undefined;
-        const fd = std.c.open(try std.fmt.bufPrintSentinel(&path, "{s}/index", .{m.dir}, 0), .{ .ACCMODE = .RDWR, .NOFOLLOW = true, .NONBLOCK = true }, @as(std.c.mode_t, 0));
-        if (fd < 0) return if (std.c.errno(fd) == .NOENT) {} else error.ImprintRead;
+        const fd = std.c.open(try std.fmt.bufPrintSentinel(&path, "{s}/index", .{m.dir}, 0), .{ .ACCMODE = if (m.inspect_only) .RDONLY else .RDWR, .NOFOLLOW = true, .NONBLOCK = true }, @as(std.c.mode_t, 0));
+        if (fd < 0) return if (!m.inspect_only and std.c.errno(fd) == .NOENT) {} else error.ImprintRead;
         defer _ = std.c.close(fd);
         try m.readIndex(fd);
     }
@@ -245,6 +261,7 @@ pub const Imprint = struct {
     }
 
     fn torn(m: *Imprint, fd: c_int, whole: u64, observed: u64) !void {
+        if (m.inspect_only) return error.ImprintRead;
         try repairTail(fd, whole, observed);
         m.index_end = whole;
     }
