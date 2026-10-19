@@ -43,7 +43,7 @@ pub const Record = struct {
     after: ?[]const u8 = null, // and after
     reply: ?[]const u8 = null, // an alone ask's reply
     ok: bool = false,
-    key: []const u8 = "", // the fact an alone ask is of
+    key: []const u8 = "", // the fact an alone ask is of, or the one fact a one-by-one check taught
     exclude: ?[]const u32 = null, // the note ids left out of an alone ask's block
     round: u32 = 0, // the alone check's round (1: every candidate's note out; later: the failures' notes back in)
     ref: []const u8 = "", // the reference the reply was judged against
@@ -65,6 +65,8 @@ pub const NightLog = struct {
     probes: u32 = 0, // regression questions asked each time
     worse: u32 = 0, // in the last plan tried
     rejected: u32 = 0, // plans rejected tonight
+    one_by_one: u32 = 0, // facts of a rejected add plan taught again one at a time, each checked on its own
+    blamed: u32 = 0, // of those, the ones that made answers worse on their own: rewound and rejected alone
     alone_asked: u32 = 0,
     alone_right: u32 = 0,
     alone_rounds: u32 = 0, // rounds until no candidate dropped (each asks the candidates still standing)
@@ -281,6 +283,12 @@ const Plan = enum { add, rebuild, @"rebuild-old", source };
 /// The pocket and each fact's neurons as the night found them: a refused plan puts the state back to these.
 const Marked = struct { pocket: []const Neuron, neurons: []const []const Neuron };
 
+fn markedNow(s: *const State, a: Allocator) !Marked {
+    const neurons = try a.alloc([]const Neuron, s.facts.items.len);
+    for (s.facts.items, neurons) |f, *n| n.* = f.neurons;
+    return .{ .pocket = s.pocket, .neurons = neurons };
+}
+
 /// A refused plan undone: the learner rewinds to its mark (refits and 4-bit roundings too), then the state follows.
 fn rewind(s: *State, a: Allocator, b: anytype, k: u32, m: Marked) !void {
     try b.rewind(a);
@@ -372,9 +380,7 @@ fn runPlans(s: *State, a: Allocator, b: anytype, k: u32, notes: []const Note, st
     }
     s.open = .{ .night = k, .placed = s.pocket };
     try b.persist(s);
-    const neurons = try a.alloc([]const Neuron, s.facts.items.len);
-    for (s.facts.items, neurons) |f, *n| n.* = f.neurons;
-    const marked: Marked = .{ .pocket = s.pocket, .neurons = neurons };
+    const marked = try markedNow(s, a);
     for (plans.items) |plan| {
         // every plan starts from the pocket as the night found it, which the learner keeps until a rewind
         try b.mark(a);
@@ -396,7 +402,7 @@ fn runPlans(s: *State, a: Allocator, b: anytype, k: u32, notes: []const Note, st
         for (asks2) |*q| q.exclude = ask_excl;
         const after = try b.askAll(a, asks2);
         log.asks += @intCast(asks2.len);
-        log.worse = try probes.worse(a, b, r, after, log);
+        log.worse = try probes.worse(a, b, r, after, log, "");
         if (log.worse <= s.settings.tolerance or plan == .source) {
             try accept(s, a, b, k, plan, stale, keep, due, sorted, taught, log);
             return;
@@ -406,17 +412,54 @@ fn runPlans(s: *State, a: Allocator, b: anytype, k: u32, notes: []const Note, st
         if (plan == .add) {
             const again = try b.askAll(a, set.asks);
             log.asks += @intCast(set.asks.len);
-            log.worse = try probes.worse(a, b, r, again, log);
-            for (due) |f| reject(s, f, "rejected: the night made answers worse");
+            log.worse = try probes.worse(a, b, r, again, log, "");
             if (log.worse > s.settings.tolerance) {
+                for (due) |f| reject(s, f, "rejected: the night made answers worse");
                 log.tries += 1;
                 log.plan = "source";
                 try zeroAll(s, a, b);
                 try accept(s, a, b, k, .source, stale, keep, &.{}, &.{}, &.{}, log);
-            } else log.plan = "none";
+            } else if (due.len > 1) {
+                try oneByOne(s, a, b, k, keep, due, r, set.asks, excl, log);
+            } else {
+                for (due) |f| reject(s, f, "rejected: the night made answers worse");
+                log.plan = "none";
+            }
             return;
         }
     }
+}
+
+/// A refused add plan taught again fact by fact, each checked against the night's first replies; a spiller goes alone.
+fn oneByOne(s: *State, a: Allocator, b: anytype, k: u32, keep: []*Fact, due: []*Fact, r: probes.Regress, asks: []const Ask, excl: []const u32, log: *NightLog) !void {
+    const sorted = try a.dupe(*Fact, due);
+    std.mem.sort(*Fact, sorted, {}, byTold);
+    var good: std.ArrayList(*Fact) = .empty;
+    var taught: std.ArrayList(Taught) = .empty;
+    const asked = try a.dupe(Ask, asks);
+    for (asked) |*q| q.exclude = excl;
+    var last = log.worse; // the state kept is the one after the last fact kept, or the night's own after its rewind
+    for (sorted) |f| {
+        try b.mark(a);
+        const m = try markedNow(s, a);
+        log.one_by_one += 1;
+        const t = (try teachAll(s, a, b, k, &.{f}, log))[0];
+        // a lesson the learner did not keep is asked too: the state after it is the one the next fact starts from
+        const n = try probes.worse(a, b, r, try b.askAll(a, asked), log, f.key);
+        log.asks += @intCast(asked.len);
+        if (n <= s.settings.tolerance) {
+            try good.append(a, f);
+            try taught.append(a, t);
+            last = n;
+            continue;
+        }
+        try rewind(s, a, b, k, m);
+        log.blamed += 1;
+        reject(s, f, try std.fmt.allocPrint(s.alloc(), "rejected: taught on its own it made {d} answers worse", .{n}));
+    }
+    log.worse = last;
+    log.plan = if (good.items.len > 0) "add" else "none";
+    if (good.items.len > 0) try accept(s, a, b, k, .add, &.{}, keep, good.items, good.items, taught.items, log);
 }
 
 fn reject(s: *State, f: *Fact, why: []const u8) void {

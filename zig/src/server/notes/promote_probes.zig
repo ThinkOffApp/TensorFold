@@ -177,8 +177,8 @@ pub fn settled(kind: Kind, q: []const u8, was: []const u8, now: []const u8, note
     return null;
 }
 
-/// Probes worse now than before; their kinds and wordings joined into `log`.
-pub fn worse(a: Allocator, b: anytype, r: Regress, after: []const []const u8, log: *NightLog) !u32 {
+/// Probes worse now than before; their kinds and wordings joined into `log`; `of`: the fact a one-by-one check taught.
+pub fn worse(a: Allocator, b: anytype, r: Regress, after: []const []const u8, log: *NightLog, of: []const u8) !u32 {
     var n: u32 = 0;
     var list: std.ArrayList(u8) = .empty;
     for (r.asks, 0..) |q, i| {
@@ -191,14 +191,15 @@ pub fn worse(a: Allocator, b: anytype, r: Regress, after: []const []const u8, lo
             // "I don't know for sure, but your rabbit is named Floppy." gives a new value: worse
             .neighbour => if (unknown(was)) unknown(now) and !judge.newValue(q.q, was, now, try b.texts(a)) else std.mem.eql(u8, was, now) or try b.same(a, q.q, was, now),
         };
-        b.recordProbe(.{ .night = log.night, .kind = @tagName(r.kind[i]), .q = q.q, .before = was, .after = now, .ok = ok });
+        b.recordProbe(.{ .night = log.night, .kind = @tagName(r.kind[i]), .key = of, .q = q.q, .before = was, .after = now, .ok = ok });
         if (ok) continue;
         n += 1;
         if (list.items.len > 0) try list.appendSlice(a, " | ");
         try list.print(a, "{s}: {s} -> {s} (was {s})", .{ @tagName(r.kind[i]), q.q, now[0..@min(now.len, 80)], was[0..@min(was.len, 80)] });
     }
-    // the list of a rejected plan stays in the log beside any later one
-    if (n > 0) log.worse_list = if (log.worse_list.len > 0) try std.mem.concat(a, u8, &.{ log.worse_list, " || ", list.items }) else list.items;
+    // the list of a rejected plan stays in the log beside any later one; a one-by-one check's starts with its fact
+    const named = if (of.len > 0) try std.mem.concat(a, u8, &.{ of, ": ", list.items }) else list.items;
+    if (n > 0) log.worse_list = if (log.worse_list.len > 0) try std.mem.concat(a, u8, &.{ log.worse_list, " || ", named }) else named;
     return n;
 }
 
