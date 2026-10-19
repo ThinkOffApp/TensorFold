@@ -307,10 +307,11 @@ prompt, which is the design), and the 2 in-weights facts cost one question when 
 
 ## Not done
 
-- No pocket checkpoint op (exact rollback) or pocket compaction (open questions 1 and 2).
-- The regression set does not log which probe went worse. The learner's degenerate wordings ("the boat's colour's
-  colour's ...") are no longer promotion probes, but the learner still writes them.
-- Missed and rejected facts are never retried; only 2 of 29 facts reached in weights on the GB10 run.
+- No pocket compaction (open question 2). Exact rollback is the learner's mark and rewind (open question 1).
+- The learner's degenerate wordings ("the boat's colour's colour's ...") are no longer promotion probes, but the
+  learner still writes them. (Which probe went worse is in the probe log and the night's worse list.)
+- Missed and rejected facts are tried once more (`retries`), not a third time; only 2 of 29 facts reached in weights
+  on the GB10 run.
 - A spill-over that two facts cause only together is caught, since each fact is checked on top of the ones kept
   before it, but it is blamed on the later one (oldest first), which may be the wrong one. The one-by-one pass has
   not run on a GPU.
