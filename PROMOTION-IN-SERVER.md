@@ -183,18 +183,37 @@ rejected as before, no rewind of a blamed fact, the fact left unnamed in the pro
 **Thinking on too (item 9).** The server answers chats with thinking on by default (`--thinking`), but the checks
 above asked with thinking off only, in 48 tokens, so a lesson that changed only what a thinking reply says went
 unseen. Now every regression probe is asked a second time with thinking on: the same question after the same notes
-block, its reasoning bounded as the learner's own thinking checks are (`slide_ask.think_budget`, 224 tokens, of
-`think_reply`, 320), and judged on the reply after the reasoning. Before and after are compared mode by mode. The
+block, its reasoning bounded (1536 tokens of reasoning in a 2048-token reply, `notes_promote_backend.think_budget`
+and `think_reply`), and judged on the reply after the reasoning. Before and after are compared mode by mode. The
 alone check asks each probe in both modes too, and a fact leaves the prompt only when it is right in both. Thinking
 asks are marked `"thinking": true` in the probe log and "(thinking)" in the worse list. `--notes-promote-thinking
-off` asks with thinking off only. Cost: each check asks twice as many questions, the thinking ones up to 320 tokens
+off` asks with thinking off only. Cost: each check asks twice as many questions, the thinking ones up to 2048 tokens
 each instead of 48. Host tests (`notes_promote_thinking_test.zig`): damage seen only with thinking on rejects the
 night (control: off only, kept); every probe is asked in both modes; a fact right alone only with thinking off stays
 in the prompt (control: it leaves). In the alone rig (`notes_promote_alone_rig_test.zig`) the model writes its
 reasoning before `</think>` when asked to think, so the real backend, the store's block and the server's reasoning
 split are all in the path: the cat's eyes stay in the prompt, my eyes leave, and every thinking ask carried the block.
 Four negative controls each fail (no thinking copy of the set, the alone check in one mode, the backend ignoring the
-mode, a thinking ask without its block). Not yet run on a GPU.
+mode, a thinking ask without its block).
+
+**On a GPU (asus3, 20 October 2026, `cf1d7403`; MEASURED, receipts in `~/tf-promote/spill-20261020/`).** A fresh
+untaught copy, the E1 store, 5 retrieved notes (the brother's amber eyes, the dog Bruno, the yellow tent, the sister in
+Bergen, pears), defaults on (targeted, all notes' own questions, thinking): 76 probes, 608 asks and 31 to 39 minutes a
+night. On both nights the add plan was refused (night 1: 11 worse, among them the amber spill "What is my neighbour's
+eye colour?" -> "Your neighbour's eye colour is amber."), the rewind brought all 59 judged replies back byte for byte,
+and the one-by-one pass ran; but it blamed every fact the learner kept, and nothing was promoted. Three causes, each
+fixed since:
+- The thinking cap. After a notes block this model starts its reasoning by copying the block; the learner's 224
+  tokens closed it mid-copy and the reply went on copying (24 of night 1's 36 worse thinking verdicts had a copy on
+  one side; no thinking-off reply ever did). Asked uncapped, 9 of 10 questions reasoned 287 to 1230 tokens and then
+  answered, with no copy. The checks now allow 1536 of 2048, and a thinking reply that still copies the block (two
+  `[id] "..."` lines or more) is never judged.
+- The notes' own questions. About a third did not ask for their note ("What is my sister's name?" for the Bergen
+  note, "What is the tent's name?"), and neighbours made from them asked about others again. An own question now
+  needs a reference that gives its note, as a learner probe does (written once more, else none).
+- The night's summary said "plan add ... 0 worse" with an empty pocket: a lesson the learner did not keep passed its
+  check. The plan is now "add" only when a kept fact was promoted.
+The fixes have not run on a GPU yet.
 
 **Retry.** A missed or rejected fact is due once more the next night (`retries`, kept in the state); not a third time.
 
@@ -329,10 +348,12 @@ prompt, which is the design), and the 2 in-weights facts cost one question when 
   learner still writes them. (Which probe went worse is in the probe log and the night's worse list.)
 - Missed and rejected facts are tried once more (`retries`), not a third time; only 2 of 29 facts reached in weights
   on the GB10 run.
-- The thinking checks have not run on a GPU: how often a real thinking reply changes after a lesson, and what the
-  longer asks cost a night, are not measured.
+- The fixes after the first GPU run (thinking caps, copies unjudged, own questions checked) have not run on a GPU.
+  With the larger caps a night will take longer than the 31 to 39 minutes measured; not measured.
+- A notes chat with thinking on spends its first several hundred reasoning tokens copying the notes block (asus3,
+  20 Oct, 287 to 1230 tokens): a cost for every such chat, not only the checks; not addressed here.
 - A spill-over that two facts cause only together is caught, since each fact is checked on top of the ones kept
-  before it, but it is blamed on the later one (oldest first), which may be the wrong one. The one-by-one pass has
-  not run on a GPU.
+  before it, but it is blamed on the later one (oldest first), which may be the wrong one. On a GPU the pass ran on two nights
+  (above), before the fixes.
 - A Metal run of the full nights set; Metal was the two-fact gate only.
 - Not pushed; no pull request.
