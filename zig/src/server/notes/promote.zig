@@ -460,7 +460,10 @@ fn oneByOne(s: *State, a: Allocator, b: anytype, k: u32, keep: []*Fact, due: []*
         reject(s, f, try std.fmt.allocPrint(s.alloc(), "rejected: taught on its own it made {d} answers worse", .{n}));
     }
     log.worse = last;
-    log.plan = if (good.items.len > 0) "add" else "none";
+    // "add" only when a fact went into the pocket: a missed lesson passes its check but promotes nothing
+    log.plan = for (taught.items) |t| {
+        if (t.kept) break "add";
+    } else "none";
     if (good.items.len > 0) try accept(s, a, b, k, .add, &.{}, keep, good.items, good.items, taught.items, log);
 }
 

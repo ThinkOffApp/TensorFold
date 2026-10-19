@@ -133,3 +133,20 @@ test "promotion: a night with no spill-over is kept whole, with nothing taught a
     try testing.expectEqual(@as(u32, 3), f.teaches);
     for ([_][]const u8{ "w1", "w2", "w3" }) |k| try testing.expectEqual(promote.Status.promoted, status(&s, k));
 }
+
+test "promotion: a one-by-one pass where only a missed lesson passes says plan none, not add" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var f: Fake = .{ .a = arena.allocator(), .leaks = "brother eyes=amber", .breaks = "boat=blue", .misses = &.{"tent=red"} };
+    _ = try f.add("w1", "brother eyes=amber");
+    _ = try f.add("w2", "boat=blue");
+    _ = try f.add("w3", "tent=red");
+    var s = promote.State.init(testing.allocator, .{});
+    defer s.deinit();
+    const n = try promote.night(&s, arena.allocator(), &f);
+    try testing.expectEqual(@as(u32, 3), n.one_by_one);
+    try testing.expectEqual(@as(u32, 2), n.blamed);
+    try testing.expectEqualStrings("none", n.plan); // GPU check, 20 Oct: the pears' missed lesson made it read "add"
+    try testing.expectEqual(promote.Status.missed, status(&s, "w3"));
+    try testing.expectEqual(@as(usize, 0), s.pocket.len);
+}
