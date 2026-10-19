@@ -40,10 +40,13 @@ test "erase replaces alias memo with only the rebuilt model" {
     const s = r.store();
     try testing.expect(s.bw.alias_memo.model == @as(*const anyopaque, s.model));
     try testing.expectEqual(s.model.notes.items.len - 1, s.bw.alias_memo.scanned);
+    var secret_keys: [8]u32 = @splat(0xffff_ffff);
+    const secret_ids = try r.text.text().encode(a, " Zyqora", false);
+    for (secret_ids, secret_keys[0..secret_ids.len]) |token, *key| key.* = s.current.idx.keyOf(token);
     for (s.bw.alias_memo.names.items) |entry| {
-        try testing.expect(entry.place < s.model.notes.items.len);
-        try testing.expect(std.mem.indexOf(u8, s.model.notes.items[entry.place].text(), "Zyqora") == null);
+        try testing.expect(!std.mem.eql(u32, &entry.keys, &secret_keys));
     }
+    try testing.expect(!s.bw.alias_memo.by_key.contains(secret_keys));
 }
 
 test "scratch acquired before erase cannot rejoin the new epoch pool" {

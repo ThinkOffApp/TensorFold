@@ -263,6 +263,8 @@ test "tool reply prose survives whole chat, Messages and Responses and their war
         .{ .path = "/v1/responses", .body = "{\"model\":\"m\",\"max_output_tokens\":256,\"input\":\"go\",\"tools\":[{\"type\":\"function\",\"name\":\"lookup\",\"parameters\":{\"type\":\"object\"}}]}" },
     };
     for (requests, 0..) |request, route| {
+        backend.foreground_held = false;
+        backend.background_held = false;
         const got = try exchange(srv, request.path, request.body);
         try std.testing.expect(backend.foreground_held and backend.background_held);
         try std.testing.expectEqual(@as(u64, 0), srv.prompt_holders.load(.acquire));
