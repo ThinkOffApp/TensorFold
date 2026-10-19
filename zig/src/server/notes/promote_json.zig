@@ -251,6 +251,7 @@ pub fn probeLine(a: Allocator, r: promote.Record) ![]u8 {
         for (ids, xs) |id, *x| x.* = try int(a, id);
         try o.put(a, "exclude", .{ .array = xs });
     }
+    if (r.round > 0) try o.put(a, "round", try int(a, r.round));
     if (r.before) |s| try o.put(a, "before", .{ .string = s });
     if (r.after) |s| try o.put(a, "after", .{ .string = s });
     if (r.reply) |s| try o.put(a, "reply", .{ .string = s });

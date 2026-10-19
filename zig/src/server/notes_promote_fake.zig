@@ -19,6 +19,7 @@ pub const Fake = struct {
     misses: []const []const u8 = &.{}, // texts the learner does not keep
     breaks: []const u8 = "", // a text whose neurons, taught from now on and while live, change a control's answer
     weak: []const u8 = "", // a topic the neurons do not answer alone
+    weaks: []const []const u8 = &.{}, // more such topics
     clobbers: []const u8 = "", // a text whose neurons, while live, make `clobbered` answer wrong even with its note
     clobbered: []const u8 = "",
     miss_once: []const u8 = "", // a text the learner misses the first time only
@@ -153,13 +154,36 @@ pub const Fake = struct {
             if (!n.current or std.mem.indexOfScalar(u32, ex, n.id) != null or !std.mem.eql(u8, topic(n.text), t)) continue;
             return val(n.text);
         };
+        if (q.exclude) |ex| if (f.bridged(ex, t)) |v| return v;
         if (std.mem.eql(u8, t, f.weak)) return "unknown";
+        for (f.weaks) |w| if (std.mem.eql(u8, t, w)) return "unknown";
         var i = f.pocket.items.len;
         while (i > 0) : (i -= 1) {
             const l = f.pocket.items[i - 1];
             if (l.live and std.mem.eql(u8, l.topic, t)) return l.value;
         }
         return "unknown";
+    }
+    /// The value a bridge note in the block gives topic `t`: "A~B" answers A with B's note, and B with A's.
+    fn bridged(f: *Fake, ex: []const u32, t: []const u8) ?[]const u8 {
+        for (f.store.items) |br| {
+            if (!f.shown(br, ex)) continue;
+            const at = std.mem.indexOfScalar(u8, br.text, '~') orelse continue;
+            const one = br.text[0..at];
+            const two = br.text[at + 1 ..];
+            const other = if (std.mem.eql(u8, t, one)) two else if (std.mem.eql(u8, t, two)) one else continue;
+            for (f.store.items) |n| if (f.shown(n, ex) and std.mem.eql(u8, topic(n.text), other)) return val(n.text);
+        }
+        return null;
+    }
+    fn shown(_: *Fake, n: FNote, ex: []const u32) bool {
+        return n.current and std.mem.indexOfScalar(u32, ex, n.id) == null;
+    }
+    /// A note that is no fact of its own but joins two in the block ("cat eyes~my eyes": the same colour as mine).
+    pub fn addBridge(f: *Fake, key: []const u8, one: []const u8, two: []const u8) !u32 {
+        const id: u32 = @intCast(f.store.items.len + 1);
+        try f.store.append(f.a, .{ .id = id, .key = key, .text = try std.fmt.allocPrint(f.a, "{s}~{s}", .{ one, two }), .told = @as(i64, id) * 100, .fact = false });
+        return id;
     }
     pub fn askAll(f: *Fake, a: Allocator, qs: []const promote.Ask) ![]const []const u8 {
         const out = try a.alloc([]const u8, qs.len);

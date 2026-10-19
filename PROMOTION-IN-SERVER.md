@@ -157,8 +157,16 @@ flips a two-note answer each reject the night; control: the same night with no d
 
 **Retry.** A missed or rejected fact is due once more the next night (`retries`, kept in the state); not a third time.
 
-**Alone.** On the accepted state each fact in the pocket is asked its probes with its own note left out (and the other
-in-weights notes, as production does). All right: its streak grows; `alone` nights running: `in_weights`, and from then
+**Alone.** On the accepted state each fact in the pocket is asked its probes in the state after it leaves the prompt:
+its own note left out, and the note of every other fact in the pocket, the in-weights ones among them. Before, only
+its own note and the in-weights notes were left out, and in run6 the other notes answered for a fact: the green pair
+(the cat's eyes and mine) passed only while each other's note was in the block, bridged by "My cat's eyes are the same
+colour as mine.", left the prompt together, failed and came back, a 3-night loop. A note that leaves with the fact
+cannot answer for it. The facts that fail stay in the prompt, so the rest are asked again with those notes back in
+the block (a note can also override the neurons, as the sister's "orange" did for my favourite colour), until a round
+drops none: a fixpoint, at most one round per fact (`alone_rounds` in the night's log). A fact with no probe left is
+not asked and stays in the prompt. A bare pass the untaught model fails is not required: one server has only the
+taught weights. All right: its streak grows; `alone` nights running: `in_weights`, and from then
 on every `"notes": true` chat request has that note excluded. One wrong: back to `promoted`, the streak starts again. Every alone ask goes to `SNAPSHOT.promote-probes.jsonl` as kind
 `alone` (night, fact key, question, the note ids left out of its block, reply, reference, verdict), so a night's
 alone decisions can be judged again later; before, its replies were in no file and had to be recovered by token sha.

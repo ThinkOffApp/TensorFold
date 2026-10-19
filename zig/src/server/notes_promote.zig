@@ -259,7 +259,7 @@ pub const Promoter = struct {
             return;
         };
         if (n.worse_list.len > 0) log.line("notes promotion: night {d}: worse: {s}", .{ n.night, n.worse_list });
-        log.line("notes promotion: night {d}: {d} due, {d} stale, plan {s} ({d} tried, {d} rejected), {d} taught ({d} kept, {d} missed), {d} worse of {d} probes; alone {d} of {d} right, {d} left the prompt, {d} back; {d} in weights, {d} in the pocket; {d} asks in {d:.1} s", .{ n.night, n.due, n.stale, n.plan, n.tries, n.rejected, n.taught, n.kept, n.missed, n.worse, n.probes, n.alone_right, n.alone_asked, n.left_prompt, n.back_to_prompt, n.in_weights, n.pocket, n.asks, n.secs });
+        log.line("notes promotion: night {d}: {d} due, {d} stale, plan {s} ({d} tried, {d} rejected), {d} taught ({d} kept, {d} missed), {d} worse of {d} probes; alone {d} of {d} right in {d} rounds, {d} left the prompt, {d} back; {d} in weights, {d} in the pocket; {d} asks in {d:.1} s", .{ n.night, n.due, n.stale, n.plan, n.tries, n.rejected, n.taught, n.kept, n.missed, n.worse, n.probes, n.alone_right, n.alone_asked, n.alone_rounds, n.left_prompt, n.back_to_prompt, n.in_weights, n.pocket, n.asks, n.secs });
         p.compact();
         _ = p.tryPublish();
         p.drainPending();

@@ -45,6 +45,7 @@ pub const Record = struct {
     ok: bool = false,
     key: []const u8 = "", // the fact an alone ask is of
     exclude: ?[]const u32 = null, // the note ids left out of an alone ask's block
+    round: u32 = 0, // the alone check's round (1: every candidate's note out; later: the failures' notes back in)
     ref: []const u8 = "", // the reference the reply was judged against
 };
 
@@ -65,6 +66,7 @@ pub const NightLog = struct {
     rejected: u32 = 0, // plans rejected tonight
     alone_asked: u32 = 0,
     alone_right: u32 = 0,
+    alone_rounds: u32 = 0, // rounds until no candidate dropped (each asks the candidates still standing)
     left_prompt: u32 = 0, // facts that became in_weights tonight
     back_to_prompt: u32 = 0,
     in_weights: u32 = 0,
@@ -418,47 +420,67 @@ fn accept(s: *State, a: Allocator, b: anytype, k: u32, plan: Plan, stale: []*Fac
     }
 }
 
-/// Each fact in the pocket asked its probes without its own note; `alone` nights running moves the note out.
+/// Each pocket fact asked its probes in the state after it leaves the prompt; `alone` nights running move it out.
 fn alone(s: *State, a: Allocator, b: anytype, notes: []const Note, log: *NightLog) !void {
-    var asks: std.ArrayList(Ask) = .empty;
-    var owner: std.ArrayList(*Fact) = .empty;
-    var probe: std.ArrayList(Probe) = .empty;
-    const weights = try s.inWeights(a);
+    // other notes in the block answered for a fact: run6's green pair passed only while each other's note was in it,
+    const Cand = struct { f: *Fact, id: u32, ok: bool, right: []bool };
+    // bridged by "My cat's eyes are the same colour as mine."; they left together, failed, came back: a 3-night loop.
+    var cands: std.ArrayList(Cand) = .empty;
     for (s.facts.items) |*f| {
-        if (!active(f.status) or f.probes.len == 0) continue;
+        if (!active(f.status)) continue;
         const own = noteOf(notes, f.key) orelse continue;
-        const excl = try std.mem.concat(a, u32, &.{ try idsOf(a, notes, weights), &.{own.id} });
-        for (f.probes) |p| {
-            try asks.append(a, .{ .q = p.q, .exclude = excl });
-            try owner.append(a, f);
-            try probe.append(a, p);
+        // a fact with no probe left cannot be asked alone: its note stays in the prompt
+        try cands.append(a, .{ .f = f, .id = own.id, .ok = f.probes.len > 0, .right = try a.alloc(bool, f.probes.len) });
+    }
+    var round: u32 = 0;
+    // a fixpoint: every round but the last drops a candidate at least, so at most one round per candidate
+    while (round <= cands.items.len) {
+        // left out: the note of every candidate still standing, the fact's own and the in-weights ones among them,
+        var excl: std.ArrayList(u32) = .empty;
+        // so no note that leaves the prompt with a fact can answer for it; non-candidates' notes stay, as in production
+        for (cands.items) |c| if (c.ok) try excl.append(a, c.id);
+        var asks: std.ArrayList(Ask) = .empty;
+        var at: std.ArrayList([2]usize) = .empty; // each ask's candidate and probe
+        for (cands.items, 0..) |c, ci| if (c.ok) for (c.f.probes, 0..) |p, pi| {
+            try asks.append(a, .{ .q = p.q, .exclude = excl.items });
+            try at.append(a, .{ ci, pi });
+        };
+        if (asks.items.len == 0) break;
+        round += 1;
+        const replies = try b.askAll(a, asks.items);
+        log.asks += @intCast(asks.items.len);
+        if (round == 1) log.alone_asked = @intCast(asks.items.len);
+        for (asks.items, at.items, replies) |q, x, reply| {
+            const c = cands.items[x[0]];
+            const p = c.f.probes[x[1]];
+            const ok = b.agrees(c.f.text, q.q, p.ref, reply);
+            b.recordProbe(.{ .night = log.night, .kind = "alone", .key = c.f.key, .q = q.q, .exclude = q.exclude, .round = round, .reply = reply, .ref = p.ref, .ok = ok });
+            c.right[x[1]] = ok;
         }
+        // the round's failures stay in the prompt, so the rest are asked again with their notes back in the block,
+        var dropped = false;
+        // where a note can override the neurons too (in run6 the sister's "orange" answered for my favourite colour)
+        for (cands.items) |*c| if (c.ok and std.mem.indexOfScalar(bool, c.right, false) != null) {
+            c.ok = false;
+            dropped = true;
+        };
+        if (!dropped) break;
     }
-    if (asks.items.len == 0) return;
-    const replies = try b.askAll(a, asks.items);
-    log.asks += @intCast(asks.items.len);
-    log.alone_asked = @intCast(asks.items.len);
-    var wrong: std.ArrayList(*Fact) = .empty;
-    for (asks.items, owner.items, probe.items, replies) |q, f, p, reply| {
-        const ok = b.agrees(f.text, q.q, p.ref, reply);
-        b.recordProbe(.{ .night = log.night, .kind = "alone", .key = f.key, .q = q.q, .exclude = q.exclude, .reply = reply, .ref = p.ref, .ok = ok });
-        if (ok) log.alone_right += 1 else if (std.mem.indexOfScalar(*Fact, wrong.items, f) == null) try wrong.append(a, f);
-    }
-    var seen: ?*Fact = null;
-    for (owner.items) |f| {
-        if (seen == f) continue;
-        seen = f;
+    log.alone_rounds = round;
+    for (cands.items) |c| {
+        for (c.right) |r| log.alone_right += @intFromBool(r); // each probe's verdict in the last round it was asked
+        const f = c.f;
         const was = f.status;
-        const ok = std.mem.indexOfScalar(*Fact, wrong.items, f) == null;
-        f.alone = if (ok) f.alone + 1 else 0;
+        f.alone = if (c.ok) f.alone + 1 else 0;
         f.status = if (f.alone >= s.settings.alone) .in_weights else .promoted;
+        if (f.probes.len == 0) f.why = "no probe left to ask it alone: its note stays in the prompt";
         if (f.status == was) continue;
         if (f.status == .in_weights) {
             log.left_prompt += 1;
             f.why = "in weights: its note leaves the prompt";
         } else {
             log.back_to_prompt += 1;
-            f.why = "back in the prompt: answered wrong without its note";
+            f.why = if (f.probes.len == 0) "back in the prompt: no probe left to ask it alone" else "back in the prompt: answered wrong without its note";
         }
     }
 }
