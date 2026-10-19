@@ -75,7 +75,7 @@ pub fn spanOf(a: std.mem.Allocator, text: model_text.Text, note: []const u8) !?[
             error.OutOfMemory => return error.OutOfMemory,
             else => return null,
         };
-        if (span.len > 0 and try insideEveryWrapper(a, text, note, span)) return span;
+        if (span.len >= 4 and try insideEveryWrapper(a, text, note, span)) return span;
         lo = std.mem.indexOfScalarPos(u8, p, lo + 1, ' ') orelse return null;
         hi = std.mem.lastIndexOfScalar(u8, p[0..hi], ' ') orelse return null;
     }

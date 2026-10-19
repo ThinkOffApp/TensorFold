@@ -11,6 +11,13 @@ const places = @import("notes_erase_places.zig");
 const api = @import("engine_api");
 const testing = std.testing;
 
+test "erase spans shorter than four tokens remain uncertain" {
+    var text: @import("notes_test.zig").Bytes = .{};
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testing.expect(try places.spanOf(arena.allocator(), text.text(), "I am X") == null);
+}
+
 test "prepared requests keep erase requests and prompt cache uncertain" {
     const r = try rig.Rig.init(testing.allocator);
     defer r.deinit();
