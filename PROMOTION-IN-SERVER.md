@@ -104,11 +104,26 @@ half of the rest. The GB10 rerun's night 2 was rejected on "What eye colour has 
 eyes.)", a right reply the learner's check alone refuses ("eyes" not said); `agreesWith` takes it and still refuses
 "Your dog has brown eyes." and "Your sister is called Maria." for Ana (host test). The rerun itself runs `d660eac3`. Since `6cc520f8`'s review (codexmb: "Not grey." and "I do not know whether grey." passed): a
 reply with a denying, doubting or choice word (not, no, n't, never, maybe, perhaps, possibly, probably, might, whether,
-or, either, neither, nor) never agrees, by either path; the terse path takes at most 8 words and refuses a reply naming
+or, either, neither, nor) never agrees, by either path (narrowed since: only in a clause with a value word, below); the terse path takes at most 8 words and refuses a reply naming
 a word of another current note that this fact and question lack ("Grey or brown.", "Brown, not grey."). This changes
 the night's acceptance judge. On the stored night-2 probe of the rerun (its only worse one) the new judge accepts
 "Grey", so that night flips to accepted (INFERRED: the probes' before replies are not stored, so whether another probe
 would then count as worse is not known).
+
+**Judge: you for me, hedges in their clause, subjects.** From E1's replies on run6's frozen weights (19 Oct
+2026). A fact whose value is the user ("The tent belongs to me.") is given by a reply naming the user as the value:
+"yours", "your" before the question's thing ("Your tent."), or "you" after the word the fact says before its "me"
+("belongs to you"), when the question asks about the user (not "What tent is yours?") and the reference names the
+user too. A hedge word fails a reply only in a clause that also holds a value word ("not grey", "maybe grey", "grey
+or brown"; clauses split at punctuation, "but" and "and"), or in a list that a hedged clause opens with a colon
+("colours you might see: Brown"); a reply that says it does not know never agrees, and an opening yes or no against
+the reference's (or a no to a yes-or-no question) fails it. So "you like chocolate ... you no longer like cheese" now
+agrees. A reply naming a subject the store knows (the last word of a note's subject: "your sister", "your cat") that
+the fact, its own subject and the question do not name fails, whatever its value. Offline on E1's 1441 judged
+replies (the judge at `3e9024b6` reproduces E1's verdicts 1441 of 1441), 20 change: 13 to right (the tent's
+you/yours, chocolate beside "no longer like cheese", apples beside "or peanut butter") and 7 to wrong (the cat's note
+answering for my eyes, the tent given to the brother, three passes on an off-topic reference that name the brother);
+the gate on the untaught model with every pocket note out (A5) goes from 2 to 0 of 44 right.
 
 **Publishing the in-weights list.** The report and every key are staged first, then swapped in under the lock with
 the cache generation bump; a failure at any allocation leaves the old report, list and generation whole (codexmb's

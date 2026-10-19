@@ -45,20 +45,11 @@ pub fn swapSubject(a: Allocator, question: []const u8, who: []const u8) !?[]cons
     return null;
 }
 
-/// Whether a reply says it does not know (the model's ways of saying nothing was told).
-pub fn unknown(reply: []const u8) bool {
-    const marks = [_][]const u8{ "don't know", "do not know", "don’t know", "not sure", "no information", "haven't told", "have not told", "haven't mentioned", "have not mentioned", "not mentioned", "don't have", "do not have", "can't know", "cannot know", "no way of knowing", "not been told", "wasn't told", "unknown", "not provided", "not given", "not specified", "not stated", "doesn't tell", "does not tell", "doesn't say", "does not say", "doesn't mention", "does not mention", "no data", "no record" };
-    for (marks) |m| if (std.ascii.findIgnoreCase(reply, m) != null) return true;
-    return false;
-}
+/// Whether a reply says it does not know (the judge's list, which a reply stating its value plainly must not match).
+pub const unknown = judge.unknown;
 
 /// "yes" or "no" when the reply opens with one (null: neither).
-pub fn yesNo(reply: []const u8) ?bool {
-    const t = std.mem.trimStart(u8, reply, " \t\r\n*\"'");
-    if (std.ascii.startsWithIgnoreCase(t, "yes") and (t.len == 3 or !std.ascii.isAlphabetic(t[3]))) return true;
-    if (std.ascii.startsWithIgnoreCase(t, "no") and (t.len == 2 or !std.ascii.isAlphabetic(t[2]))) return false;
-    return null;
-}
+pub const yesNo = judge.yesNo;
 
 fn words(a: Allocator, text: []const u8) ![]const []const u8 {
     var out: std.ArrayList([]const u8) = .empty;

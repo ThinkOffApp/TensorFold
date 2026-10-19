@@ -18,6 +18,7 @@ const Stop = np.Stop;
 const clockMs = np.clockMs;
 const keyOf = np.keyOf;
 const agreesWith = np.agreesWith;
+const judge = @import("notes/promote_judge.zig");
 const Allocator = std.mem.Allocator;
 
 /// How a note's own question is asked for: the model writes what its user would ask to hear the note again.
@@ -33,7 +34,7 @@ pub const answer_tokens = 48;
 pub const Backend = struct {
     p: *Promoter,
     arena: Allocator, // the night's
-    others: ?[]const []const u8 = null,
+    listed: ?[]const ops.View = null, // the current notes, listed once a night
     marked: ?slide.Mark = null, // the graph and teacher as the learner's last mark tonight found them
 
     fn srv(b: *Backend) *Server {
@@ -188,7 +189,7 @@ pub const Backend = struct {
 
     /// The current notes' texts (a word of one in a "don't know" reply is a value the reply gives).
     pub fn texts(b: *Backend, _: Allocator) ![]const []const u8 {
-        return b.othersOf("");
+        return b.knownOf("").others;
     }
 
     /// Every regression probe's two replies and verdict, one JSON line each in SNAPSHOT.promote-probes.jsonl.
@@ -197,20 +198,21 @@ pub const Backend = struct {
     }
 
     pub fn agrees(b: *Backend, fact: []const u8, question: []const u8, ref: []const u8, reply: []const u8) bool {
-        return agreesWith(fact, question, ref, reply, b.othersOf(fact));
+        return agreesWith(fact, question, ref, reply, b.knownOf(fact));
     }
 
-    /// The other current notes' texts (listed once a night): a reply naming their words is not this fact's.
-    fn othersOf(b: *Backend, fact: []const u8) []const []const u8 {
-        if (b.others == null) {
-            const list = ops.list(b.p.store, b.arena, false) catch return &.{};
-            var out: std.ArrayList([]const u8) = .empty;
-            for (list) |v| out.append(b.arena, v.text) catch return &.{};
-            b.others = out.items;
+    /// The other current notes' texts, every note's subject and the fact's own: what the judge reads a reply against.
+    fn knownOf(b: *Backend, fact: []const u8) judge.Known {
+        const list = b.listed orelse (ops.list(b.p.store, b.arena, false) catch return .{});
+        b.listed = list;
+        var others: std.ArrayList([]const u8) = .empty;
+        var subjects: std.ArrayList([]const u8) = .empty;
+        var own: []const u8 = "";
+        for (list) |v| {
+            if (std.mem.eql(u8, v.text, fact)) own = v.subject else others.append(b.arena, v.text) catch return .{};
+            subjects.append(b.arena, v.subject) catch return .{};
         }
-        var out: std.ArrayList([]const u8) = .empty;
-        for (b.others.?) |t| if (!std.mem.eql(u8, t, fact)) out.append(b.arena, t) catch return b.others.?;
-        return out.items;
+        return .{ .others = others.items, .subjects = subjects.items, .subject = own };
     }
 
     /// Whether a control's changed reply still says nothing new, as the learner's own judge decides.

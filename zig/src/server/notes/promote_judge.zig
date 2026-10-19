@@ -1,10 +1,16 @@
 //! Promotion's judge without an answer key: does a reply give the fact as its reference answer does.
 const std = @import("std");
 const wording = @import("../slide_words.zig");
+const units = @import("../slide_units.zig");
+
+/// What the judge knows besides the reply: the other notes' texts, the store's subjects and the fact's own subject.
+pub const Known = struct { others: []const []const u8 = &.{}, subjects: []const []const u8 = &.{}, subject: []const u8 = "" };
 
 /// Whether `reply` gives the fact as `ref` does: the reference's answer words, or a notable fact word ("Grey").
-pub fn agreesWith(fact: []const u8, question: []const u8, ref: []const u8, reply: []const u8, others: []const []const u8) bool {
-    if (hedged(reply)) return false; // "Not grey.", "Maybe grey.", "I don't know whether grey."
+pub fn agreesWith(fact: []const u8, question: []const u8, ref: []const u8, reply: []const u8, known: Known) bool {
+    if (!plain(fact, question, ref, reply)) return false; // "Not grey.", "Maybe grey.", "I do not know whether grey."
+    if (otherSubject(fact, question, reply, known)) return false; // "Your sister's eyes are brown." for the dog's
+    if (userValue(fact) and aboutUser(question) and namesUser(ref) and givesUser(fact, question, reply)) return true;
     if (wording.recalls(fact, question, ref, reply)) return true;
     // a terse reply ("Grey") only: a few words, and no word another note gives that this fact and question do not
     var words: usize = 0;
@@ -12,7 +18,7 @@ pub fn agreesWith(fact: []const u8, question: []const u8, ref: []const u8, reply
     while (wi.next()) |w| {
         words += 1;
         if (w.len < 3 or wording.isFiller(w) or hasStem(fact, w) or hasStem(question, w)) continue;
-        for (others) |o| if (hasStem(o, w)) return false; // "grey or brown", "brown, not grey"
+        for (known.others) |o| if (hasStem(o, w)) return false; // "grey or brown", "brown, not grey"
     }
     if (words > terse_words) return false;
     // value words (in reference and fact, not fillers, not the question's): names and numbers said, half the rest
@@ -28,6 +34,11 @@ pub fn agreesWith(fact: []const u8, question: []const u8, ref: []const u8, reply
         said += @intFromBool(there);
     }
     return n > 0 and 2 * said >= n;
+}
+
+/// Whether a stored reference gives its fact: judged as a reply, with the fact's own words as its reference.
+pub fn gives(fact: []const u8, question: []const u8, ref: []const u8, known: Known) bool {
+    return agreesWith(fact, question, fact, ref, known);
 }
 
 /// Whether `reply` gives a value neither `before` nor the question has: a name, a number, or a stored note's word.
@@ -63,26 +74,169 @@ pub fn extends(before: []const u8, now: []const u8) bool {
     return n > 0;
 }
 
+/// Whether a reply says it does not know (the model's ways of saying nothing was told).
+pub fn unknown(reply: []const u8) bool {
+    const marks = [_][]const u8{ "don't know", "do not know", "don’t know", "not sure", "no information", "haven't told", "have not told", "haven't mentioned", "have not mentioned", "not mentioned", "don't have", "do not have", "can't know", "cannot know", "no way of knowing", "not been told", "wasn't told", "unknown", "not provided", "not given", "not specified", "not stated", "doesn't tell", "does not tell", "doesn't say", "does not say", "doesn't mention", "does not mention", "no data", "no record" };
+    for (marks) |m| if (std.ascii.findIgnoreCase(reply, m) != null) return true;
+    return false;
+}
+
+/// "yes" or "no" when the reply opens with one (null: neither).
+pub fn yesNo(reply: []const u8) ?bool {
+    const t = std.mem.trimStart(u8, reply, " \t\r\n*\"'");
+    if (std.ascii.startsWithIgnoreCase(t, "yes") and (t.len == 3 or !std.ascii.isAlphabetic(t[3]))) return true;
+    if (std.ascii.startsWithIgnoreCase(t, "no") and (t.len == 2 or !std.ascii.isAlphabetic(t[2]))) return false;
+    return null;
+}
+
 const delims = " \t\r\n.,;:!?\"'()*_";
 
 /// A reply at most this many words long may agree by its value words alone.
 const terse_words = 8;
 
-/// Words that deny, doubt or offer a choice: a reply holding one does not give the fact as told.
+/// Words that deny, doubt or offer a choice: a clause holding one and a value word does not give the fact as told.
 const hedges = [_][]const u8{ "not", "no", "isn", "aren", "don", "doesn", "didn", "never", "maybe", "perhaps", "possibly", "probably", "might", "whether", "unsure", "or", "either", "neither", "nor" };
 
 /// Words that deny: a clause holding one asserts no value (a doubt, "maybe green", still offers one).
 const denials = [_][]const u8{ "not", "no", "isn", "aren", "don", "doesn", "didn", "never", "neither", "nor", "without" };
 
 fn denies(clause: []const u8) bool {
-    var it = std.mem.tokenizeAny(u8, clause, delims);
-    while (it.next()) |w| for (denials) |d| if (std.ascii.eqlIgnoreCase(w, d)) return true;
+    return holds(clause, &denials);
+}
+
+fn holds(text: []const u8, list: []const []const u8) bool {
+    var it = std.mem.tokenizeAny(u8, text, delims);
+    while (it.next()) |w| for (list) |h| if (std.ascii.eqlIgnoreCase(w, h)) return true;
     return false;
 }
 
-fn hedged(reply: []const u8) bool {
-    var it = std.mem.tokenizeAny(u8, reply, delims);
-    while (it.next()) |w| for (hedges) |h| if (std.ascii.eqlIgnoreCase(w, h)) return true;
+/// Whether `reply` states the value plainly: a hedge word fails it only where it denies, doubts or replaces the value.
+fn plain(fact: []const u8, question: []const u8, ref: []const u8, reply: []const u8) bool {
+    if (unknown(reply)) return false;
+    // "No, your sister lives in Bergen." states Bergen plainly; its no is judged as the answer to a yes-or-no question
+    if (yesNo(reply)) |said| {
+        if (yesNo(ref)) |want| {
+            if (said != want) return false;
+        } else if (!said and wording.yesNo(question)) return false;
+    }
+    // clause by clause: "not grey", "maybe grey" and "grey or brown" fail; "grey; I no longer like cheese" does not
+    var hedge = false;
+    var stated = false;
+    var doubt = false; // a hedged clause ended in a colon: what it opens ("colours you might see: Brown") shares it
+    var opened = false; // the last clause ended in that colon (a blank line after it does not close it)
+    var start: usize = 0;
+    for (0..reply.len + 1) |i| {
+        if (i < reply.len and std.mem.indexOfScalar(u8, ".!?;,:\n", reply[i]) == null) continue;
+        const stop: u8 = if (i < reply.len) reply[i] else '.';
+        const seg = reply[start..i];
+        start = i + 1;
+        if (std.mem.trim(u8, seg, " \t\r*_-").len == 0) {
+            if (stop == '\n' and !opened) doubt = false; // a blank line ends a list
+            continue;
+        }
+        var h_any = false;
+        var buts = std.mem.splitSequence(u8, seg, " but ");
+        while (buts.next()) |half| {
+            var ands = std.mem.splitSequence(u8, half, " and ");
+            while (ands.next()) |clause| {
+                const h = holds(clause, &hedges);
+                const v = valueIn(fact, question, clause);
+                if (v and (h or doubt)) return false;
+                h_any = h_any or h;
+                stated = stated or v;
+            }
+        }
+        hedge = hedge or h_any;
+        opened = stop == ':';
+        if (opened) doubt = doubt or h_any else if (std.mem.indexOfScalar(u8, ".!?;", stop) != null) doubt = false;
+    }
+    return !hedge or stated;
+}
+
+/// Whether `clause` says a value word: the fact's names and numbers if any, else its marked words the question lacks.
+fn valueIn(fact: []const u8, question: []const u8, clause: []const u8) bool {
+    if (userValue(fact) and holds(clause, &.{ "you", "yours", "your", "yourself" })) return true; // the user as value
+    var named = false;
+    var it: units.Units = .init(fact);
+    while (it.next()) |u| if (!u.paired and (std.ascii.isDigit(u.raw[0]) or (!u.first and std.ascii.isUpper(u.raw[0])))) {
+        named = true;
+        if (hasStem(clause, bare(u.raw))) return true;
+    };
+    if (named) return false;
+    it = .init(fact);
+    while (it.next()) |u| {
+        if (!u.marked() or hasStem(question, bare(u.raw))) continue;
+        if (hasStem(clause, bare(u.raw))) return true;
+    }
+    return false;
+}
+
+/// A word as written without the full stop or quote after it ("green." as "green").
+fn bare(raw: []const u8) []const u8 {
+    return std.mem.trimEnd(u8, raw, ".'");
+}
+
+/// Whether the fact's value is the user: it says me or mine ("The tent belongs to me.", "The red cup is mine.").
+fn userValue(fact: []const u8) bool {
+    return holds(fact, &.{ "me", "mine", "myself" });
+}
+
+/// Whether a question asks about the user's world, not the model's own things ("What tent is yours?").
+fn aboutUser(question: []const u8) bool {
+    return !holds(question, &.{ "your", "yours", "yourself" });
+}
+
+/// Whether a reference names the user in either person ("Your tent.", "The tent belongs to the user.").
+fn namesUser(ref: []const u8) bool {
+    return holds(ref, &.{ "me", "mine", "myself", "you", "yours", "your", "yourself", "user" });
+}
+
+/// Whether a reply gives the user as the value: yours, "Your tent.", or "belongs to you" (not "You told me...").
+fn givesUser(fact: []const u8, question: []const u8, reply: []const u8) bool {
+    if (holds(reply, &.{ "yours", "yourself" })) return true;
+    var lead: [48]u8 = undefined; // the fact's word before its me, made normal
+    var lead_len: usize = 0;
+    var prev: [48]u8 = undefined;
+    var prev_len: usize = 0;
+    var fi: units.Units = .init(fact);
+    while (fi.next()) |u| {
+        if (std.mem.eql(u8, u.word, "me") or std.mem.eql(u8, u.word, "mine")) {
+            @memcpy(lead[0..prev_len], prev[0..prev_len]);
+            lead_len = prev_len;
+        }
+        prev_len = @min(u.word.len, prev.len);
+        @memcpy(prev[0..prev_len], u.word[0..prev_len]);
+    }
+    prev_len = 0;
+    var your = false; // the unit before was "your" (made normal it reads "yor", as colour reads color)
+    var ri: units.Units = .init(reply);
+    while (ri.next()) |u| {
+        if (your and units.says(question, u.word)) return true;
+        if (std.mem.eql(u8, u.word, "you") and lead_len > 0 and std.mem.eql(u8, prev[0..prev_len], lead[0..lead_len])) return true;
+        your = std.ascii.eqlIgnoreCase(bare(u.raw), "your");
+        prev_len = @min(u.word.len, prev.len);
+        @memcpy(prev[0..prev_len], u.word[0..prev_len]);
+    }
+    return false;
+}
+
+/// Whether `reply` names a subject the store knows ("your sister") that the fact, its subject and the question do not.
+fn otherSubject(fact: []const u8, question: []const u8, reply: []const u8, known: Known) bool {
+    for (known.subjects) |s| {
+        var buf: [48]u8 = undefined;
+        var len: usize = 0;
+        var count: usize = 0;
+        var it: units.Units = .init(s);
+        while (it.next()) |u| : (count += 1) {
+            len = @min(u.word.len, buf.len);
+            @memcpy(buf[0..len], u.word[0..len]);
+        }
+        const noun = buf[0..len];
+        // the user ("me") is no other subject: a reply says "you" of the user whatever the fact
+        if (len == 0 or (count == 1 and holds(noun, &.{ "me", "i", "myself", "we", "us" }))) continue;
+        if (units.says(fact, noun) or units.says(question, noun) or units.says(known.subject, noun)) continue;
+        if (units.says(reply, noun)) return true;
+    }
     return false;
 }
 
@@ -97,4 +251,3 @@ fn hasStem(text: []const u8, w: []const u8) bool {
     while (it.next()) |t| if (t.len >= stem.len and std.ascii.eqlIgnoreCase(t[0..stem.len], stem)) return true;
     return false;
 }
-
