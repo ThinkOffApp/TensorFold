@@ -42,6 +42,19 @@ test "on Nemotron 3.5 Lightning's tokenizer the span of each note is inside ever
         if (std.mem.eql(u8, case.name, "plain")) try testing.expect((try places.spanOf(a, t, case.raw)) == null);
         const span = (try places.spanOf(a, t, note)) orelse return error.TestNoSpan;
         try testing.expect(span.len >= 4);
+        const raw_span = (try places.rawSpanOf(a, t, note)) orelse return error.TestNoRawSpan;
+        try testing.expect(raw_span.len >= 4);
+        const quoted_note = try json.quote(a, note, .{});
+        const histories = [_][]const u8{
+            "",
+            "{\"role\":\"system\",\"content\":\"Be concise.\"},",
+            "{\"role\":\"user\",\"content\":\"Hello\"},{\"role\":\"assistant\",\"content\":\"Hello!\"},",
+        };
+        for (histories) |history| {
+            const messages = try std.fmt.allocPrint(a, "[{s}{{\"role\":\"user\",\"content\":{s}}}]", .{ history, quoted_note });
+            const ids = try t.renderIds(a, (try json.parseText(a, messages)).ok, .{}, &problem);
+            try testing.expect(std.mem.indexOf(u32, ids, raw_span) != null);
+        }
         // the note as cached: current under one id, later superseded, later renumbered, between other lines
         const as_cached = try line.render(a, 31, note, .none, .plain);
         const superseded = try line.render(a, 31, note, .{ .superseded = .{ .by = 32, .told = told } }, .plain);

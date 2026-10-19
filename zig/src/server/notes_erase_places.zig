@@ -4,6 +4,7 @@ const api = @import("engine_api");
 const Server = @import("server.zig").Server;
 const model_text = @import("model_text.zig");
 const line = @import("notes/line.zig");
+const json = @import("json.zig");
 
 /// A place outside the store and the journal that can hold a note's text or tokens.
 pub const Place = enum {
@@ -82,6 +83,28 @@ pub fn spanOf(a: std.mem.Allocator, text: model_text.Text, note: []const u8) !?[
     return null;
 }
 
+/// Interior raw text: teaching turns do not contain the JSON escapes used by rendered notes.
+pub fn rawSpanOf(a: std.mem.Allocator, text: model_text.Text, note: []const u8) !?[]const u32 {
+    const lo = std.mem.indexOfScalar(u8, note, ' ') orelse return null;
+    const hi = std.mem.lastIndexOfScalar(u8, note, ' ') orelse return null;
+    if (lo >= hi) return null;
+    const span = try text.encode(a, note[lo..hi], false);
+    if (span.len < 4) return null;
+    const quoted = try json.quote(a, note, .{});
+    const histories = [_][]const u8{
+        "",
+        "{\"role\":\"system\",\"content\":\"Be concise.\"},",
+        "{\"role\":\"user\",\"content\":\"Hello\"},{\"role\":\"assistant\",\"content\":\"Hello!\"},",
+    };
+    for (histories) |history| {
+        const messages = try std.fmt.allocPrint(a, "[{s}{{\"role\":\"user\",\"content\":{s}}}]", .{ history, quoted });
+        var problem: []const u8 = "";
+        const ids = try text.renderIds(a, (try json.parseText(a, messages)).ok, .{}, &problem);
+        if (std.mem.indexOf(u32, ids, span) == null) return null;
+    }
+    return span;
+}
+
 /// Whether `span` is inside the tokens of `note`'s line in each way a block can render and surround it.
 fn insideEveryWrapper(a: std.mem.Allocator, text: model_text.Text, note: []const u8, span: []const u32) !bool {
     const told = line.ordinalOf(2026, 10, 16) * line.tpd;
@@ -119,21 +142,30 @@ pub fn forget(srv: *Server, a: std.mem.Allocator, notes: []const []const u8) For
             f.short = true;
             continue;
         }
-        if (!f.asked) f.ok = true;
-        f.asked = true;
-        const got = srv.engine.forgetPrompts(span) catch {
-            f.ok = false;
+        ask(srv, &f, span);
+        const raw = (rawSpanOf(a, srv.text, note) catch null) orelse {
+            f.short = true;
             continue;
         };
-        f.out.states += got.states;
-        f.out.scrubbed += got.scrubbed;
-        f.out.learned += got.learned;
-        f.out.held += got.held;
-        f.out.failed += got.failed;
-        f.out.in_flight += got.in_flight;
-        f.out.disk = f.out.disk and got.disk;
+        if (!std.mem.eql(u32, raw, span)) ask(srv, &f, raw);
     }
     return f;
+}
+
+fn ask(srv: *Server, f: *Forget, span: []const u32) void {
+    if (!f.asked) f.ok = true;
+    f.asked = true;
+    const got = srv.engine.forgetPrompts(span) catch {
+        f.ok = false;
+        return;
+    };
+    f.out.states += got.states;
+    f.out.scrubbed += got.scrubbed;
+    f.out.learned += got.learned;
+    f.out.held += got.held;
+    f.out.failed += got.failed;
+    f.out.in_flight += got.in_flight;
+    f.out.disk = f.out.disk and got.disk;
 }
 
 /// Each place's status, by the server's own flags and stores now and what the engine's forget showed.

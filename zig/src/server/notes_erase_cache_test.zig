@@ -23,7 +23,7 @@ const Cached = struct {
     const State = struct { at: u32 };
 
     fn init(c: *Cached, root: []const u8) !void {
-        c.store = pc.Store.init(c.gpa, .{ .ptr = c, .vtable = &.{ .bytes = bytes, .save = save, .restore = restore, .drop = drop, .write = write, .read = read, .forget = forgetFile } }, .{ .min_gap = 1, .min_prompt = 0 }, 1 << 30);
+        c.store = pc.Store.init(c.gpa, .{ .ptr = c, .vtable = &.{ .bytes = bytes, .save = save, .restore = restore, .drop = drop, .write = write, .read = read, .forget = forgetFile, .forget_checked = pc.singleForgetChecked } }, .{ .min_gap = 1, .min_prompt = 0 }, 1 << 30);
         c.im = try Imprint.open(c.gpa, root, 7, 1 << 30);
         c.store.imprint = &c.im;
     }
