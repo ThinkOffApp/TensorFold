@@ -1,5 +1,16 @@
 # G1 review receipt
 
+## Review corrections
+
+G1 remains subject to re-review. Code HEAD 0374a8b4 passes 354/354 server tests (10 minutes, MaxRSS 5 GiB), all changed Zig fmt checks and lean 630 (unchanged from 815f8105).
+
+- 203052cb: cancellation returns before the suffix-view output assertion. A deterministic first-output cancellation in both views passes; removing the guard aborts at the assertion. Claude independently reports 6 configurations times 400 random cancellations without panic, versus crashes on the previous pin.
+- ee21ea19: the alias test checks actual encoded keys in memo names and by_key; route holder flags reset before every Chat/Messages/Responses request.
+- bf04b7bc: exact remaining-place sets and requests:empty are asserted, not merely global !complete. Permanently forcing requests:may_hold makes the endpoint test fail. Historical promotion weights remain may_hold even with slide disabled; disabled-writer regression failed before this correction. Disk reasons now describe earlier runs too.
+- 0374a8b4: documents that complete:true is currently unreachable and restores error.code=500 on applied-unsynced responses.
+
+The tested baseline remaining-place set is now learn_files, compaction_memory, request_log and promotion, plus any specific active uncertain place. No claim is made that historical weights or files were actually searched or scrubbed.
+
 Base: 815f8105. Separate from notes-unknown-integration. Not deployed or merged.
 
 E1 clears the tokenizer memo after erase span discovery. E2/R4 build an owned replacement alias memo before publication and transfer it only after successful rewrite; failures keep the old memo intact. E3 carries applied-unsynced results through engine forgetting and returns HTTP 500 with journal uncertainty. E4 reports unsearched earlier-run disk files as may_hold. E15 ties scratch lifetime to the acquired version's epoch. E5 counts API prompt holders before planning through remember and async warm completion, latching holders before forgetting. R1 leaves refused erases' merges intact and cancels applied erases' merges cooperatively, discarding cores through the reaper.
