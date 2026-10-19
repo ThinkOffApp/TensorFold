@@ -42,6 +42,7 @@ Grades: **MEASURED** we ran it; **READ** we read it in code or a document; **INF
 | `--notes-promote-every DURATION` | a night every DURATION after the last ended (`600s`, `10m`, `24h`); needs `--notes` and `--slide` |
 | `--notes-promote-hold N` | nights a note must stay unchanged before it is due (default 1) |
 | `--notes-promote-alone N` | nights running its questions must come back without its note (default 2) |
+| `--notes-promote-thinking {on,off}` | every check asked with thinking on as well as off (default on); off: thinking off only |
 
 State lives in `SNAPSHOT.promote` beside the snapshot (JSON, format `tf-notes-promote/1`), written to a fresh
 temporary file, synced (`F_FULLFSYNC` on macOS, `fsync` elsewhere, the journal's rule), renamed over, and the folder
@@ -179,6 +180,22 @@ ran without the leak), every fact spilling (the pocket ends as the night found i
 the pass, and a night with no damage (nothing taught again); three negative controls each fail (every due fact
 rejected as before, no rewind of a blamed fact, the fact left unnamed in the probe log). Not yet run on a GPU.
 
+**Thinking on too (item 9).** The server answers chats with thinking on by default (`--thinking`), but the checks
+above asked with thinking off only, in 48 tokens, so a lesson that changed only what a thinking reply says went
+unseen. Now every regression probe is asked a second time with thinking on: the same question after the same notes
+block, its reasoning bounded as the learner's own thinking checks are (`slide_ask.think_budget`, 224 tokens, of
+`think_reply`, 320), and judged on the reply after the reasoning. Before and after are compared mode by mode. The
+alone check asks each probe in both modes too, and a fact leaves the prompt only when it is right in both. Thinking
+asks are marked `"thinking": true` in the probe log and "(thinking)" in the worse list. `--notes-promote-thinking
+off` asks with thinking off only. Cost: each check asks twice as many questions, the thinking ones up to 320 tokens
+each instead of 48. Host tests (`notes_promote_thinking_test.zig`): damage seen only with thinking on rejects the
+night (control: off only, kept); every probe is asked in both modes; a fact right alone only with thinking off stays
+in the prompt (control: it leaves). In the alone rig (`notes_promote_alone_rig_test.zig`) the model writes its
+reasoning before `</think>` when asked to think, so the real backend, the store's block and the server's reasoning
+split are all in the path: the cat's eyes stay in the prompt, my eyes leave, and every thinking ask carried the block.
+Four negative controls each fail (no thinking copy of the set, the alone check in one mode, the backend ignoring the
+mode, a thinking ask without its block). Not yet run on a GPU.
+
 **Retry.** A missed or rejected fact is due once more the next night (`retries`, kept in the state); not a third time.
 
 **Alone.** On the accepted state each fact in the pocket is asked its probes in the state after it leaves the prompt:
@@ -312,6 +329,8 @@ prompt, which is the design), and the 2 in-weights facts cost one question when 
   learner still writes them. (Which probe went worse is in the probe log and the night's worse list.)
 - Missed and rejected facts are tried once more (`retries`), not a third time; only 2 of 29 facts reached in weights
   on the GB10 run.
+- The thinking checks have not run on a GPU: how often a real thinking reply changes after a lesson, and what the
+  longer asks cost a night, are not measured.
 - A spill-over that two facts cause only together is caught, since each fact is checked on top of the ones kept
   before it, but it is blamed on the later one (oldest first), which may be the wrong one. The one-by-one pass has
   not run on a GPU.
