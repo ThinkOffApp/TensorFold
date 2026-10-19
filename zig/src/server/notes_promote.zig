@@ -406,6 +406,7 @@ const Backend = struct {
     p: *Promoter,
     arena: Allocator, // the night's
     others: ?[]const []const u8 = null,
+    marked: ?slide.Mark = null, // the graph and teacher as the learner's last mark tonight found them
 
     fn srv(b: *Backend) *Server {
         return b.p.srv;
@@ -470,6 +471,18 @@ const Backend = struct {
 
     pub fn retire(b: *Backend, a: Allocator, ns: []const promote.Neuron) !void {
         if (!slide.retire(b.srv(), a, ns)) return error.RetireRefused;
+    }
+
+    /// The learner keeps the pocket as it is, the graph and teacher beside it (a new mark replaces the last one).
+    pub fn mark(b: *Backend, a: Allocator) !void {
+        b.marked = slide.mark(b.srv(), a) orelse return error.MarkRefused;
+    }
+
+    /// The pocket, graph and teacher put back as the last mark found them and saved; refused without a mark.
+    pub fn rewind(b: *Backend, a: Allocator) !void {
+        const m = b.marked orelse return error.NothingToRewind;
+        if (!slide.rewind(b.srv(), a, m, "taken back: the night that taught it made answers worse")) return error.RewindRefused;
+        b.marked = null;
     }
 
     /// Each question answered by the untaught model with the fact before it, as a lesson writes its answers.

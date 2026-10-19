@@ -40,6 +40,12 @@ const Save = struct {
     message: []const u8 = "",
 };
 
+/// A fact as a mark found it: its state, its neurons and its message.
+pub const Was = struct { id: u32, state: State, neurons: []const api.Neuron, message: []const u8 };
+
+/// The graph as a mark found it: every fact then, and the next id (facts from it on came after the mark).
+pub const Kept = struct { facts: []const Was, next: u32 };
+
 /// Words of five letters or more that say nothing about a fact, so they never link two facts.
 const common = [_][]const u8{ "about", "after", "again", "being", "could", "every", "other", "should", "still", "their", "there", "these", "those", "under", "until", "where", "which", "while", "would" };
 
@@ -172,6 +178,37 @@ pub const Graph = struct {
             if (x.layer != y.layer or x.neuron != y.neuron or x.key != y.key) break;
         } else return;
         f.neurons = g.arena.allocator().dupe(api.Neuron, neurons) catch return;
+    }
+
+    /// Each fact's state, neurons and message now (slices the graph keeps while it lives), and the next id.
+    pub fn keep(g: *Graph, a: Allocator) !Kept {
+        g.mutex.lockUncancelable(g.io);
+        defer g.mutex.unlock(g.io);
+        const out = try a.alloc(Was, g.facts.items.len);
+        for (g.facts.items, out) |f, *w| w.* = .{ .id = f.id, .state = f.state, .neurons = f.neurons, .message = f.message };
+        return .{ .facts = out, .next = g.next };
+    }
+
+    /// The facts as `k` kept them; those added since are taken back (missed, no neurons), `why` their message.
+    pub fn rewound(g: *Graph, k: Kept, why: []const u8) void {
+        g.mutex.lockUncancelable(g.io);
+        defer g.mutex.unlock(g.io);
+        const message = g.arena.allocator().dupe(u8, why) catch "";
+        for (g.facts.items) |*f| {
+            if (f.id >= k.next) {
+                f.state = .missed;
+                f.phase = null;
+                f.neurons = &.{};
+                f.message = message;
+                continue;
+            }
+            for (k.facts) |w| if (w.id == f.id) {
+                f.state = w.state;
+                f.neurons = w.neurons;
+                f.message = w.message;
+            };
+        }
+        g.save();
     }
 
     /// A learning fact's round, from one.

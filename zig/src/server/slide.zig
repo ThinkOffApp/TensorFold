@@ -102,7 +102,7 @@ pub fn teachText(srv: *Server, a: Allocator, text: []const u8, source: []const u
         id.* = srv.slide.add(fact, source, now(srv));
         out.event("fact", .{ .id = id.*, .text = fact });
     }
-    defer saveAll(srv, a);
+    defer _ = saveAll(srv, a);
     // each fact its own lesson and block, so each keeps a gate of its own
     for (facts, ids) |fact, id| {
         if (gone.check()) break;
@@ -146,8 +146,39 @@ pub fn retire(srv: *Server, a: Allocator, neurons: []const api.Neuron) bool {
         .failed, .refused => false,
         else => true,
     };
-    if (ok) saveAll(srv, a);
+    if (ok) _ = saveAll(srv, a);
     return ok;
+}
+
+/// What a mark keeps beside the learner's copy of the pocket: the graph's facts and the teacher as they are.
+pub const Mark = struct { graph: slide_graph.Kept, teacher: slide_teacher.Kept };
+
+/// The learner keeps the pocket and its lessons as they are (a second mark replaces the first); null when refused.
+pub fn mark(srv: *Server, a: Allocator) ?Mark {
+    switch (run(srv, a, &.{ .mark = true }, 0)) {
+        .failed => |message| {
+            log.line("slide: the learner did not mark the pocket: {s}", .{message});
+            return null;
+        },
+        .refused => return null,
+        else => {},
+    }
+    return .{ .graph = srv.slide.keep(a) catch return null, .teacher = srv.teacher.keepNow(srv.io, a) catch return null };
+}
+
+/// The pocket put back as mark `m` found it and saved, the graph (later facts' message `why`) and teacher with it.
+pub fn rewind(srv: *Server, a: Allocator, m: Mark, why: []const u8) bool {
+    switch (run(srv, a, &.{ .rewind = true }, 0)) {
+        .failed => |message| {
+            log.line("slide: the learner did not rewind the pocket: {s}", .{message});
+            return false;
+        },
+        .refused => return false,
+        else => {},
+    }
+    srv.slide.rewound(m.graph, why);
+    srv.teacher.putBack(srv.io, m.teacher);
+    return saveAll(srv, a);
 }
 
 /// Rounds a lesson gets to bring its facts back when asked once, before it is given up.
@@ -241,8 +272,8 @@ fn questions(a: Allocator, plan: teach.Plan) []const []const u8 {
     return out;
 }
 
-/// Every kept lesson into the model's shards, timed, with the shards it changed.
-fn saveAll(srv: *Server, a: Allocator) void {
+/// Every kept lesson into the model's shards, timed, with the shards it changed; false when it was not saved.
+fn saveAll(srv: *Server, a: Allocator) bool {
     srv.slide.saving(folder(srv));
     const began = now(srv);
     const failed: ?[]const u8 = switch (run(srv, a, &.{ .save = true }, 0)) {
@@ -252,6 +283,7 @@ fn saveAll(srv: *Server, a: Allocator) void {
     };
     if (failed) |why| log.line("slide: the learned neurons could not be saved into the model's files: {s}", .{why});
     srv.slide.saveEnded(folder(srv), seconds(srv, began), failed);
+    return failed == null;
 }
 
 /// Earlier chat facts `fact` replaces ("I like blue." for "Now I like red."): their neurons zeroed, marked replaced.

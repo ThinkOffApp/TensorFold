@@ -74,10 +74,31 @@ pub const Teacher = struct {
         t.bank = null;
     }
 
+    /// What a rewind puts back: the kept lessons' count, the document answers, the keep and bank answers (copied).
+    pub fn keepNow(t: *Teacher, io: std.Io, a: Allocator) !Kept {
+        t.mutex.lockUncancelable(io);
+        defer t.mutex.unlock(io);
+        return .{ .lessons = t.lessons, .told = t.told.items.len, .keep = if (t.keep) |k| try a.dupe(api.Example, k) else null, .bank = if (t.bank) |b| try a.dupe(Banked, b) else null };
+    }
+
+    /// The teacher as `k` found it; keep or bank answers that cannot be copied back are written again when next needed.
+    pub fn putBack(t: *Teacher, io: std.Io, k: Kept) void {
+        t.mutex.lockUncancelable(io);
+        defer t.mutex.unlock(io);
+        const a = t.arena.allocator();
+        t.lessons = k.lessons;
+        t.told.shrinkRetainingCapacity(@min(k.told, t.told.items.len));
+        t.keep = if (k.keep) |x| a.dupe(api.Example, x) catch null else null;
+        t.bank = if (k.bank) |x| a.dupe(Banked, x) catch null else null;
+    }
+
     pub fn deinit(t: *Teacher) void {
         t.arena.deinit();
     }
 };
+
+/// The teacher as a mark found it: the kept lessons, the document answers told, the keep and bank answers then.
+pub const Kept = struct { lessons: usize, told: usize, keep: ?[]const api.Example, bank: ?[]const Banked };
 
 /// A bank question, the model's first answer to it, and that answer as an example.
 const Banked = struct { question: []const u8, before: []const u8, ex: api.Example };
