@@ -216,6 +216,13 @@ pub fn erase(s: *Store, a: Allocator, id: u32, why: *Refusal) Error!Erased {
         try texts.append(a, try a.dupe(u8, n.text()));
         break;
     };
+    // An already-known write may have taught the same fact in different words without making a new note.
+    for (gone.items) |k| {
+        const raw = s.log.items.items[k].r.text;
+        for (texts.items) |seen| {
+            if (std.mem.eql(u8, seen, raw)) break;
+        } else try texts.append(a, try a.dupe(u8, raw));
+    }
     var unsynced = false;
     s.journal.?.rewrite(a, kept.items, log.next_source) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,

@@ -7,6 +7,25 @@ const testing = std.testing;
 const Allocator = std.mem.Allocator;
 const Alignment = std.mem.Alignment;
 
+test "erase includes the raw wording of already-known writes in prompt forgetting" {
+    const r = try rig.Rig.initKind(testing.allocator, .postings, 1024);
+    defer r.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ops = @import("notes_ops.zig");
+    var why: ops.Refusal = .{};
+    _ = try ops.perform(r.store(), a, .{ .op = .add, .text = "My favourite colour is green." }, &why);
+    const raw = "my favourite colour is green";
+    _ = try ops.perform(r.store(), a, .{ .op = .add, .text = raw }, &why);
+    const erased = try ops.erase(r.store(), a, 30, &why);
+    var found = false;
+    for (erased.texts) |text| if (std.mem.eql(u8, text, raw)) {
+        found = true;
+    };
+    try testing.expect(found);
+}
+
 test "unsynced erase still forgets encodes and reports remaining places" {
     const r = try rig.Rig.initKind(testing.allocator, .postings, 1024);
     defer r.deinit();
