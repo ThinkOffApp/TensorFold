@@ -162,6 +162,23 @@ value is a name or a number, or a word of a stored note, in a clause that denies
 about your neighbour's eyes" names none; "I don't know, but your rabbit is named Floppy." names one). Host test: a lesson that leaks a value to neighbours, one that invents an untold answer and one that
 flips a two-note answer each reject the night; control: the same night with no damage is kept.
 
+**One fact at a time after a refused night (item 8).** The wide checks above caught real leaks, but in run5 they
+refused every add night as a whole for one fact's leak, and run6 turned them off (`--notes-promote-targeted off`), so
+nothing asked the questions where the brother's amber eyes spread to other people. Now an add plan that makes answers
+worse is rewound and its regression set asked once more, as before; if the answers are back, and more than one fact
+was due, each due fact is taught again on its own, oldest first, from the night's state. After each lesson the whole
+regression set is asked against the night's first replies. A fact that makes answers worse is rewound (the learner's
+mark, as for a plan) and rejected alone, with "taught on its own it made N answers worse"; the next fact starts from
+the state without it. The others are promoted. A lesson the learner does not keep is asked too, since the next fact
+starts from the state after it. One due fact is rejected as before, with no lesson taught again. The night log counts
+`one_by_one` and `blamed`; each one-by-one check's probes go to `SNAPSHOT.promote-probes.jsonl` with `key` set to its
+fact, and its entries in the worse list start with the fact's key. Cost: a refused night with N facts due teaches
+N more lessons and asks the set N more times; a night that passes costs what it did. Host tests
+(`notes_promote_spill_test.zig`): the spilling fact taught between two good ones (the third is promoted, so its check
+ran without the leak), every fact spilling (the pocket ends as the night found it), one due fact, a missed lesson in
+the pass, and a night with no damage (nothing taught again); three negative controls each fail (every due fact
+rejected as before, no rewind of a blamed fact, the fact left unnamed in the probe log). Not yet run on a GPU.
+
 **Retry.** A missed or rejected fact is due once more the next night (`retries`, kept in the state); not a third time.
 
 **Alone.** On the accepted state each fact in the pocket is asked its probes in the state after it leaves the prompt:
@@ -294,5 +311,8 @@ prompt, which is the design), and the 2 in-weights facts cost one question when 
 - The regression set does not log which probe went worse. The learner's degenerate wordings ("the boat's colour's
   colour's ...") are no longer promotion probes, but the learner still writes them.
 - Missed and rejected facts are never retried; only 2 of 29 facts reached in weights on the GB10 run.
+- A spill-over that two facts cause only together is caught, since each fact is checked on top of the ones kept
+  before it, but it is blamed on the later one (oldest first), which may be the wrong one. The one-by-one pass has
+  not run on a GPU.
 - A Metal run of the full nights set; Metal was the two-fact gate only.
 - Not pushed; no pull request.
