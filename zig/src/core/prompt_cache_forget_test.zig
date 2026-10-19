@@ -1,5 +1,4 @@
-//! Store.forgetSpan: kept states and learned states on disk that hold an erased note's tokens go; the rest stay.
-//! Each test first shows the planted copy is there (the check can fail), then that the forget took it and only it.
+//! Store.forgetSpan regressions plant kept and learned states, erase matching copies, and preserve unrelated ones.
 const std = @import("std");
 const pc = @import("prompt_cache.zig");
 const imprint = @import("prompt_imprint.zig");
@@ -261,7 +260,7 @@ test "forgetSpan drops the kept state holding the note, keeps the state before i
     var f: Fake = .{ .gpa = gpa };
     var s = Store.init(gpa, f.snapshots(), .{ .min_gap = 1, .min_prompt = 0 }, 1 << 20);
     defer s.deinit();
-    // the note's conversation keeps a state before its block (3) and one past it (9); the other keeps one past its own (9)
+    // Keep states before (3) and after (9) the note block, plus an unrelated conversation's state (9).
     _ = f.pass(&s, &with_note, .{ .marks = &.{ 3, 9 } });
     _ = f.pass(&s, &without, .{ .marks = &.{9} });
     try testing.expectEqual(@as(usize, 3), s.entries.items.len);

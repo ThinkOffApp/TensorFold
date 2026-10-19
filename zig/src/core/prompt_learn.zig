@@ -183,8 +183,7 @@ pub fn forgetOthers(s: *Store, im: *imprint.Imprint, span: []const u32, out: *pc
         cursor = id;
         var other = imprint.Imprint.inspect(s.gpa, im.root, id) catch |err| {
             if (err == error.ImprintUnindexed) {
-                // A live first append writes payload before creating its index. Without a
-                // writer lease even an apparently empty directory is not a stable snapshot.
+                // First append writes payload before index; without a lease even an empty directory can change.
                 out.held += 1;
                 continue;
             }
@@ -192,8 +191,7 @@ pub fn forgetOthers(s: *Store, im: *imprint.Imprint, span: []const u32, out: *pc
             continue;
         };
         defer other.deinit();
-        // No shared writer-ownership protocol exists for another server's identity.
-        // Report its retained copies; rewriting its snapshot could discard concurrent writes.
+        // Without writer ownership, rewriting a sibling snapshot could discard concurrent writes.
         for (other.metas.items) |meta| {
             if (pc.holdsSpan(meta.tokens, span) or pc.weakSpanTail(meta.tokens, span)) out.held += 1;
         }
