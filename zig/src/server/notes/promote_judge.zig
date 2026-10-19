@@ -74,6 +74,22 @@ pub fn extends(before: []const u8, now: []const u8) bool {
     return n > 0;
 }
 
+/// Whether a reply copies the notes block: two of its lines (`[21] "..."`) or more; one is a citation and is judged.
+pub fn copiesBlock(reply: []const u8) bool {
+    var lines: usize = 0;
+    var i: usize = 0;
+    while (std.mem.indexOfScalarPos(u8, reply, i, '[')) |at| : (i = at + 1) {
+        var j = at + 1;
+        while (j < reply.len and std.ascii.isDigit(reply[j])) j += 1;
+        if (j == at + 1 or j >= reply.len or reply[j] != ']') continue;
+        j += 1;
+        while (j < reply.len and (reply[j] == ' ' or reply[j] == '\t')) j += 1;
+        if (j < reply.len and reply[j] == '"') lines += 1;
+        if (lines >= 2) return true;
+    }
+    return false;
+}
+
 /// Whether a reply says it does not know (the model's ways of saying nothing was told).
 pub fn unknown(reply: []const u8) bool {
     const marks = [_][]const u8{ "don't know", "do not know", "don’t know", "not sure", "no information", "haven't told", "have not told", "haven't mentioned", "have not mentioned", "not mentioned", "don't have", "do not have", "can't know", "cannot know", "no way of knowing", "not been told", "wasn't told", "unknown", "not provided", "not given", "not specified", "not stated", "doesn't tell", "does not tell", "doesn't say", "does not say", "doesn't mention", "does not mention", "no data", "no record" };

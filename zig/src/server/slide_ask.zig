@@ -91,11 +91,11 @@ pub fn askBaseAt(srv: *Server, cx: *Cx, system: ?[]const u8, user: []const u8, m
 
 /// One greedy reply with thinking on, its reasoning bounded; its content is what the user reads after the reasoning.
 pub fn askThinking(srv: *Server, cx: *Cx, user: []const u8, gone: anytype) chat.Failure!chat.Reply {
-    return askThinkingAfter(srv, cx, null, user, gone);
+    return askThinkingAfter(srv, cx, null, user, think_budget, think_reply, gone);
 }
 
-/// `askThinking` after a system note when given, as `ask` puts one.
-pub fn askThinkingAfter(srv: *Server, cx: *Cx, system: ?[]const u8, user: []const u8, gone: anytype) chat.Failure!chat.Reply {
+/// `askThinking` after a system note when given, as `ask` puts one, its reasoning and reply bounded as given.
+pub fn askThinkingAfter(srv: *Server, cx: *Cx, system: ?[]const u8, user: []const u8, budget: i64, max_tokens: i64, gone: anytype) chat.Failure!chat.Reply {
     const a = cx.a;
     var list: std.ArrayList(Value) = .empty;
     if (system) |s| try list.append(a, try message(a, "system", s));
@@ -104,8 +104,8 @@ pub fn askThinkingAfter(srv: *Server, cx: *Cx, system: ?[]const u8, user: []cons
     const fields = try json.newObject(a);
     try fields.put(a, "enable_thinking", .{ .bool = true });
     try fields.put(a, "temperature", .{ .float = 0 });
-    try fields.put(a, "thinking_budget", try json.intValue(a, think_budget));
-    const prepared = try chat.prepare(srv, cx, .{ .messages = .{ .array = asked }, .fields = .{ .object = fields }, .max_tokens = think_reply, .temperature = 0 }, gone);
+    try fields.put(a, "thinking_budget", try json.intValue(a, budget));
+    const prepared = try chat.prepare(srv, cx, .{ .messages = .{ .array = asked }, .fields = .{ .object = fields }, .max_tokens = max_tokens, .temperature = 0 }, gone);
     return chat.generate(srv, cx, prepared, null, gone);
 }
 

@@ -31,6 +31,11 @@ const pair_prompt = "The user once told you: \"{s}\" and \"{s}\"\nWrite one shor
 /// Tokens a night's question is answered in at most (the learner's own checks read 48).
 pub const answer_tokens = 48;
 
+/// A thinking check's reasoning cap: the learner's 224 cut the model mid-copy of the notes block (asus3, 20 Oct).
+pub const think_budget = 1536;
+/// Its reply cap: uncapped, the model reasoned 287 to 1230 tokens on 9 of 10 checks, then answered.
+pub const think_reply = 2048;
+
 /// A reference written again is sampled at the lesson's wording temperature, so it can differ from the greedy one.
 const again_temperature = 0.9;
 
@@ -168,7 +173,7 @@ pub const Backend = struct {
                     const found = try st.retrieve(j.a, s.text, qids, past_mod.isPast(q.q), st.settings().cap, ex);
                     if (found.block.len > 0) block = found.block;
                 }
-                const reply = if (q.think) try slide_ask.askThinkingAfter(s, &cx, block, q.q, j.b.stopper()) else try slide_ask.ask(s, &cx, block, q.q, answer_tokens, j.b.stopper());
+                const reply = if (q.think) try slide_ask.askThinkingAfter(s, &cx, block, q.q, think_budget, think_reply, j.b.stopper()) else try slide_ask.ask(s, &cx, block, q.q, answer_tokens, j.b.stopper());
                 j.out[i] = reply.content;
             }
         };

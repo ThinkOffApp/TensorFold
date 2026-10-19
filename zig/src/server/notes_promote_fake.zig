@@ -34,6 +34,7 @@ pub const Fake = struct {
     thinking_breaks: []const u8 = "", // a text whose neurons, while live, change a control's answer with thinking on only
     thinking_weak: []const u8 = "", // a topic the neurons answer alone with thinking off only
     thinking_asks: u32 = 0, // questions asked with thinking on
+    thinking_copies: []const u8 = "", // a text whose neurons, while live, make thinking replies copy the notes block
     hedged_invent: bool = false, // the made-up answer wrapped in a don't-know
     crash_at_teach: ?u32 = null, // the teach call to stop at (a crash): error.Crash
     refits: []const u8 = "", // a text whose lesson fits every earlier live fact's neurons again, as the pocket's refits do
@@ -174,6 +175,7 @@ pub const Fake = struct {
         if (std.mem.startsWith(u8, q.q, "P:")) return if (f.live(f.flips) != null) "No." else "Yes.";
         for (@import("notes/promote_probes.zig").untold) |u| if (std.mem.eql(u8, u, q.q)) return if (f.live(f.invents) == null) "I don't know your rabbit's name." else if (f.hedged_invent) "I don't know for sure, but your rabbit is named Floppy." else "Floppy.";
         if (!std.mem.startsWith(u8, q.q, "Q:")) {
+            if (q.think and f.live(f.thinking_copies) != null) return "[1] \"dog=Luna\"\n[2] \"boat=blue\"\n[3] \"";
             for (f.pocket.items) |l| if (l.live and l.breaks) return "Lyon";
             if (q.think and f.live(f.thinking_breaks) != null) return "Lyon";
             return "Paris";

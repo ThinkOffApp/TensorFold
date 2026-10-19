@@ -174,7 +174,7 @@ fn right(b: anytype, r: Regress, i: usize, reply: []const u8) bool {
 pub fn before(b: anytype, r: *Regress, a: Allocator, replies: []const []const u8) !void {
     r.before = replies;
     r.right = try a.alloc(bool, replies.len);
-    for (r.right, 0..) |*x, i| x.* = switch (r.kind[i]) {
+    for (r.right, 0..) |*x, i| x.* = if (r.asks[i].think and judge.copiesBlock(replies[i])) false else switch (r.kind[i]) {
         .fact, .pair => right(b, r.*, i, replies[i]),
         .control, .neighbour => true,
     };
@@ -191,6 +191,8 @@ pub fn settled(kind: Kind, q: []const u8, was: []const u8, now: []const u8, note
     return null;
 }
 
+const why_copy = "the thinking reply copies the notes block: not judged";
+
 /// Probes worse now than before; their kinds and wordings joined into `log`; `of`: the fact a one-by-one check taught.
 pub fn worse(a: Allocator, b: anytype, r: Regress, after: []const []const u8, log: *NightLog, of: []const u8) !u32 {
     var n: u32 = 0;
@@ -199,6 +201,11 @@ pub fn worse(a: Allocator, b: anytype, r: Regress, after: []const []const u8, lo
         if (!r.right[i]) continue;
         const was = r.before[i];
         const now = after[i];
+        // a thinking reply that copies the notes block was cut mid-reasoning: not a change the night made
+        if (q.think and judge.copiesBlock(now)) {
+            b.recordProbe(.{ .night = log.night, .kind = @tagName(r.kind[i]), .key = of, .q = q.q, .before = was, .after = now, .ok = true, .thinking = true, .why = why_copy });
+            continue;
+        }
         const ok = settled(r.kind[i], q.q, was, now, try b.texts(a)) orelse switch (r.kind[i]) {
             .fact, .pair => right(b, r, i, now),
             .control => std.mem.eql(u8, was, now) or try b.same(a, q.q, was, now),

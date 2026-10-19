@@ -82,3 +82,32 @@ test "promotion: a fact its neurons answer only with thinking off never leaves t
         try testing.expect(wrong_thinking > 0);
     }
 }
+
+test "promotion: a thinking reply that copies the notes block is never judged; one citation is" {
+    const judge = @import("notes/promote_judge.zig");
+    try testing.expect(judge.copiesBlock("[21] \"I have moved; I live in Lisbon now.\"\n[22] \"My cat's name is Milo.\"\n[23] \""));
+    try testing.expect(judge.copiesBlock("amber.\"\n[13] \"My dog is called Bruno now.\"  \n[15]  \"My sister's name is Ana.\""));
+    try testing.expect(!judge.copiesBlock("Your dog's name is Bruno. You mentioned this in message [13]: \"My dog is called Bruno now.\""));
+    try testing.expect(!judge.copiesBlock("Yes. In message [19], you said: \"My dog really likes apples.\""));
+    try testing.expect(!judge.copiesBlock("The only note about the tent is [4] \"The tent belongs to me.\" It names no colour."));
+    try testing.expect(!judge.copiesBlock("The colour of my brother's eyes is amber."));
+    // a lesson after which every thinking reply copies the block: the night is kept, the copies recorded unjudged
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f: Fake = .{ .a = a, .thinking_copies = "boat=blue" };
+    _ = try f.add("w1", "dog=Luna");
+    var s = promote.State.init(testing.allocator, .{});
+    defer s.deinit();
+    _ = try promote.night(&s, a, &f);
+    _ = try f.add("w2", "boat=blue");
+    const n = try promote.night(&s, a, &f);
+    try testing.expectEqual(@as(u32, 0), n.rejected);
+    try testing.expectEqual(promote.Status.promoted, status(&s, "w2"));
+    var unjudged: u32 = 0;
+    for (f.records.items) |r| if (r.night == 2 and r.thinking and std.mem.indexOf(u8, r.why, "copies the notes block") != null) {
+        try testing.expect(r.ok);
+        unjudged += 1;
+    };
+    try testing.expect(unjudged > 0);
+}

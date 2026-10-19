@@ -6,7 +6,7 @@ const json = @import("json.zig");
 const promote = @import("notes/promote.zig");
 const pjson = @import("notes/promote_json.zig");
 const notes_promote = @import("notes_promote.zig");
-const slide_ask = @import("slide_ask.zig");
+const backend = @import("notes_promote_backend.zig");
 const testing = std.testing;
 
 const cat_fact = "My cat's eyes are green."; // s2 in the L6 snapshot
@@ -53,8 +53,8 @@ const Reader = struct {
         var text: [16384]u8 = undefined;
         const n = @min(request.prompt.len, text.len);
         for (request.prompt[0..n], text[0..n]) |id_, *c| c.* = @intCast(id_ & 0xff);
-        // a thinking ask (its 320-token limit tells; no budget reaches this engine): its reasoning, then the reply
-        const thinking = request.max_tokens == slide_ask.think_reply;
+        // a thinking ask (its reply limit tells; no budget reaches this engine): its reasoning, then the reply
+        const thinking = request.max_tokens == backend.think_reply;
         const said = e.reply(text[0..n], thinking);
         e.thought += @intFromBool(thinking);
         e.thought_blocked += @intFromBool(thinking and std.mem.indexOf(u8, text[0..n], "[system]") != null);
