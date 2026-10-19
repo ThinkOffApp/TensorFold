@@ -64,7 +64,7 @@ test "learned sibling inspection refuses a torn index without repairing it" {
     try testing.expectEqual(before, try im.indexScratchBytes());
 }
 
-test "forgetSpan reports a sibling with no readable index as uncertain" {
+test "forgetSpan holds an unindexed sibling without poisoning later erases" {
     var buf: [128]u8 = undefined;
     const root = try std.fmt.bufPrint(&buf, "/tmp/tf-learn-sibling-missing-{d}", .{std.c.getpid()});
     defer rmTree(root);
@@ -77,9 +77,15 @@ test "forgetSpan reports a sibling with no readable index as uncertain" {
     defer s.deinit();
     s.imprint = &im;
     const out = s.forgetSpan(&note, &.{});
-    try testing.expectEqual(@as(u32, 1), out.failed);
+    try testing.expectEqual(@as(u32, 0), out.failed);
+    try testing.expectEqual(@as(u32, 1), out.held);
     try testing.expect(!out.complete());
-    try testing.expect(im.forget_pending);
+    try testing.expect(!im.forget_pending);
+    try other.beginWrite(42); // the first payload may precede the first index
+    const again = s.forgetSpan(&note, &.{});
+    try testing.expectEqual(@as(u32, 0), again.failed);
+    try testing.expectEqual(@as(u32, 1), again.held);
+    try testing.expect(!im.forget_pending);
 }
 
 test "learned batch removal preserves unrelated records across restart" {

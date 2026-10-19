@@ -181,7 +181,13 @@ pub fn forgetOthers(s: *Store, im: *imprint.Imprint, span: []const u32, out: *pc
             return;
         }) orelse break;
         cursor = id;
-        var other = imprint.Imprint.inspect(s.gpa, im.root, id) catch {
+        var other = imprint.Imprint.inspect(s.gpa, im.root, id) catch |err| {
+            if (err == error.ImprintUnindexed) {
+                // A live first append writes payload before creating its index. Without a
+                // writer lease even an apparently empty directory is not a stable snapshot.
+                out.held += 1;
+                continue;
+            }
             out.failed += 1;
             continue;
         };

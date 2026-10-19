@@ -238,7 +238,11 @@ pub const Imprint = struct {
     fn load(m: *Imprint) !void {
         var path: [1100]u8 = undefined;
         const fd = std.c.open(try std.fmt.bufPrintSentinel(&path, "{s}/index", .{m.dir}, 0), .{ .ACCMODE = if (m.inspect_only) .RDONLY else .RDWR, .NOFOLLOW = true, .NONBLOCK = true }, @as(std.c.mode_t, 0));
-        if (fd < 0) return if (!m.inspect_only and std.c.errno(fd) == .NOENT) {} else error.ImprintRead;
+        if (fd < 0) {
+            if (std.c.errno(fd) != .NOENT) return error.ImprintRead;
+            if (m.inspect_only) return error.ImprintUnindexed;
+            return;
+        }
         defer _ = std.c.close(fd);
         try m.readIndex(fd);
     }
