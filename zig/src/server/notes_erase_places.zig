@@ -22,12 +22,12 @@ pub const Place = enum {
         return switch (p) {
             .journal => "the rewritten journal's folder could not be synced; a power cut may restore the old journal containing the note",
             .prompt_cache => "the engine's prompt cache may still hold prompt states (and their tokens) of requests that carried this note's block: the engine could not forget them, or could not show they are gone (a note of two words or fewer, a state a running request restores); serve with --prompt-cache-gib 0 for an erase that reaches every cache",
-            .learn_files => "--learn keeps shared prompt states on disk, and the notes block lies inside a shared system block, so a learned state file may hold this note's tokens; the engine could not search and remove them",
+            .learn_files => "this or an earlier run may have written learned prompt states; not every possible learned folder has been shown free of this note's tokens",
             .responses => "stored Responses (/v1/responses with store) keep their conversations in memory, and one may quote this note",
             .cortheon => "Cortheon keeps the hidden rounds of its replies in memory, and one may quote this note",
-            .compaction_memory => "--compact-memory keeps compacted conversations' memory notes on disk, and one may quote this note",
-            .request_log => "TENSORFOLD_REQUEST_LOG appends every chat body to the operator's file, the statement that taught this note among them",
-            .promotion => "Sliding Weights (--slide or its fact graph) keeps taught facts' text in its fact graph and their recall in the served weights, and one may be this note",
+            .compaction_memory => "this or an earlier run may have written compaction memory files quoting this note; those files have not been searched",
+            .request_log => "this or an earlier run may have logged a chat body quoting this note to an operator-selected path; those files have not been searched",
+            .promotion => "this or an earlier Sliding Weights run may retain this fact in its graph or saved model weights; disabling --slide does not remove it",
             .requests => "the engine is running or queueing requests now, and one may carry this note in its prompt or its reply; they are not cancelled",
         };
     }
@@ -147,7 +147,7 @@ pub fn check(srv: *Server, forgot: Forget) std.EnumArray(Place, Status) {
     // Today's flags cannot locate or rule out files written by earlier runs.
     out.set(.compaction_memory, .may_hold);
     out.set(.request_log, .may_hold);
-    out.set(.promotion, if (srv.config.slide) .may_hold else if (srv.slide.count() > 0) .may_hold else .off);
+    out.set(.promotion, .may_hold); // earlier runs may have saved taught weights in the checkpoint
     var engine: @import("engine_api").Status = .{};
     srv.engine.status(&engine, &.{});
     out.set(.requests, if (held or engine.running + engine.waiting > 0 or forgot.out.in_flight > 0) .may_hold else .empty);

@@ -92,6 +92,14 @@ test "each endpoint answers, and refuses what it must with the status and messag
     try testing.expectEqual(@as(u16, 200), erased.status);
     try testing.expectEqual(@as(usize, 1), erased.value.get("removed").?.array.len);
     try testing.expect(!erased.value.get("complete").?.bool); // earlier disk writers cannot be ruled out
+    try testing.expectEqualStrings("empty", erased.value.get("places").?.get("requests").?.string);
+    const remaining = erased.value.get("remaining_places").?.array;
+    try testing.expectEqual(@as(usize, 4), remaining.len);
+    for ([_][]const u8{ "learn_files", "compaction_memory", "request_log", "promotion" }) |name| {
+        var matches: usize = 0;
+        for (remaining) |item| matches += @intFromBool(std.mem.eql(u8, item.string, name));
+        try testing.expectEqual(@as(usize, 1), matches);
+    }
 }
 
 test "without --notes the routes say so, and a store without a journal refuses writes" {

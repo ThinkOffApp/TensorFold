@@ -34,7 +34,7 @@ test "disabled disk writers do not prove earlier files empty" {
     const r = try rig.Rig.init(testing.allocator);
     defer r.deinit();
     const found = places.check(r.srv, .{});
-    for ([_]places.Place{ .learn_files, .compaction_memory, .request_log }) |place| {
+    for ([_]places.Place{ .learn_files, .compaction_memory, .request_log, .promotion }) |place| {
         try testing.expectEqual(places.Status.may_hold, found.get(place));
     }
 }
@@ -74,6 +74,15 @@ fn expectClear(reply: rig.Reply, place: places.Place, status: places.Status) !vo
     try testing.expectEqual(status == .may_hold, named(reply, place));
     try testing.expect(named(reply, .compaction_memory));
     try testing.expect(named(reply, .request_log));
+    var expected: usize = 0;
+    for (std.enums.values(places.Place)) |p| {
+        const disk = p == .learn_files or p == .compaction_memory or p == .request_log or p == .promotion;
+        const want = disk or (p == place and status == .may_hold);
+        try testing.expectEqual(want, named(reply, p));
+        expected += @intFromBool(want);
+    }
+    try testing.expectEqual(expected, reply.value.get("remaining_places").?.array.len);
+    try testing.expectEqualStrings("empty", reply.value.get("places").?.get("requests").?.string);
     try testing.expectEqualStrings(@tagName(status), reply.value.get("places").?.get(@tagName(place)).?.string);
 }
 
@@ -173,12 +182,12 @@ test "erase reply: the request log remains uncertain when the writer is disabled
 }
 
 test "erase reply: promotion records are named while --slide is on or its fact graph holds a fact, and only then" {
-    try onThenOff(.promotion, .off, struct {
+    try onThenOff(.promotion, .may_hold, struct {
         fn set(srv: *server.Server, on: bool) !void {
             srv.config.slide = on;
         }
     }.set);
-    try onThenOff(.promotion, .off, struct {
+    try onThenOff(.promotion, .may_hold, struct {
         fn set(srv: *server.Server, on: bool) !void {
             if (on) try testing.expect(srv.slide.add("My favourite colour is green.", "chat", 0) != 0) else srv.slide.clear();
         }
