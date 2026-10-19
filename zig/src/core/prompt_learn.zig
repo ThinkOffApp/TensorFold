@@ -141,7 +141,7 @@ fn syncDir(dir: [:0]const u8) !void {
     const fd = std.c.open(dir, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
     if (fd < 0) return error.SyncFailed;
     defer _ = std.c.close(fd);
-    if (std.c.fsync(fd) != 0) return error.SyncFailed;
+    if (!@import("learned_sync.zig").full(fd)) return error.SyncFailed;
 }
 
 pub fn unlearn(s: *Store, im: *imprint.Imprint, key: u64) void {

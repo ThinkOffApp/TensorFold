@@ -145,7 +145,7 @@ pub const Imprint = struct {
             std.mem.writeInt(u64, data[8..16], key, .little);
             std.crypto.hash.sha2.Sha256.hash(data[0..16], data[16..48], .{});
             try writeAll(fd, &data);
-            if (std.c.fsync(fd) != 0) return error.ImprintWrite;
+            if (!@import("learned_sync.zig").full(fd)) return error.ImprintWrite;
         }
         if (std.c.rename(tmp, try std.fmt.bufPrintSentinel(&dest, "{s}/pending", .{m.dir}, 0)) != 0) return error.ImprintWrite;
     }
@@ -178,7 +178,7 @@ pub const Imprint = struct {
         try m.metas.ensureUnusedCapacity(m.gpa, 1);
         errdefer _ = std.c.ftruncate(fd, end);
         try record(fd, key, at, tokens, below, bytes);
-        if (std.c.fsync(fd) != 0) return error.ImprintWrite;
+        if (!@import("learned_sync.zig").full(fd)) return error.ImprintWrite;
         m.index_end = @as(u64, @intCast(end)) + HEAD * 4 + 4 * (tokens.len + below.len);
         m.clock += 1;
         m.metas.appendAssumeCapacity(.{ .key = key, .at = at, .tokens = t, .starts = s, .bytes = bytes, .used = m.clock });
@@ -196,7 +196,7 @@ pub const Imprint = struct {
         {
             defer _ = std.c.close(fd);
             for (m.metas.items, 0..) |x, j| if (j != i) try record(fd, x.key, x.at, x.tokens, x.starts, x.bytes);
-            if (std.c.fsync(fd) != 0) return error.ImprintWrite;
+            if (!@import("learned_sync.zig").full(fd)) return error.ImprintWrite;
         }
         if (std.c.rename(tmp, try std.fmt.bufPrintSentinel(&path, "{s}/index", .{m.dir}, 0)) != 0) return error.ImprintWrite;
         free(m.gpa, m.metas.orderedRemove(i));
@@ -313,7 +313,7 @@ fn indexSize(fd: c_int) !u64 {
 
 fn repairTail(fd: c_int, whole: u64, observed: u64) !void {
     if (std.c.lseek(fd, 0, std.c.SEEK.END) != observed) return error.ImprintRead;
-    if (std.c.ftruncate(fd, @intCast(whole)) != 0 or std.c.fsync(fd) != 0) return error.ImprintWrite;
+    if (std.c.ftruncate(fd, @intCast(whole)) != 0 or !@import("learned_sync.zig").full(fd)) return error.ImprintWrite;
 }
 
 fn ordered(starts: []const u32) bool {
@@ -475,6 +475,7 @@ test {
     _ = @import("prompt_imprint_test.zig");
     _ = @import("prompt_imprint_fault_test.zig");
     _ = @import("learned_disk.zig");
+    _ = @import("learned_sync.zig");
 }
 
 test "a failed tail truncation keeps the bytes and refuses repair" {
