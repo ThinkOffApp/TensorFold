@@ -25,12 +25,14 @@ pub fn mark(p: anytype, t: anytype, host: anytype) !void {
     std.log.info("slide pocket: marked with {d} neurons in use, kept on the host to put back", .{inUse(p)});
 }
 
-/// The pocket put back as the mark kept it, every slot uploaded, then the mark let go; an error when there is none.
+/// The mark's pocket written to the shards first (once a save wrote them), then put back and uploaded; the mark goes.
 pub fn rewind(p: anytype, t: anytype, host: anytype) !void {
     const kept = p.marked orelse return error.NothingToRewind;
     // rows are only ever added past a mark; the ones before it are checked, never copied
     if (p.pos.items.len < kept.rows or hash(p.pos.items[0..kept.rows]) != kept.hash) return error.RowsChangedSinceMark;
     inline for (lists) |f| try @field(p, f).ensureTotalCapacity(p.gpa, @field(kept.copy, f).items.len);
+    // a write that fails changes nothing: the night's pocket, its places and the mark stay, as the files still hold it
+    if (p.written) _ = try host.pocketSave(p.moe.items, @import("pocket.zig").neurons, kept.copy.up.items, kept.copy.down.items);
     inline for (lists) |f| {
         @field(p, f).clearRetainingCapacity();
         @field(p, f).appendSliceAssumeCapacity(@field(kept.copy, f).items);

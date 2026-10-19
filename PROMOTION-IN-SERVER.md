@@ -11,7 +11,8 @@ Grades: **MEASURED** we ran it; **READ** we read it in code or a document; **INF
 
 1. **Rollback is exact (answered on branch `promotion-exact-rewind`).** Each plan of a night starts with the learner's
    `mark` (a host copy of the pocket: every neuron's f32 weights, the counts, the neurons' records, the last retire,
-   and the learner's replay of earlier lessons); a rejected plan is undone with `rewind` and saved. Refits of earlier
+   and the learner's replay of earlier lessons); a rejected plan is undone with `rewind`, which writes the mark's
+   pocket to the shards before it changes anything in memory. Refits of earlier
    facts' neurons ("refits", READ `pocket.zig`) and the 4-bit roundings of the night's saves go with it (MEASURED in
    a host test on synthetic shards, `pocket_mark_test.zig`: the same f32 and the same shard bytes as before the night;
    zeroing alone left both). If the second ask is still worse, every promotion neuron is zeroed (the untaught model,
@@ -70,10 +71,25 @@ fact's probes, at most 4, each with its reference answer.
 **Regress.** Before the night the probes of the facts that still hold plus 4 fixed control prompts are asked as
 production asks them (notes in, in-weights notes out); after the teach they are asked again. A probe right before and
 wrong after, or a control that changed in substance, counts as worse; more than the tolerance (0) rejects the plan.
-A rejected plan is rewound to the night's mark and saved; a rejected `add` then asks again, and still worse goes to
-`source`. Each rebuild plan starts from the mark too, so a rejected one's refits and places never reach the next. The
-slide graph's facts go back with it (those taught by the plan are `missed`, "taken back"), and so do the teacher's kept
-lessons and its keep and bank answers.
+A rejected plan is rewound to the night's mark; a rejected `add` then asks again, and still worse goes to `source`.
+Each rebuild plan starts from the mark too, so a rejected one's refits and places never reach the next. The slide
+graph's facts go back with it (those taught by the plan are `missed`, "taken back"), and so do the teacher's kept
+lessons and its keep and bank answers, but only once the learner has written the rewound pocket to the shards.
+
+**A rewind that cannot be written** (grok's review of `3e9024b6`). The learner writes the mark's pocket to the
+shards first and only then puts it back in memory, so a write that fails changes nothing: the night's neurons stay
+live and keep their places, the graph and the teacher stay as the night left them, and the night fails and marks a
+rebuild. In the first version the learner let the night's places go before the save that followed it; when that save
+failed, the files still held the night's neurons while memory, the graph and the teacher said they were gone, and a
+chat lesson could take those places before the rebuild zeroed them (MEASURED in the rig, receipts 68 and 69: the
+rebuild zeroed the chat fact). If the state file is not written after a good rewind, it still lists the night's
+neurons with the night open; a start rebuilds, and those places are free then (MEASURED: after the rebuild nothing
+of the refused night is live and the pocket, the graph, the teacher and the state file agree). Not closed: a lesson
+between that start and the rebuild could take one of those places, and the rebuild would zero it; zeroing alone had
+the same window, since a start counts zeroed last places as free (INFERRED from `cuda_weights`/`weights` loading,
+not run). A zeroing
+(`slide.retire`) whose save fails now counts as not done, and once it is saved the graph lets go of the zeroed
+neurons, so the graph never lists a neuron the pocket no longer holds.
 
 **Regression set (since `4274b6b9`).** Besides the promoted facts' learner questions and the 4 controls, every
 current fact note's own question joins it (`--notes-promote-regress N`: a sample of N by key hash; default all). The

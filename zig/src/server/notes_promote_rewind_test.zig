@@ -190,16 +190,9 @@ test "promotion rig: a refused night rewinds the learner, then saves; the graph 
     try testing.expectEqual(@as(u32, 1), log.rejected);
     try testing.expectEqualStrings("none", log.plan);
     try testing.expectEqual(promote.Status.rejected, status(&p.state, tent.value.strField("source").?));
-    // marked before the first lesson, rewound (no retire) and saved; then the erase's zeroing, which no rewind undoes
+    // mark, the lesson's save, the rewind (no retire; it writes the files itself), then the erase's zeroing and save
     try testing.expectEqual(@as(?bool, true), e.pending); // the night held the learner: the erase waited for its end
-    const letters = e.letters.items;
-    const m = std.mem.indexOfScalar(u8, letters, 'm') orelse return error.NeverMarked;
-    const w = std.mem.indexOfScalar(u8, letters, 'w') orelse return error.NeverRewound;
-    const rt = std.mem.indexOfScalar(u8, letters, 'r') orelse return error.NeverRetired;
-    try testing.expect(m < w and w < rt);
-    try testing.expectEqual(@as(u8, 's'), letters[w + 1]);
-    try testing.expectEqual(@as(u8, 's'), letters[rt + 1]);
-    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, letters, "r"));
+    try testing.expectEqualStrings("mswrs", e.letters.items);
     try testing.expectEqualSlices(Neuron, &kite_neurons, e.zeroed.items);
     try testing.expectEqual(promote.Status.freed, status(&p.state, kite.value.strField("source").?));
     try testing.expectEqual(@as(usize, 0), p.state.pocket.len);
@@ -243,12 +236,14 @@ test "promotion rig: a rewind the learner refuses (no mark) is reported, and the
     try testing.expectEqual(slide_graph_state.replaced, r.srv.slide.facts.items[0].state);
     try testing.expectEqual(@as(usize, 1), r.srv.teacher.lessons);
     try testing.expectEqual(@as(usize, 0), std.mem.count(u8, e.letters.items, "s")); // and nothing saved
-    // control: with its mark the same rewind goes through, puts both back and saves
+    try testing.expectEqualStrings("failed", @tagName(r.srv.slide.saved.state)); // the graph's save view says so
+    // control: with its mark the same rewind goes through (writing the files itself) and puts both back
     e.marked = true;
     try testing.expect(slide.rewind(r.srv, a, m, "taken back"));
     try testing.expectEqual(slide_graph_state.learned, r.srv.slide.facts.items[0].state);
     try testing.expectEqual(@as(usize, 0), r.srv.teacher.lessons);
-    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, e.letters.items, "s"));
+    try testing.expectEqualStrings("mw", e.letters.items);
+    try testing.expectEqualStrings("saved", @tagName(r.srv.slide.saved.state));
 }
 
 const slide_graph_state = @import("slide_graph.zig").State;

@@ -169,19 +169,24 @@ pub fn mark(srv: *Server, a: Allocator) ?Mark {
     return .{ .graph = graph_marks.keep(&srv.slide, a) catch return null, .teacher = srv.teacher.keepNow(srv.io, a) catch return null };
 }
 
-/// The pocket put back as mark `m` found it and saved, the graph (later facts' message `why`) and teacher with it.
+/// The pocket put back as mark `m` found it, the learner writing the files first; then the graph and teacher follow.
 pub fn rewind(srv: *Server, a: Allocator, m: Mark, why: []const u8) bool {
-    switch (run(srv, a, &.{ .rewind = true }, 0)) {
-        .failed => |message| {
-            log.line("slide: the learner did not rewind the pocket: {s}", .{message});
-            return false;
-        },
-        .refused => return false,
-        else => {},
+    srv.slide.saving(folder(srv));
+    const began = now(srv);
+    const failed: ?[]const u8 = switch (run(srv, a, &.{ .rewind = true }, 0)) {
+        .failed => |message| message,
+        .refused => "the engine could not take the rewind",
+        else => null,
+    };
+    srv.slide.saveEnded(folder(srv), seconds(srv, began), failed);
+    if (failed) |message| {
+        // nothing moved: the pocket, its files, the graph and the teacher all still hold the night
+        log.line("slide: the pocket was not rewound: {s}", .{message});
+        return false;
     }
-    graph_marks.rewound(&srv.slide, m.graph, why);
+    graph_marks.rewound(&srv.slide, m.graph, why); // later facts' message: `why`
     srv.teacher.putBack(srv.io, m.teacher);
-    return saveAll(srv, a);
+    return true;
 }
 
 /// Rounds a lesson gets to bring its facts back when asked once, before it is given up.

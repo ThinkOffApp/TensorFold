@@ -28,7 +28,8 @@ const Model = struct {
     up: [layers][n * d]f32 = @splat(@splat(0)),
     down: [layers][n * d]f32 = @splat(@splat(0)),
     used: [layers]usize = @splat(0),
-    saves: u32 = 0,
+    saves: u32 = 0, // writes of the shards that went through
+    fail_save: bool = false, // the next write fails before it writes anything (a full disk)
 };
 
 /// The host the pocket reaches through whole.zig's hooks.
@@ -46,6 +47,10 @@ const Forward = struct {
     }
 
     pub fn pocketSave(m: Ctx, gpa: std.mem.Allocator, io: std.Io, moe: []const usize, neurons: usize, up: []f32, down: []f32) !usize {
+        if (m.fail_save) {
+            m.fail_save = false;
+            return error.DiskFull;
+        }
         m.saves += 1;
         return Shards.write(gpa, io, m.dir, m.c, moe, neurons, up, down);
     }
@@ -334,10 +339,14 @@ test "a rewind brings a night's pocket back to the mark: refits, retires, 4-bit 
     try testing.expect(!std.mem.eql(usize, at_mark.used, l.pockets.used.items));
     try testing.expect(l.replay.items.len > at_mark.replay.len);
     try testing.expect(!std.mem.eql(u8, saved, try shard(&tmp, arena.allocator())));
+    const night_saves = m.saves;
     try whole.rewind(&l);
     try at_mark.expectSame(&l);
     try testing.expect(l.pockets.marked == null and l.marked == null);
-    // saved again from the restored floats: the same bytes as before the night, the floats left as they are
+    // the rewind wrote the files itself: the same bytes as before the night
+    try testing.expectEqual(night_saves + 1, m.saves);
+    try testing.expectEqualSlices(u8, saved, try shard(&tmp, arena.allocator()));
+    // saved again from the restored floats: the same bytes again, the floats left as they are
     const saves = m.saves;
     try testing.expect(try whole.save(&l));
     try testing.expectEqual(saves + 1, m.saves);
@@ -373,7 +382,7 @@ test "control: zeroing only the night's own neurons leaves its refits and roundi
     try testing.expect(!std.mem.eql(u8, saved, try shard(&tmp, arena.allocator())));
 }
 
-test "a pocket empty at the mark is written empty after the rewind, though the night's saves widened the shards" {
+test "a pocket empty at the mark is written empty by the rewind, though the night's saves widened the shards" {
     const gpa = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -397,10 +406,14 @@ test "a pocket empty at the mark is written empty after the rewind, though the n
     try testing.expectEqual(@as(u32, 1), m.saves);
     try whole.rewind(&l);
     try testing.expect(l.pockets.empty());
-    try testing.expect(try whole.save(&l));
     try testing.expectEqual(@as(u32, 2), m.saves);
     // the learned rows of layer 0's up_proj read back as zero: the night's neurons are out of the files
-    var f = try core.safetensors.File.open(gpa, testing.io, try std.fs.path.join(arena.allocator(), &.{ dir, "model.safetensors" }));
+    try expectZeroRows(gpa, try std.fs.path.join(arena.allocator(), &.{ dir, "model.safetensors" }), 2);
+}
+
+/// The first `k` learned rows of layer 0's up_proj in the shard at `path` read back as zero.
+fn expectZeroRows(gpa: std.mem.Allocator, path: []const u8, k: usize) !void {
+    var f = try core.safetensors.File.open(gpa, testing.io, path);
     defer f.close(testing.io);
     const uw = f.get("backbone.layers.0.mixer.shared_experts.up_proj.weight").?;
     const us = f.get("backbone.layers.0.mixer.shared_experts.up_proj.scales").?;
@@ -408,8 +421,8 @@ test "a pocket empty at the mark is written empty after the rewind, though the n
     try testing.expect(uw.is(.u32, &.{ own + n, d / 8 }));
     var words: [d / 8]u32 = undefined;
     var back: [d]f32 = undefined;
-    for (0..2) |k| {
-        const row = own + k;
+    for (0..k) |i| {
+        const row = own + i;
         for (&words, std.mem.bytesAsSlice(u32, uw.bytes[row * d / 2 ..][0 .. d / 2])) |*x, y| x.* = y;
         const s: []align(1) const u16 = std.mem.bytesAsSlice(u16, us.bytes[row * 2 ..][0..2]);
         const b: []align(1) const u16 = std.mem.bytesAsSlice(u16, ub.bytes[row * 2 ..][0..2]);
@@ -435,6 +448,7 @@ test "a second mark replaces the first; a rewind goes back to the latest" {
     try l.begin(&.{ 20, 21 });
     try l.take(r, 1, 1);
     l.kept_rounds = 1;
+    try testing.expect(try whole.save(&l)); // the rewind writes the files: a mark of saved floats comes back exactly
     try whole.mark(&l);
     var second = try Copy.of(gpa, &l);
     defer second.deinit();
@@ -471,4 +485,64 @@ test "a lesson open at the mark is settled first: an unkept one's neurons do not
     try whole.rewind(&l);
     try testing.expectEqualSlices(usize, used, l.pockets.used.items);
     try testing.expectEqualSlices(usize, used, &.{ m.used[0], m.used[1] });
+}
+
+test "a rewind whose write fails changes nothing: the night stays in memory, the forward and the files, the mark too" {
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    var prng = std.Random.DefaultPrng.init(13);
+    const r = prng.random();
+    const dir = try folder(gpa, testing.io, &tmp, r);
+    defer gpa.free(dir);
+    var m: Model = .{ .dir = dir, .c = modelConfig() };
+    var t: Trainer = .{ .c = m.c };
+    var l = learner(gpa, &m, &t);
+    defer l.deinit();
+    try day(&l, r);
+    const saved = try shard(&tmp, arena.allocator());
+    try whole.mark(&l);
+    var at_mark = try Copy.of(gpa, &l);
+    defer at_mark.deinit();
+    try night(&l, r);
+    var at_night = try Copy.of(gpa, &l);
+    defer at_night.deinit();
+    const night_bytes = try shard(&tmp, arena.allocator());
+    // the disk is full: the rewind fails, and memory, the forward, the night's places and the files keep the night
+    m.fail_save = true;
+    try testing.expectError(error.DiskFull, whole.rewind(&l));
+    try at_night.expectSame(&l);
+    try testing.expectEqualSlices(u8, night_bytes, try shard(&tmp, arena.allocator()));
+    try testing.expect(l.pockets.marked != null and l.marked != null);
+    // the disk back: the same rewind goes through to the mark, in memory and in the files
+    try whole.rewind(&l);
+    try at_mark.expectSame(&l);
+    try testing.expectEqualSlices(u8, saved, try shard(&tmp, arena.allocator()));
+}
+
+test "an undo after a save empties the pocket, and the next save still writes it: the shards held the lesson" {
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    var prng = std.Random.DefaultPrng.init(17);
+    const r = prng.random();
+    const dir = try folder(gpa, testing.io, &tmp, r);
+    defer gpa.free(dir);
+    var m: Model = .{ .dir = dir, .c = modelConfig() };
+    var t: Trainer = .{ .c = m.c };
+    var l = learner(gpa, &m, &t);
+    defer l.deinit();
+    try l.begin(&.{ 1, 2 });
+    try l.take(r, 0, 2);
+    l.kept_rounds = 1;
+    try testing.expect(try whole.save(&l));
+    try testing.expect(try whole.undo(&l));
+    try testing.expect(l.pockets.empty());
+    try testing.expect(try whole.save(&l));
+    try testing.expectEqual(@as(u32, 2), m.saves);
+    try expectZeroRows(gpa, try std.fs.path.join(arena.allocator(), &.{ dir, "model.safetensors" }), 2);
 }
