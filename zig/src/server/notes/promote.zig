@@ -26,7 +26,7 @@ pub const Fact = struct {
     probes: []const Probe = &.{},
     why: []const u8 = "", // the last thing that happened to it
     retries: u32 = 0, // nights it was due again after a miss or a rejection
-    ask: ?Probe = null, // the note's own question and its reference answer, for every night's regression set
+    ask: ?Probe = null, // the note's own question and its reference, for every night's regression set ("": none)
     neighbours: []const []const u8 = &.{}, // its own question asked about others the user knows (written once)
     pair: ?Pair = null, // a question that needs this note and another (written once)
 };
@@ -267,6 +267,12 @@ pub fn repair(s: *State, a: Allocator, b: anytype) !u32 {
             why.* = if (probes.degenerate(p.q)) why_degenerate else if (!b.gives(f.text, p.q, p.ref)) why_stored else null;
             kept += @intFromBool(why.* == null);
         }
+        // a stored own question whose reference does not give its note goes too, and the neighbours made from it
+        if (f.ask) |own| if (own.q.len > 0 and !b.gives(f.text, own.q, own.ref)) {
+            drop(b, &log, f, own.q, own.ref, why_stored);
+            f.ask = probes.no_ask;
+            f.neighbours = &.{};
+        };
         if (kept == f.probes.len) continue;
         const keep = try s.alloc().alloc(Probe, kept);
         var i: usize = 0;

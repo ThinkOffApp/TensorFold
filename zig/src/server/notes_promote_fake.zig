@@ -49,6 +49,7 @@ pub const Fake = struct {
     records: std.ArrayList(promote.Record) = .empty, // every probe the nights recorded, the alone asks among them
     garbage: []const []const u8 = &.{}, // fact texts whose second question gets an off-topic reference
     garbage_twice: bool = false, // and written again, it is off topic again
+    ask_garbage: []const []const u8 = &.{}, // fact texts whose own question (a reference asked alone) is off topic
     rewrites: u32 = 0, // references written again
     wordings: []const []const u8 = &.{}, // a lesson's questions in place of five "Q:topic" ones
 
@@ -150,6 +151,9 @@ pub const Fake = struct {
         // the second question of a fact in `garbage` gets an off-topic reference, as run6's "Who is my dog?" did
         for (f.garbage) |g| if (std.mem.eql(u8, g, fact) and out.len > 1) {
             out[1] = nemotron;
+        };
+        for (f.ask_garbage) |g| if (std.mem.eql(u8, g, fact) and out.len == 1) {
+            out[0] = nemotron;
         };
         return out;
     }

@@ -262,3 +262,53 @@ test "promotion alone: stored probes a night would not build are dropped once on
     try testing.expectEqual(@as(u32, 1), n.back_to_prompt);
     try testing.expectEqualStrings("back in the prompt: no probe left to ask it alone", s.find("w2").?.why);
 }
+
+test "promotion alone: a note's own question whose reference does not give the note is written once more, else not asked" {
+    for ([_]bool{ true, false }) |twice| {
+        var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        var f: Fake = .{ .a = a, .ask_garbage = &.{"cat=green"}, .garbage_twice = twice };
+        _ = try f.add("w1", "cat=green");
+        _ = try f.add("w2", "boat=blue");
+        var s = promote.State.init(testing.allocator, .{});
+        defer s.deinit();
+        _ = try promote.night(&s, a, &f);
+        const cat = s.find("w1").?;
+        const refs = try ofKind(a, &f, "reference");
+        try testing.expectEqual(@as(usize, 1), refs.len);
+        try testing.expectEqualStrings("w1", refs[0].key);
+        try testing.expectEqual(!twice, refs[0].ok);
+        var own: u32 = 0; // night 1 has no pocket yet: a "Q:cat" fact probe can only be the note's own question
+        var neighbour: u32 = 0;
+        for (f.records.items) |r| if (r.night == 1 and r.before != null) {
+            own += @intFromBool(std.mem.eql(u8, r.kind, "fact") and std.mem.eql(u8, r.q, "Q:cat"));
+            neighbour += @intFromBool(std.mem.eql(u8, r.q, "N:cat"));
+        };
+        if (twice) { // not asked, and no neighbours made from it; the boat's own question is untouched
+            try testing.expectEqualStrings("", cat.ask.?.q);
+            try testing.expectEqual(@as(usize, 0), cat.neighbours.len);
+            try testing.expectEqual(@as(u32, 0), own + neighbour);
+        } else {
+            try testing.expectEqualStrings("green", cat.ask.?.ref);
+            try testing.expectEqualStrings("N:cat", cat.neighbours[0]);
+            try testing.expect(own > 0 and neighbour > 0);
+        }
+        try testing.expectEqualStrings("Q:boat", s.find("w2").?.ask.?.q);
+        // greedy: a question once found wanting is not written again the next night
+        const written = f.questions;
+        _ = try promote.night(&s, a, &f);
+        try testing.expectEqual(written, f.questions);
+    }
+    // a stored own question whose reference does not give the note is dropped on load, with its neighbours
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f: Fake = .{ .a = a };
+    var s = promote.State.init(testing.allocator, .{});
+    defer s.deinit();
+    try s.facts.append(s.alloc(), .{ .key = "w1", .text = "cat=green", .ask = .{ .q = "Q:cat", .ref = @import("notes_promote_fake.zig").nemotron }, .neighbours = &.{"N:cat"} });
+    try testing.expectEqual(@as(u32, 1), try promote.repair(&s, a, &f));
+    try testing.expectEqualStrings("", s.find("w1").?.ask.?.q);
+    try testing.expectEqual(@as(usize, 0), s.find("w1").?.neighbours.len);
+}

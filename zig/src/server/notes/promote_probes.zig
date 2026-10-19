@@ -107,7 +107,7 @@ pub fn partner(a: Allocator, s: *State, f: *const Fact, notes: []const Note) !?*
 pub fn build(s: *State, a: Allocator, b: anytype, facts: []const *Fact, notes: []const Note) !void {
     const sa = s.alloc();
     for (facts) |f| {
-        if (f.neighbours.len == 0) if (f.ask) |own| {
+        if (f.neighbours.len == 0) if (f.ask) |own| if (own.q.len > 0) {
             const ns = try b.neighbours(a, own.q); // the backend's order: the most telling first
             const out = try sa.alloc([]const u8, @min(ns.len, neighbours_per_fact));
             for (out, ns[0..out.len]) |*q, x| q.* = try sa.dupe(u8, x);
@@ -140,7 +140,7 @@ pub fn set(a: Allocator, keep: []const *Fact, noted: []const *Fact, targeted: []
         }
     }.f;
     for (keep) |f| for (f.probes) |p| try add(a, &asks, &kind, &text, &ref, p.q, .fact, f.text, p.ref, excl);
-    for (noted) |f| if (f.ask) |p| try add(a, &asks, &kind, &text, &ref, p.q, .fact, f.text, p.ref, excl);
+    for (noted) |f| if (f.ask) |p| if (p.q.len > 0) try add(a, &asks, &kind, &text, &ref, p.q, .fact, f.text, p.ref, excl);
     for (targeted) |f| {
         for (f.neighbours) |q| try add(a, &asks, &kind, &text, &ref, q, .neighbour, "", "", excl);
         if (f.pair) |p| try add(a, &asks, &kind, &text, &ref, p.q, .pair, p.text, p.ref, excl);
@@ -238,10 +238,26 @@ pub fn askOf(s: *State, a: Allocator, b: anytype, facts: []const *Fact) !void {
         if (f.ask != null) continue;
         const q = try b.questionOf(a, f.text);
         if (q.len == 0) continue;
-        const ref = (try b.references(a, f.text, &.{q}))[0];
+        var ref = (try b.references(a, f.text, &.{q}))[0];
+        // asus3, 20 Oct: "What is my sister's name?" for "My sister lives in Bergen now." judged noise, never the note
+        if (!b.gives(f.text, q, ref)) {
+            const again = try b.referenceAgain(a, f.text, q);
+            const kept = b.gives(f.text, q, again);
+            b.recordProbe(.{ .night = s.nights_done + 1, .kind = "reference", .key = f.key, .q = q, .before = ref, .after = again, .ok = kept, .why = if (kept) why_again else why_none });
+            if (!kept) {
+                f.ask = no_ask; // greedy: the same question would come back every night
+                continue;
+            }
+            ref = again;
+        }
         f.ask = .{ .q = try s.alloc().dupe(u8, q), .ref = try s.alloc().dupe(u8, ref) };
     }
 }
+
+/// A note whose own question's reference never gave it: no own question, and no neighbours made from one.
+pub const no_ask: Probe = .{ .q = "", .ref = "" };
+const why_again = "the note's own question: the first reference did not give the note; the second does";
+const why_none = "the note's own question: no reference gave the note, written twice: not asked";
 
 test "a fact's question about someone else in its subject's place" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
