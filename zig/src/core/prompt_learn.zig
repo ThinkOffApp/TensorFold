@@ -111,27 +111,50 @@ fn unlearnChecked(s: *Store, im: *imprint.Imprint, key: u64) !void {
     if (s.family.vtable.forget_checked) |f| try f(s.family.ptr, im.dir, key) else if (s.family.vtable.forget) |f| f(s.family.ptr, im.dir, key);
     try im.remove(key);
 }
-/// Every learned state whose tokens hold `span`: its files, then its index record, removed; then the folder synced.
+/// Remove matching index records in one durable batch before unlinking their files.
 pub fn forget(s: *Store, im: *imprint.Imprint, span: []const u32, out: *pc.Forgotten) void {
-    var i = im.metas.items.len;
-    var removed = false;
-    while (i > 0) {
-        i -= 1;
-        if (i >= im.metas.items.len) continue; // a failed removal's index rewrite may have shortened the list
-        const meta = im.metas.items[i];
+    if (im.forget_pending) out.failed += 1;
+    var keys: std.ArrayList(u64) = .empty;
+    defer keys.deinit(s.gpa);
+    for (im.metas.items) |meta| {
         if (!pc.holdsSpan(meta.tokens, span)) {
             if (pc.weakSpanTail(meta.tokens, span)) out.held += 1;
             continue;
         }
-        unlearnChecked(s, im, meta.key) catch |err| {
+        keys.append(s.gpa, meta.key) catch {
+            out.failed += 1;
+            return;
+        };
+    }
+    if (keys.items.len == 0) return;
+    im.removeMany(keys.items) catch {
+        out.failed += 1;
+        return;
+    };
+    const prior_pending = im.forget_pending;
+    const prior_failed = out.failed;
+    im.forget_pending = true;
+    defer if (!prior_pending and out.failed == prior_failed) {
+        im.forget_pending = false;
+    };
+    // A crash after this point leaves unindexed files, never an index that names missing files.
+    syncDir(im.dir) catch {
+        out.failed += 1;
+        return;
+    };
+    for (keys.items) |key| {
+        if (s.family.vtable.forget_checked) |f| f(s.family.ptr, im.dir, key) catch |err| {
             note("forgetting a learned state that holds an erased span failed ({s})", .{@errorName(err)});
             out.failed += 1;
             continue;
-        };
+        } else {
+            // An unchecked callback cannot establish that the file was removed.
+            out.failed += 1;
+            continue;
+        }
         out.learned += 1;
-        removed = true;
     }
-    if (removed) syncDir(im.dir) catch {
+    syncDir(im.dir) catch {
         out.failed += 1;
     };
 }

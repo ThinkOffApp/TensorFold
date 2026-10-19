@@ -19,6 +19,7 @@ pub const Imprint = struct {
     metas: std.ArrayList(Meta) = .empty,
     clock: u64 = 0, // a meta's `used`: the clock at its last write or read
     index_end: u64 = 0,
+    forget_pending: bool = false, // failed erase may leave unindexed files until startup cleanup
 
     /// The states learned under `identity` in `root` (made when missing); other identities past `cap` go, oldest first.
     pub fn open(gpa: Allocator, root: []const u8, identity: u64, cap: u64) !Imprint {
@@ -186,7 +187,16 @@ pub const Imprint = struct {
 
     /// Forget state `key`: the index is rewritten without it (its family removes the files).
     pub fn remove(m: *Imprint, key: u64) !void {
-        const i = m.find(key) orelse return;
+        if (!m.has(key)) return;
+        try m.removeMany(&.{key});
+    }
+
+    /// One atomic index rewrite for a batch; the caller removes the family's files afterwards.
+    pub fn removeMany(m: *Imprint, keys: []const u64) !void {
+        if (keys.len == 0) return;
+        var removed: std.AutoHashMapUnmanaged(u64, void) = .empty;
+        defer removed.deinit(m.gpa);
+        for (keys) |key| try removed.put(m.gpa, key, {});
         var path: [1100]u8 = undefined;
         var part: [1100]u8 = undefined;
         const tmp = try std.fmt.bufPrintSentinel(&part, "{s}/index.part", .{m.dir}, 0);
@@ -195,11 +205,15 @@ pub const Imprint = struct {
         errdefer _ = std.c.unlink(tmp);
         {
             defer _ = std.c.close(fd);
-            for (m.metas.items, 0..) |x, j| if (j != i) try record(fd, x.key, x.at, x.tokens, x.starts, x.bytes);
+            for (m.metas.items) |x| if (!removed.contains(x.key)) try record(fd, x.key, x.at, x.tokens, x.starts, x.bytes);
             if (!@import("learned_sync.zig").full(fd)) return error.ImprintWrite;
         }
         if (std.c.rename(tmp, try std.fmt.bufPrintSentinel(&path, "{s}/index", .{m.dir}, 0)) != 0) return error.ImprintWrite;
-        free(m.gpa, m.metas.orderedRemove(i));
+        var i = m.metas.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (removed.contains(m.metas.items[i].key)) free(m.gpa, m.metas.orderedRemove(i));
+        }
         m.index_end = 0;
         for (m.metas.items) |x| m.index_end += HEAD * 4 + 4 * (x.tokens.len + x.starts.len);
     }

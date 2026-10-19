@@ -14,6 +14,100 @@ const system = [_]u32{ 1, 2, 3 };
 const with_note = system ++ note ++ [_]u32{ 9, 9, 4 }; // a block holding the note after the client's system prompt
 const without = system ++ [_]u32{ 60, 61, 62, 63 } ++ [_]u32{ 9, 9, 4 }; // an unrelated block
 
+test "learned batch removal preserves unrelated records across restart" {
+    var buf: [128]u8 = undefined;
+    const root = try std.fmt.bufPrint(&buf, "/tmp/tf-learn-batch-{d}", .{std.c.getpid()});
+    defer rmTree(root);
+    const a = [_]u32{ 71, 72 };
+    const b = [_]u32{ 81, 82 };
+    const c = [_]u32{ 91, 92 };
+    const ka = imprint.Imprint.keyOf(&a);
+    const kb = imprint.Imprint.keyOf(&b);
+    const kc = imprint.Imprint.keyOf(&c);
+    {
+        var im = try imprint.Imprint.open(testing.allocator, root, 3, 1 << 20);
+        defer im.deinit();
+        for ([_][]const u32{ &a, &b, &c }) |tokens| try im.add(imprint.Imprint.keyOf(tokens), 2, tokens, &.{}, 0);
+        try im.removeMany(&.{ ka, kc, ka }); // duplicate keys must not double-free
+        try testing.expect(!im.has(ka) and im.has(kb) and !im.has(kc));
+        try testing.expectEqual(@as(usize, 1), im.metas.items.len);
+        var orphan: [1100]u8 = undefined;
+        const fd = std.c.open(try Fake.file(&orphan, im.dir, ka), .{ .ACCMODE = .WRONLY, .CREAT = true }, @as(std.c.mode_t, 0o600));
+        if (fd < 0) return error.TestFile;
+        _ = std.c.close(fd); // simulate the crash/failure window between index commit and file unlink
+        try testing.expect(exists(im.dir, ka));
+    }
+    var im = try imprint.Imprint.open(testing.allocator, root, 3, 1 << 20);
+    defer im.deinit();
+    try testing.expect(!im.has(ka) and im.has(kb) and !im.has(kc));
+    try testing.expectEqual(@as(usize, 1), im.metas.items.len);
+    try testing.expect(!exists(im.dir, ka)); // startup cleanup removes the unindexed state
+}
+
+test "forgetSpan removes the learned index before a failing file unlink" {
+    var buf: [128]u8 = undefined;
+    const root = try std.fmt.bufPrint(&buf, "/tmp/tf-learn-order-{d}", .{std.c.getpid()});
+    defer rmTree(root);
+    var im = try imprint.Imprint.open(testing.allocator, root, 3, 1 << 20);
+    defer im.deinit();
+    const key = imprint.Imprint.keyOf(&with_note);
+    try im.add(key, with_note.len, &with_note, &.{}, 0);
+    const Check = struct {
+        im: *imprint.Imprint,
+        observed: bool = false,
+        fn unlink(ptr: *anyopaque, dir: [:0]const u8, k: u64) !void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.observed = !self.im.has(k) and !try fileHolds(dir, "index", &note);
+            return error.LearnedUnlink;
+        }
+    };
+    var check: Check = .{ .im = &im };
+    var f: Fake = .{ .gpa = testing.allocator };
+    var vt = f.learned().vtable.*;
+    vt.forget_checked = Check.unlink;
+    var s = Store.init(testing.allocator, .{ .ptr = &check, .vtable = &vt }, .{}, 1 << 20);
+    defer s.deinit();
+    s.imprint = &im;
+    const out = s.forgetSpan(&note, &.{});
+    try testing.expect(check.observed);
+    try testing.expectEqual(@as(u32, 1), out.failed);
+    try testing.expectEqual(@as(u32, 0), out.learned);
+    try testing.expect(!out.complete());
+    try testing.expect(!im.has(key));
+    const again = s.forgetSpan(&note, &.{});
+    try testing.expect(again.failed > 0); // missing index records must not make leftover files look clear
+    try testing.expect(!again.complete());
+}
+
+test "forgetSpan preserves learned files when the batch index cannot be rewritten" {
+    var buf: [128]u8 = undefined;
+    const root = try std.fmt.bufPrint(&buf, "/tmp/tf-learn-batch-fail-{d}", .{std.c.getpid()});
+    defer rmTree(root);
+    var im = try imprint.Imprint.open(testing.allocator, root, 3, 1 << 20);
+    defer im.deinit();
+    const key = imprint.Imprint.keyOf(&with_note);
+    try im.add(key, with_note.len, &with_note, &.{}, 0);
+    var path: [1100]u8 = undefined;
+    const file = try Fake.file(&path, im.dir, key);
+    const fd = std.c.open(file, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o600));
+    if (fd < 0) return error.TestFile;
+    _ = std.c.close(fd);
+    var part: [1100]u8 = undefined;
+    const blocked = try std.fmt.bufPrintSentinel(&part, "{s}/index.part", .{im.dir}, 0);
+    if (std.c.mkdir(blocked, 0o700) != 0) return error.TestDirectory;
+    var f: Fake = .{ .gpa = testing.allocator };
+    var s = Store.init(testing.allocator, f.learned(), .{}, 1 << 20);
+    defer s.deinit();
+    s.imprint = &im;
+    const out = s.forgetSpan(&note, &.{});
+    try testing.expectEqual(@as(u32, 1), out.failed);
+    try testing.expectEqual(@as(u32, 0), out.learned);
+    try testing.expect(!out.complete());
+    try testing.expect(im.has(key));
+    try testing.expect(exists(im.dir, key));
+    try testing.expect(try fileHolds(im.dir, "index", &note));
+}
+
 test "forgetSpan preserves an ambiguous one-token state but reports it held" {
     var f: Fake = .{ .gpa = testing.allocator };
     var s = Store.init(testing.allocator, f.snapshots(), .{ .min_gap = 1, .min_prompt = 0 }, 1 << 20);
