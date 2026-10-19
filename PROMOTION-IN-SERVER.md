@@ -159,7 +159,9 @@ flips a two-note answer each reject the night; control: the same night with no d
 
 **Alone.** On the accepted state each fact in the pocket is asked its probes with its own note left out (and the other
 in-weights notes, as production does). All right: its streak grows; `alone` nights running: `in_weights`, and from then
-on every `"notes": true` chat request has that note excluded. One wrong: back to `promoted`, the streak starts again.
+on every `"notes": true` chat request has that note excluded. One wrong: back to `promoted`, the streak starts again. Every alone ask goes to `SNAPSHOT.promote-probes.jsonl` as kind
+`alone` (night, fact key, question, the note ids left out of its block, reply, reference, verdict), so a night's
+alone decisions can be judged again later; before, its replies were in no file and had to be recovered by token sha.
 
 **Serving.** `openai.plan` adds the in-weights notes' current ids to the request's exclude list before the lookup, and
 gives the lookup's ids to the promoter (retrieval counts). With promotion off neither runs.

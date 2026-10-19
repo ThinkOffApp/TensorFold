@@ -52,9 +52,7 @@ test "promotion: a terse right reply agrees with its reference; a denied, doubte
     const ref = "Your dog has grey eyes.";
     const others = [_][]const u8{ "My dog's eyes are brown now.", "My cat's eyes are green.", "My dog is called Bruno now." };
     for ([_][]const u8{ "Grey", "Grey.", "Your dog has grey eyes.", "They are grey." }) |r| try testing.expect(np.agreesWith(fact, q, ref, r, .{ .others = &others }));
-    for ([_][]const u8{ "Your dog has brown eyes.", "I don't know your dog's eye colour.", "Not grey.", "They isn't grey.",
-        "Your dog's eyes aren't grey.", "I do not know whether grey.", "Maybe grey.", "Perhaps grey.", "Grey or brown.",
-        "Brown, not grey.", "Grey, like your cat's green ones." }) |r| if (np.agreesWith(fact, q, ref, r, .{ .others = &others })) {
+    for ([_][]const u8{ "Your dog has brown eyes.", "I don't know your dog's eye colour.", "Not grey.", "They isn't grey.", "Your dog's eyes aren't grey.", "I do not know whether grey.", "Maybe grey.", "Perhaps grey.", "Grey or brown.", "Brown, not grey.", "Grey, like your cat's green ones." }) |r| if (np.agreesWith(fact, q, ref, r, .{ .others = &others })) {
         std.debug.print("accepted: {s}\n", .{r});
         return error.TestUnexpectedResult;
     };

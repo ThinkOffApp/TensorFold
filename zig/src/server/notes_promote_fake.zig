@@ -39,6 +39,7 @@ pub const Fake = struct {
     saved: ?[]u8 = null, // the last state persisted, as the file would hold it
     saves: u32 = 0,
     clock: i64 = 1000,
+    records: std.ArrayList(promote.Record) = .empty, // every probe the nights recorded, the alone asks among them
 
     pub fn topic(text: []const u8) []const u8 {
         return text[0 .. std.mem.indexOfScalar(u8, text, '=') orelse text.len];
@@ -116,7 +117,14 @@ pub const Fake = struct {
         for (f.store.items) |n| if (n.current) try out.append(a, n.text);
         return out.items;
     }
-    pub fn recordProbe(_: *Fake, _: u32, _: []const u8, _: []const u8, _: []const u8, _: []const u8, _: bool) void {}
+    pub fn recordProbe(f: *Fake, r: promote.Record) void {
+        var x = r;
+        x.q = f.a.dupe(u8, r.q) catch return;
+        x.key = f.a.dupe(u8, r.key) catch return;
+        if (r.exclude) |ids| x.exclude = f.a.dupe(u32, ids) catch return;
+        if (r.reply) |s| x.reply = f.a.dupe(u8, s) catch return;
+        f.records.append(f.a, x) catch {};
+    }
     pub fn questionOf(f: *Fake, a: Allocator, text: []const u8) ![]const u8 {
         f.questions += 1;
         return std.fmt.allocPrint(a, "Q:{s}", .{topic(text)});

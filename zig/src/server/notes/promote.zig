@@ -34,6 +34,20 @@ pub const Fact = struct {
 /// A two-note question, its reference answer and the two facts it was written from.
 pub const Pair = struct { q: []const u8, ref: []const u8, text: []const u8 };
 
+/// A probe asked on a night, one line of SNAPSHOT.promote-probes.jsonl: a regression probe's two replies, an alone ask.
+pub const Record = struct {
+    night: u32,
+    kind: []const u8, // fact, control, neighbour, pair; alone
+    q: []const u8,
+    before: ?[]const u8 = null, // a regression probe's reply before tonight's lessons
+    after: ?[]const u8 = null, // and after
+    reply: ?[]const u8 = null, // an alone ask's reply
+    ok: bool = false,
+    key: []const u8 = "", // the fact an alone ask is of
+    exclude: ?[]const u32 = null, // the note ids left out of an alone ask's block
+    ref: []const u8 = "", // the reference the reply was judged against
+};
+
 /// One night as the report shows it.
 pub const NightLog = struct {
     night: u32 = 0,
@@ -426,7 +440,9 @@ fn alone(s: *State, a: Allocator, b: anytype, notes: []const Note, log: *NightLo
     log.alone_asked = @intCast(asks.items.len);
     var wrong: std.ArrayList(*Fact) = .empty;
     for (asks.items, owner.items, probe.items, replies) |q, f, p, reply| {
-        if (b.agrees(f.text, q.q, p.ref, reply)) log.alone_right += 1 else if (std.mem.indexOfScalar(*Fact, wrong.items, f) == null) try wrong.append(a, f);
+        const ok = b.agrees(f.text, q.q, p.ref, reply);
+        b.recordProbe(.{ .night = log.night, .kind = "alone", .key = f.key, .q = q.q, .exclude = q.exclude, .reply = reply, .ref = p.ref, .ok = ok });
+        if (ok) log.alone_right += 1 else if (std.mem.indexOfScalar(*Fact, wrong.items, f) == null) try wrong.append(a, f);
     }
     var seen: ?*Fact = null;
     for (owner.items) |f| {

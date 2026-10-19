@@ -186,7 +186,7 @@ const Night = struct {
     pub fn texts(_: *Night, _: Allocator) ![]const []const u8 {
         return &.{};
     }
-    pub fn recordProbe(_: *Night, _: u32, _: []const u8, _: []const u8, _: []const u8, _: []const u8, _: bool) void {}
+    pub fn recordProbe(_: *Night, _: promote.Record) void {}
     pub fn references(_: *Night, a: Allocator, _: []const u8, qs: []const []const u8) ![]const []const u8 {
         const out = try a.alloc([]const u8, qs.len);
         @memset(out, "o");

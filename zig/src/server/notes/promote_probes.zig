@@ -178,7 +178,7 @@ pub fn worse(a: Allocator, b: anytype, r: Regress, after: []const []const u8, lo
             // "I don't know for sure, but your rabbit is named Floppy." gives a new value: worse
             .neighbour => if (unknown(was)) unknown(now) and !judge.newValue(q.q, was, now, try b.texts(a)) else std.mem.eql(u8, was, now) or try b.same(a, q.q, was, now),
         };
-        b.recordProbe(log.night, @tagName(r.kind[i]), q.q, was, now, ok);
+        b.recordProbe(.{ .night = log.night, .kind = @tagName(r.kind[i]), .q = q.q, .before = was, .after = now, .ok = ok });
         if (ok) continue;
         n += 1;
         if (list.items.len > 0) try list.appendSlice(a, " | ");

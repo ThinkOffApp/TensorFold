@@ -228,23 +228,33 @@ pub fn writeFile(a: Allocator, path: []const u8, bytes: []const u8) WriteError!v
     if (!journal.fullSync(dfd, null)) return error.PromoteIo;
 }
 
-/// One regression probe as a night judged it.
-pub const ProbeLine = struct { night: u32, kind: []const u8, q: []const u8, before: []const u8, after: []const u8, ok: bool };
-
 /// `r` as a JSON line appended to STATE-probes.jsonl (best effort: a probe log that cannot be written is skipped).
-pub fn appendProbe(a: Allocator, state_path: []const u8, r: ProbeLine) void {
-    const o = json.newObject(a) catch return;
-    o.put(a, "night", int(a, r.night) catch return) catch return;
-    o.put(a, "kind", .{ .string = r.kind }) catch return;
-    o.put(a, "q", .{ .string = r.q }) catch return;
-    o.put(a, "before", .{ .string = r.before }) catch return;
-    o.put(a, "after", .{ .string = r.after }) catch return;
-    o.put(a, "ok", .{ .bool = r.ok }) catch return;
-    const line = json.stringify(a, .{ .object = o }, .{}) catch return;
+pub fn appendProbe(a: Allocator, state_path: []const u8, r: promote.Record) void {
+    const line = probeLine(a, r) catch return;
     const path = std.fmt.allocPrintSentinel(a, "{s}-probes.jsonl", .{state_path}, 0) catch return;
     const fd = std.c.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true, .CLOEXEC = true }, @as(std.c.mode_t, 0o600));
     if (fd < 0) return;
     defer _ = std.c.close(fd);
     _ = std.c.write(fd, line.ptr, line.len);
     _ = std.c.write(fd, "\n", 1);
+}
+
+/// One record as its JSON line: the fields it has, a regression probe's as before (night, kind, q, before, after, ok).
+pub fn probeLine(a: Allocator, r: promote.Record) ![]u8 {
+    const o = try json.newObject(a);
+    try o.put(a, "night", try int(a, r.night));
+    try o.put(a, "kind", .{ .string = r.kind });
+    if (r.key.len > 0) try o.put(a, "key", .{ .string = r.key });
+    try o.put(a, "q", .{ .string = r.q });
+    if (r.exclude) |ids| {
+        const xs = try a.alloc(Value, ids.len);
+        for (ids, xs) |id, *x| x.* = try int(a, id);
+        try o.put(a, "exclude", .{ .array = xs });
+    }
+    if (r.before) |s| try o.put(a, "before", .{ .string = s });
+    if (r.after) |s| try o.put(a, "after", .{ .string = s });
+    if (r.reply) |s| try o.put(a, "reply", .{ .string = s });
+    if (r.ref.len > 0) try o.put(a, "ref", .{ .string = r.ref });
+    try o.put(a, "ok", .{ .bool = r.ok });
+    return json.stringify(a, .{ .object = o }, .{});
 }

@@ -192,9 +192,9 @@ pub const Backend = struct {
         return b.knownOf("").others;
     }
 
-    /// Every regression probe's two replies and verdict, one JSON line each in SNAPSHOT.promote-probes.jsonl.
-    pub fn recordProbe(b: *Backend, night: u32, kind: []const u8, q: []const u8, before: []const u8, after: []const u8, ok: bool) void {
-        pjson.appendProbe(b.arena, b.p.path, .{ .night = night, .kind = kind, .q = q, .before = before, .after = after, .ok = ok });
+    /// A regression probe (two replies) or an alone ask (one), judged: a line of SNAPSHOT.promote-probes.jsonl.
+    pub fn recordProbe(b: *Backend, r: promote.Record) void {
+        pjson.appendProbe(b.arena, b.p.path, r);
     }
 
     pub fn agrees(b: *Backend, fact: []const u8, question: []const u8, ref: []const u8, reply: []const u8) bool {
