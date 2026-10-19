@@ -18,7 +18,7 @@ Cancellation is not a hard deadline: allocation, zeroing and an individual sort 
 
 Focused runs passed (counts include four root tests): memo 5/5, unsynced 5/5, disk writers 5/5, scratch 5/5, request holders 5/5, route/warm lifecycle 5/5, refused merge 5/5, cancellation 5/5, running-merge erase 5/5. Existing folder-fault suite 13/13 and erase-reply suite 12/12 passed.
 
-Full server suite: 353/353 passed before changing only the test encode counter to atomic storage; final rerun pending. Lean: current/base 630 problems, no changed-file count increase; origin/main b7ce8121 has 503. Claude approved no increase against 815f8105 for repair groups; inherited cleanup remains separate before upstream PR.
+Full server suite at code commit 4f0d26de: 353/353 passed, 3/3 build steps, 10 minutes, MaxRSS 4 GiB (compile 8 seconds, 1 GiB). The prior run also passed 353/353 before the test encode counter became atomic. All 19 changed Zig files pass fmt checks; git diff --check passes. Lean: current/base 630 problems, no changed-file count increase; origin/main b7ce8121 has 503. Claude approved no increase against 815f8105 for repair groups; inherited cleanup remains separate before upstream PR.
 
 ## Existing assertions changed (not just added)
 
