@@ -214,6 +214,11 @@ pub const Backend = struct {
         return b.knownOf("").others;
     }
 
+    /// Every current note's subject (a reply's clause about another of them gives the asked subject no value).
+    pub fn subjects(b: *Backend, _: Allocator) ![]const []const u8 {
+        return b.knownOf("").subjects;
+    }
+
     /// A regression probe (two replies) or an alone ask (one), judged: a line of SNAPSHOT.promote-probes.jsonl.
     pub fn recordProbe(b: *Backend, r: promote.Record) void {
         pjson.appendProbe(b.arena, b.p.path, r);
@@ -229,13 +234,13 @@ pub const Backend = struct {
         const list = b.listed orelse (ops.list(b.p.store, b.arena, false) catch return .{});
         b.listed = list;
         var others: std.ArrayList([]const u8) = .empty;
-        var subjects: std.ArrayList([]const u8) = .empty;
+        var subs: std.ArrayList([]const u8) = .empty;
         var own: []const u8 = "";
         for (list) |v| {
             if (std.mem.eql(u8, v.text, fact)) own = v.subject else others.append(b.arena, v.text) catch return .{};
-            subjects.append(b.arena, v.subject) catch return .{};
+            subs.append(b.arena, v.subject) catch return .{};
         }
-        return .{ .others = others.items, .subjects = subjects.items, .subject = own };
+        return .{ .others = others.items, .subjects = subs.items, .subject = own };
     }
 
     /// Whether a control's changed reply still says nothing new, as the learner's own judge decides.

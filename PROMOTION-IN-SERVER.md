@@ -374,9 +374,18 @@ prompt, which is the design), and the 2 in-weights facts cost one question when 
   learner still writes them. (Which probe went worse is in the probe log and the night's worse list.)
 - Missed and rejected facts are tried once more (`retries`), not a third time; only 2 of 29 facts reached in weights
   on the GB10 run.
-- The judge misreads long thinking answers (above), so the thinking checks are off by default; reading them needs
-  clause-level subject and new-value rules, as the hedge rule already is. Promotion with the checks off has not been
-  run on a GPU since the fixes.
+- The thinking checks stay off by default. Since `promotion-judge-long` the judge reads long thinking answers clause
+  by clause: a clause about another subject the store knows ("your sister likes orange best") or, when another's is
+  asked, about the user ("yours are green") gives the asked subject no value and no fact; a quoted note and a cited
+  item number are the user's words, not the reply's; a reply after the night that says its record lacks the value
+  ("I don't see any mention of...", "not explicitly stated") gives no answer, while the reply before keeps the short
+  marks. Re-judged offline from the logged replies (MEASURED, `notes_promote_judge_long_test.zig` holds the cases):
+  of GPU run 2's 40 thinking verdicts of worse, 29 now read fine, 5 go to the model's own `same()` check, 6 stay worse,
+  among them the real spill ("my favorite fruit is pears") and the hedge ("not explicitly stated"); no probe of runs
+  2 and 3 turns worse, and the thinking-off spills (amber, grey) stay worse. E1's 1,441 replies: one verdict moves
+  (an untaught "your eyes are green" citing the cat's note, now right), every gate count stays. Still misread: a
+  topic list ("information about cats, siblings") and an unrelated value of the user's ("the user lives in Lisbon")
+  in a don't-know, as any word of a note counts as a value there. Not yet run on a GPU with the checks on.
 - A notes chat with thinking on spends its first several hundred reasoning tokens copying the notes block (asus3,
   20 Oct, 287 to 1230 tokens): a cost for every such chat, not only the checks; not addressed here.
 - A spill-over that two facts cause only together is caught, since each fact is checked on top of the ones kept

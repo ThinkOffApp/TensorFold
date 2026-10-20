@@ -131,6 +131,10 @@ pub const Fake = struct {
         for (f.store.items) |n| if (n.current) try out.append(a, n.text);
         return out.items;
     }
+    /// The fake's notes carry no subjects: the judge's subject rule stays out of its tests.
+    pub fn subjects(_: *Fake, _: Allocator) ![]const []const u8 {
+        return &.{};
+    }
     pub fn recordProbe(f: *Fake, r: promote.Record) void {
         var x = r;
         x.q = f.a.dupe(u8, r.q) catch return;

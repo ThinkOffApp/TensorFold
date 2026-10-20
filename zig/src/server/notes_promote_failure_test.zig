@@ -183,6 +183,9 @@ const Night = struct {
     pub fn agrees(_: *Night, _: []const u8, _: []const u8, ref: []const u8, reply: []const u8) bool {
         return std.mem.eql(u8, ref, reply);
     }
+    pub fn subjects(_: *Night, _: Allocator) ![]const []const u8 {
+        return &.{};
+    }
     pub fn texts(_: *Night, _: Allocator) ![]const []const u8 {
         return &.{};
     }

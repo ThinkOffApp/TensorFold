@@ -60,6 +60,8 @@ pub fn degenerate(q: []const u8) bool {
 
 /// Whether a reply says it does not know (the judge's list, which a reply stating its value plainly must not match).
 pub const unknown = judge.unknown;
+/// A reply after the night that gives no answer, as a long thinking reply says it too; the one before keeps unknown().
+const noAnswer = judge.noAnswer;
 
 /// "yes" or "no" when the reply opens with one (null: neither).
 pub const yesNo = judge.yesNo;
@@ -181,9 +183,9 @@ pub fn before(b: anytype, r: *Regress, a: Allocator, replies: []const []const u8
 }
 
 /// A change settled from the two replies alone (null: the probe's check decides); see PROMOTION-IN-SERVER.md, Judge.
-pub fn settled(kind: Kind, q: []const u8, was: []const u8, now: []const u8, notes: []const []const u8) ?bool {
-    const fresh = judge.newValue(q, was, now, notes);
-    if (kind != .fact and unknown(now) and !fresh) return true;
+pub fn settled(kind: Kind, q: []const u8, was: []const u8, now: []const u8, notes: []const []const u8, subjects: []const []const u8) ?bool {
+    const fresh = judge.newValue(q, was, now, notes, subjects);
+    if (kind != .fact and noAnswer(now) and !fresh) return true;
     if (kind == .neighbour and unknown(was)) return false; // it gave a value, or a new one beside its don't-know
     if (fresh) return null;
     if (yesNo(was)) |w| if (yesNo(now)) |x| if (w == x) return true;
@@ -206,11 +208,11 @@ pub fn worse(a: Allocator, b: anytype, r: Regress, after: []const []const u8, lo
             b.recordProbe(.{ .night = log.night, .kind = @tagName(r.kind[i]), .key = of, .q = q.q, .before = was, .after = now, .ok = true, .thinking = true, .why = why_copy });
             continue;
         }
-        const ok = settled(r.kind[i], q.q, was, now, try b.texts(a)) orelse switch (r.kind[i]) {
+        const ok = settled(r.kind[i], q.q, was, now, try b.texts(a), try b.subjects(a)) orelse switch (r.kind[i]) {
             .fact, .pair => right(b, r, i, now),
             .control => std.mem.eql(u8, was, now) or try b.same(a, q.q, was, now),
             // "I don't know for sure, but your rabbit is named Floppy." gives a new value: worse
-            .neighbour => if (unknown(was)) unknown(now) and !judge.newValue(q.q, was, now, try b.texts(a)) else std.mem.eql(u8, was, now) or try b.same(a, q.q, was, now),
+            .neighbour => if (unknown(was)) noAnswer(now) and !judge.newValue(q.q, was, now, try b.texts(a), try b.subjects(a)) else std.mem.eql(u8, was, now) or try b.same(a, q.q, was, now),
         };
         b.recordProbe(.{ .night = log.night, .kind = @tagName(r.kind[i]), .key = of, .q = q.q, .before = was, .after = now, .ok = ok, .thinking = q.think });
         if (ok) continue;

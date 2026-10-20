@@ -113,6 +113,7 @@ test {
     _ = @import("notes_promote_rewind_test.zig");
     _ = @import("notes_promote_failure_test.zig");
     _ = @import("notes_promote_judge_test.zig");
+    _ = @import("notes_promote_judge_long_test.zig");
     _ = @import("notes_promote_alone_test.zig");
     _ = @import("notes_promote_alone_rig_test.zig");
     _ = @import("notes_promote_spill_test.zig");

@@ -9,11 +9,11 @@ test "promotion: a don't-know reply that still gives a new value is not a don't-
     const was = "I don't know your rabbit's name.";
     const notes = [_][]const u8{ "My cat's eyes are green.", "My sister lives in Turku." };
     try testing.expect(probes.unknown("I don't know for sure, but your rabbit is named Floppy."));
-    try testing.expect(judge.newValue(q, was, "I don't know for sure, but your rabbit is named Floppy.", &notes));
-    try testing.expect(judge.newValue(q, was, "I don't know, maybe it is green.", &notes)); // a stored value
-    try testing.expect(judge.newValue(q, was, "I don't know, perhaps 3 of them.", &notes));
-    try testing.expect(!judge.newValue(q, was, "I don't know your rabbit's name. You haven't told me.", &notes));
-    try testing.expect(!judge.newValue(q, was, "I don't know your rabbit's name. I don't have any information about a rabbit.", &notes));
+    try testing.expect(judge.newValue(q, was, "I don't know for sure, but your rabbit is named Floppy.", &notes, &.{}));
+    try testing.expect(judge.newValue(q, was, "I don't know, maybe it is green.", &notes, &.{})); // a stored value
+    try testing.expect(judge.newValue(q, was, "I don't know, perhaps 3 of them.", &notes, &.{}));
+    try testing.expect(!judge.newValue(q, was, "I don't know your rabbit's name. You haven't told me.", &notes, &.{}));
+    try testing.expect(!judge.newValue(q, was, "I don't know your rabbit's name. I don't have any information about a rabbit.", &notes, &.{}));
 }
 
 test "promotion: --notes-promote-every takes a duration, off by default; hold and alone take a count from 1" {
@@ -83,21 +83,21 @@ test "promotion: the judge's settled changes, each from a run4 probe; a leak or 
     const notes = [_][]const u8{ "My dog has grey eyes.", "My cat's eyes are green.", "My sister lives in Turku.", "My dog is named Luna." };
     // 1. "not provided" is a don't-know (night 2: the sister's eye colour)
     try testing.expect(probes.unknown("Your sister's eye colour is not provided in the given text."));
-    try testing.expectEqual(@as(?bool, true), probes.settled(K.neighbour, "What is my sister's eye colour?", "I don't know.", "Your sister's eye colour is not provided in the given text.", &notes));
+    try testing.expectEqual(@as(?bool, true), probes.settled(K.neighbour, "What is my sister's eye colour?", "I don't know.", "Your sister's eye colour is not provided in the given text.", &notes, &.{}));
     // 2. the same answer, longer (night 1's two-note probe)
-    try testing.expectEqual(@as(?bool, true), probes.settled(K.pair, "Which is more expensive, your red car or your blue boat?", "My red car is more expensive.", "My red car is more expensive than my blue boat.", &notes));
-    try testing.expectEqual(@as(?bool, true), probes.settled(K.pair, "Is my car red?", "Yes.", "Yes, you told me your car is red.", &notes));
+    try testing.expectEqual(@as(?bool, true), probes.settled(K.pair, "Which is more expensive, your red car or your blue boat?", "My red car is more expensive.", "My red car is more expensive than my blue boat.", &notes, &.{}));
+    try testing.expectEqual(@as(?bool, true), probes.settled(K.pair, "Is my car red?", "Yes.", "Yes, you told me your car is red.", &notes, &.{}));
     // 3. a change to don't-know (night 2's tent and boat) is not worse; a fact's own blank answer is not settled
-    try testing.expectEqual(@as(?bool, true), probes.settled(K.pair, "Is the boat bigger than the tent?", "No, the boat is smaller than the tent.", "I don't know. The text doesn't tell us the sizes of the tent and the boat.", &notes));
-    try testing.expect(probes.settled(K.fact, "What colour are my dog's eyes?", "Your dog has grey eyes.", "I don't know.", &notes) == null);
+    try testing.expectEqual(@as(?bool, true), probes.settled(K.pair, "Is the boat bigger than the tent?", "No, the boat is smaller than the tent.", "I don't know. The text doesn't tell us the sizes of the tent and the boat.", &notes, &.{}));
+    try testing.expect(probes.settled(K.fact, "What colour are my dog's eyes?", "Your dog has grey eyes.", "I don't know.", &notes, &.{}) == null);
     // controls: the real damage of run4 still counts
-    try testing.expectEqual(@as(?bool, false), probes.settled(K.neighbour, "What is my neighbour's eye colour?", "I don't know.", "Your neighbour's eye colour is grey.", &notes));
-    try testing.expectEqual(@as(?bool, false), probes.settled(K.neighbour, "What is my rabbit's name?", "I don't know your rabbit's name.", "Your rabbit's name is Oreo.", &notes));
-    try testing.expectEqual(@as(?bool, false), probes.settled(K.neighbour, "Where does my cousin live?", "I don't know where your cousin lives.", "Your cousin lives in Turku.", &notes));
-    try testing.expectEqual(@as(?bool, false), probes.settled(K.neighbour, "What is my rabbit's name?", "I don't know your rabbit's name.", "I don't know for sure, but your rabbit is named Floppy.", &notes));
-    try testing.expectEqual(@as(?bool, false), probes.settled(K.neighbour, "What is your sister's name?", "My name is Nemotron. I don't have a sister.", "My sister's name is Luna.", &notes)); // the dog's name, leaked
-    try testing.expect(probes.settled(K.pair, "Is my car red?", "Yes.", "No.", &notes) == null);
-    try testing.expect(probes.settled(K.pair, "Which is more expensive, your red car or your blue boat?", "My red car is more expensive.", "My red car is more expensive, and so is your grey dog.", &notes) == null);
+    try testing.expectEqual(@as(?bool, false), probes.settled(K.neighbour, "What is my neighbour's eye colour?", "I don't know.", "Your neighbour's eye colour is grey.", &notes, &.{}));
+    try testing.expectEqual(@as(?bool, false), probes.settled(K.neighbour, "What is my rabbit's name?", "I don't know your rabbit's name.", "Your rabbit's name is Oreo.", &notes, &.{}));
+    try testing.expectEqual(@as(?bool, false), probes.settled(K.neighbour, "Where does my cousin live?", "I don't know where your cousin lives.", "Your cousin lives in Turku.", &notes, &.{}));
+    try testing.expectEqual(@as(?bool, false), probes.settled(K.neighbour, "What is my rabbit's name?", "I don't know your rabbit's name.", "I don't know for sure, but your rabbit is named Floppy.", &notes, &.{}));
+    try testing.expectEqual(@as(?bool, false), probes.settled(K.neighbour, "What is your sister's name?", "My name is Nemotron. I don't have a sister.", "My sister's name is Luna.", &notes, &.{})); // the dog's name, leaked
+    try testing.expect(probes.settled(K.pair, "Is my car red?", "Yes.", "No.", &notes, &.{}) == null);
+    try testing.expect(probes.settled(K.pair, "Which is more expensive, your red car or your blue boat?", "My red car is more expensive.", "My red car is more expensive, and so is your grey dog.", &notes, &.{}) == null);
 }
 
 test "promotion: a don't-know that lists what it lacks names no value; run4 night 3's only rejection" {
@@ -106,7 +106,7 @@ test "promotion: a don't-know that lists what it lacks names no value; run4 nigh
     const q = "What is my neighbour colour?";
     const was = "I don't know your neighbour's colour. I don't have information about the colour of the people you know.";
     const now = "I don't know your neighbour's colour. I don't have information about the colour of your neighbour's eyes, hair or skin.";
-    try testing.expect(!judge.newValue(q, was, now, &notes));
-    try testing.expectEqual(@as(?bool, true), probes.settled(probes.Kind.neighbour, q, was, now, &notes));
-    try testing.expect(judge.newValue(q, was, "I don't know your neighbour's colour, but your neighbour's eyes are green.", &notes));
+    try testing.expect(!judge.newValue(q, was, now, &notes, &.{}));
+    try testing.expectEqual(@as(?bool, true), probes.settled(probes.Kind.neighbour, q, was, now, &notes, &.{}));
+    try testing.expect(judge.newValue(q, was, "I don't know your neighbour's colour, but your neighbour's eyes are green.", &notes, &.{}));
 }

@@ -7,14 +7,17 @@ const units = @import("../slide_units.zig");
 pub const Known = struct { others: []const []const u8 = &.{}, subjects: []const []const u8 = &.{}, subject: []const u8 = "" };
 
 /// Whether `reply` gives the fact as `ref` does: the reference's answer words, or a notable fact word ("Grey").
-pub fn agreesWith(fact: []const u8, question: []const u8, ref: []const u8, reply: []const u8, known: Known) bool {
+pub fn agreesWith(fact: []const u8, question: []const u8, ref: []const u8, whole: []const u8, known: Known) bool {
+    var buf: [16 << 10]u8 = undefined;
+    const reply = own(fact, question, whole, known, &buf); // "...is pears. (Your sister likes orange best.)" keeps pears
+    if (std.mem.trim(u8, reply, " \t\r\n.,;:!?()*_-").len == 0) return false; // every clause is another subject's
     if (!plain(fact, question, ref, reply)) return false; // "Not grey.", "Maybe grey.", "I do not know whether grey."
     if (otherSubject(fact, question, reply, known)) return false; // "Your sister's eyes are brown." for the dog's
     if (userValue(fact) and aboutUser(question) and namesUser(ref) and givesUser(fact, question, reply)) return true;
     if (wording.recalls(fact, question, ref, reply)) return true;
     // a terse reply ("Grey") only: a few words, and no word another note gives that this fact and question do not
     var words: usize = 0;
-    var wi = std.mem.tokenizeAny(u8, reply, delims);
+    var wi = std.mem.tokenizeAny(u8, whole, delims);
     while (wi.next()) |w| {
         words += 1;
         if (w.len < 3 or wording.isFiller(w) or hasStem(fact, w) or hasStem(question, w)) continue;
@@ -42,20 +45,28 @@ pub fn gives(fact: []const u8, question: []const u8, ref: []const u8, known: Kno
 }
 
 /// Whether `reply` gives a value neither `before` nor the question has: a name, a number, or a stored note's word.
-pub fn newValue(question: []const u8, before: []const u8, reply: []const u8, notes: []const []const u8) bool {
+pub fn newValue(question: []const u8, before: []const u8, reply: []const u8, notes: []const []const u8, subjects: []const []const u8) bool {
+    const cites: Cites = .init(reply, notes); // a quoted note ("I like pears.") is the user's words, not the reply's
+    const asked = askedNoun(question);
     // clause by clause: a denying clause asserts nothing; "I don't know, but your rabbit is Floppy." asserts its second
     var clauses = std.mem.tokenizeAny(u8, reply, ".!?;,");
     while (clauses.next()) |raw| {
         var parts = std.mem.splitSequence(u8, raw, " but ");
         while (parts.next()) |clause| {
-            if (denies(clause)) continue;
+            if (denies(clause) or !aboutAsked(question, asked, clause, subjects)) continue;
             var it = std.mem.tokenizeAny(u8, clause, delims);
             var first = true;
-            while (it.next()) |w| : (first = false) {
+            var prev: []const u8 = "";
+            while (it.next()) |w| : ({
+                first = false;
+                prev = w;
+            }) {
+                if (cites.has(reply, w)) continue;
+                if (std.ascii.isDigit(w[0]) and holds(prev, &.{ "item", "statement", "note", "entry", "line" })) continue; // "(item 28)"
                 if (std.ascii.isDigit(w[0]) and !hasStem(before, w) and !hasStem(question, w)) return true;
                 if (w.len < 2 or wording.isFiller(w) or hasStem(before, w) or hasStem(question, w)) continue;
                 if (!first and std.ascii.isUpper(w[0]) and !std.mem.eql(u8, w, "I")) return true;
-                if (w.len >= 3) for (notes) |n| if (hasStem(n, w)) return true;
+                if (w.len >= 3 and !common(w)) for (notes) |n| if (hasStem(n, w)) return true;
             }
         }
     }
@@ -92,7 +103,15 @@ pub fn copiesBlock(reply: []const u8) bool {
 
 /// Whether a reply says it does not know (the model's ways of saying nothing was told).
 pub fn unknown(reply: []const u8) bool {
-    const marks = [_][]const u8{ "don't know", "do not know", "don’t know", "not sure", "no information", "haven't told", "have not told", "haven't mentioned", "have not mentioned", "not mentioned", "don't have", "do not have", "can't know", "cannot know", "no way of knowing", "not been told", "wasn't told", "unknown", "not provided", "not given", "not specified", "not stated", "doesn't tell", "does not tell", "doesn't say", "does not say", "doesn't mention", "does not mention", "no data", "no record" };
+    const marks = [_][]const u8{ "don't know", "do not know", "don’t know", "not sure", "no information", "haven't told", "have not told", "haven't mentioned", "have not mentioned", "not mentioned", "don't have", "do not have", "can't know", "cannot know", "no way of knowing", "not been told", "wasn't told", "unknown", "not provided", "not given", "not specified", "not stated", "doesn't tell", "does not tell", "doesn't say", "does not say", "doesn't mention", "does not mention", "no data", "no record", "not explicitly", "isn't explicitly" };
+    for (marks) |m| if (std.ascii.findIgnoreCase(reply, m) != null) return true;
+    return false;
+}
+
+/// Whether a reply gives no answer: unknown()'s ways, or how a long thinking reply says its record lacks the value.
+pub fn noAnswer(reply: []const u8) bool {
+    if (unknown(reply)) return true;
+    const marks = [_][]const u8{ "no mention", "any mention", "don't see", "do not see", "don’t see", "never referenced", "never mentioned", "not referenced", "cannot determine", "can't determine", "nothing about", "not included", "doesn't include", "does not include", "isn't mentioned", "is not mentioned", "aren't mentioned", "no reference to" };
     for (marks) |m| if (std.ascii.findIgnoreCase(reply, m) != null) return true;
     return false;
 }
@@ -240,20 +259,136 @@ fn givesUser(fact: []const u8, question: []const u8, reply: []const u8) bool {
 fn otherSubject(fact: []const u8, question: []const u8, reply: []const u8, known: Known) bool {
     for (known.subjects) |s| {
         var buf: [48]u8 = undefined;
-        var len: usize = 0;
-        var count: usize = 0;
-        var it: units.Units = .init(s);
-        while (it.next()) |u| : (count += 1) {
-            len = @min(u.word.len, buf.len);
-            @memcpy(buf[0..len], u.word[0..len]);
-        }
-        const noun = buf[0..len];
-        // the user ("me") is no other subject: a reply says "you" of the user whatever the fact
-        if (len == 0 or (count == 1 and holds(noun, &.{ "me", "i", "myself", "we", "us" }))) continue;
+        const noun = subjectNoun(s, &buf);
+        if (noun.len == 0) continue;
         if (units.says(fact, noun) or units.says(question, noun) or units.says(known.subject, noun)) continue;
         if (units.says(reply, noun)) return true;
     }
     return false;
+}
+
+/// A subject's noun as units reads it ("my sister": "sister"), in `buf`; empty for the user, who is no other subject.
+fn subjectNoun(s: []const u8, buf: *[48]u8) []const u8 {
+    var len: usize = 0;
+    var count: usize = 0;
+    var it: units.Units = .init(s);
+    while (it.next()) |u| : (count += 1) {
+        len = @min(u.word.len, buf.len);
+        @memcpy(buf[0..len], u.word[0..len]);
+    }
+    const noun = buf[0..len];
+    if (len == 0 or (count == 1 and holds(noun, &.{ "me", "i", "myself", "we", "us" }))) return "";
+    return noun;
+}
+
+/// `reply` without its clauses about another subject the store knows ("your sister likes orange best"), in `buf`.
+fn own(fact: []const u8, question: []const u8, reply: []const u8, known: Known, buf: []u8) []const u8 {
+    if (reply.len > buf.len or known.subjects.len == 0) return reply;
+    var n: usize = 0;
+    var start: usize = 0;
+    var i: usize = 0;
+    while (i <= reply.len) : (i += 1) {
+        if (i < reply.len and std.mem.indexOfScalar(u8, ".!?;,:\n()", reply[i]) == null) continue;
+        const seg = reply[start..i];
+        const stop = reply[i..@min(i + 1, reply.len)]; // the delimiter, kept so plain() reads the clauses as before
+        start = i + 1;
+        if (!otherSubject(fact, question, seg, known)) {
+            n = put(buf, n, seg);
+        } else {
+            var kept: usize = 0;
+            var buts = std.mem.splitSequence(u8, seg, " but ");
+            while (buts.next()) |half| {
+                var ands = std.mem.splitSequence(u8, half, " and ");
+                while (ands.next()) |part| {
+                    if (otherSubject(fact, question, part, known)) continue;
+                    if (kept > 0) n = put(buf, n, " and ");
+                    n = put(buf, n, part);
+                    kept += 1;
+                }
+            }
+        }
+        n = put(buf, n, stop);
+    }
+    return buf[0..n];
+}
+
+fn put(buf: []u8, n: usize, s: []const u8) usize {
+    const k = @min(s.len, buf.len - n);
+    @memcpy(buf[n..][0..k], s[0..k]);
+    return n + k;
+}
+
+/// The words a reply calls the user by (in the reply, "you" is the user and "I" the model).
+const users = [_][]const u8{ "you", "your", "yours", "yourself", "user" };
+
+/// The subject a question asks about by its possessive ("my neighbour's", "your dog's"), or "".
+fn askedNoun(question: []const u8) []const u8 {
+    var it = std.mem.tokenizeAny(u8, question, " \t\r\n.,;:!?\"()*_");
+    while (it.next()) |w| {
+        if (w.len > 2 and std.mem.endsWith(u8, w, "'s")) return w[0 .. w.len - 2];
+        if (w.len > 4 and std.mem.endsWith(u8, w, "’s")) return w[0 .. w.len - 4];
+    }
+    return "";
+}
+
+/// Whether a clause may give the asked subject's value: it names it, or names no other subject nor the user instead.
+fn aboutAsked(question: []const u8, asked: []const u8, clause: []const u8, subjects: []const []const u8) bool {
+    if (asked.len > 0 and hasStem(clause, asked)) return true;
+    for (subjects) |s| {
+        var buf: [48]u8 = undefined;
+        const noun = subjectNoun(s, &buf);
+        if (noun.len > 0 and !units.says(question, noun) and units.says(clause, noun)) return false; // "your sister likes..."
+    }
+    // "yours are green" when the neighbour's are asked (a user clause may leak when the model is asked)
+    if (asked.len > 0 and holds(clause, &users)) return false;
+    return true;
+}
+
+/// The quoted spans of a reply that cite a stored note: the user's own statement, not a value the reply gives.
+const Cites = struct {
+    spans: [32][2]usize = undefined,
+    n: usize = 0,
+
+    fn init(reply: []const u8, notes: []const []const u8) Cites {
+        var c: Cites = .{};
+        var i: usize = 0;
+        while (c.n < c.spans.len) {
+            const open = quoteAt(reply, i) orelse break;
+            const close = quoteAt(reply, open[1]) orelse break;
+            const inner = std.mem.trim(u8, reply[open[1]..close[0]], " \t\r\n.,;:!?*");
+            if (inner.len >= 3) for (notes) |n| if (std.ascii.findIgnoreCase(n, inner) != null) {
+                c.spans[c.n] = .{ open[1], close[0] };
+                c.n += 1;
+                break;
+            };
+            i = close[1];
+        }
+        return c;
+    }
+
+    fn has(c: *const Cites, reply: []const u8, w: []const u8) bool {
+        const at = @intFromPtr(w.ptr) -% @intFromPtr(reply.ptr);
+        for (c.spans[0..c.n]) |s| if (at >= s[0] and at < s[1]) return true;
+        return false;
+    }
+};
+
+/// The next quote mark at or after `i`, straight or curly, as its first byte and the byte after it; null: none.
+fn quoteAt(text: []const u8, i: usize) ?[2]usize {
+    var j = i;
+    while (j < text.len) : (j += 1) {
+        if (text[j] == '"') return .{ j, j + 1 };
+        if (j + 3 <= text.len and text[j] == 0xE2 and text[j + 1] == 0x80 and (text[j + 2] == 0x9C or text[j + 2] == 0x9D)) return .{ j, j + 3 };
+    }
+    return null;
+}
+
+/// A word no note's value is ("like", "called"), compared without case.
+fn common(w: []const u8) bool {
+    var buf: [48]u8 = undefined;
+    if (w.len > buf.len) return false;
+    const low = std.ascii.lowerString(&buf, w);
+    return units.isCommon(low) or std.mem.eql(u8, low, "own"); // "your own statements"; "own" would match "owner"
 }
 
 /// Whether `text` has a word of `w`'s stem (case folded; a plural s and the last letters of a long word aside).
