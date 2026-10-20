@@ -228,6 +228,19 @@ match, INFERRED), and right answers that name another subject in passing ("your 
 thinking-off answers. So `--notes-promote-thinking` is off by default until the judge reads long answers; with it off,
 night 2's add plan would have been kept in both runs (INFERRED from the thinking-off verdicts, not run).
 
+**Run 3, thinking checks off (`c8641581`, the same 5 notes on a fresh copy; MEASURED, `~/tf-promote/spill3-20261020/`).**
+The first promotions of these runs. Night 1 (33 minutes, 266 asks): the add plan was refused for the amber spill
+("What is my neighbour's eye colour?" -> "Your neighbour's eye colour is amber."), and the one-by-one pass kept the dog
+Bruno and blamed three; the dog's alone check was 2 of 2 right. Night 2 (23 minutes, 252 asks): the tent was promoted
+and two blamed again; the dog's second alone night moved its note out of the prompt ("in weights"). Night 3 had
+nothing due (every fact had used its retry). The tent's alone check failed 0 of 3: with its note out, other notes in
+the block answered for it ("The tent belongs to me.", "The tent is blue."). Asked afterwards with no notes at all, the
+taught copy answered the dog 6 of 6 ("Your dog's name is Bruno.", thinking off and on) and the tent 8 of 9 ("The tent
+is yellow."; one thinking-on reply asked which tent). No untaught control was asked in this run. The brother's eyes,
+taught alone, never gave the neighbour amber; it was blamed on noise both nights ("don't know" replies reworded, and
+on night 2 "My neighbour's eye colour is grey."). The sister's Bergen fact was blamed on a reworded "don't know"; the
+pears were never learned in 12 lessons over three runs. Every rewind gave back all judged replies byte for byte.
+
 **Retry.** A missed or rejected fact is due once more the next night (`retries`, kept in the state); not a third time.
 
 **Alone.** On the accepted state each fact in the pocket is asked its probes in the state after it leaves the prompt:
