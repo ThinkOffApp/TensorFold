@@ -15,15 +15,16 @@ pub fn agreesWith(fact: []const u8, question: []const u8, ref: []const u8, whole
     if (otherSubject(fact, question, reply, known)) return false; // "Your sister's eyes are brown." for the dog's
     if (userValue(fact) and aboutUser(question) and namesUser(ref) and givesUser(fact, question, reply)) return true;
     if (wording.recalls(fact, question, ref, reply)) return true;
-    // a terse reply ("Grey") only: a few words, and no word another note gives that this fact and question do not
+    // a terse reply ("Grey"): few words in all, no other note's word in its own clauses ("Green (your sister's...)")
     var words: usize = 0;
     var wi = std.mem.tokenizeAny(u8, whole, delims);
-    while (wi.next()) |w| {
-        words += 1;
+    while (wi.next()) |_| words += 1;
+    if (words > terse_words) return false;
+    var oi = std.mem.tokenizeAny(u8, reply, delims);
+    while (oi.next()) |w| {
         if (w.len < 3 or wording.isFiller(w) or hasStem(fact, w) or hasStem(question, w)) continue;
         for (known.others) |o| if (hasStem(o, w)) return false; // "grey or brown", "brown, not grey"
     }
-    if (words > terse_words) return false;
     // value words (in reference and fact, not fillers, not the question's): names and numbers said, half the rest
     var n: usize = 0;
     var said: usize = 0;
@@ -300,7 +301,8 @@ fn own(fact: []const u8, question: []const u8, reply: []const u8, known: Known, 
             while (buts.next()) |half| {
                 var ands = std.mem.splitSequence(u8, half, " and ");
                 while (ands.next()) |part| {
-                    if (otherSubject(fact, question, part, known)) continue;
+                    // "or brown like your sister's" stays: a hedge on the asked value is judged, whomever it names
+                    if (otherSubject(fact, question, part, known) and !holds(part, &hedges)) continue;
                     if (kept > 0) n = put(buf, n, " and ");
                     n = put(buf, n, part);
                     kept += 1;

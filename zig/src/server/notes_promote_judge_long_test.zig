@@ -67,8 +67,24 @@ test "promotion judge: a right answer that names another subject in passing stil
     try testing.expect(!judge.agreesWith(fact, q, ref, "Your sister likes pears best, and your dog likes apples.", known(fact)));
 }
 
+test "promotion judge: a terse right answer keeps its value beside an aside about another subject" {
+    const cat = "My cat's eyes are green.";
+    const q = "What colour are my cat's eyes?";
+    const ref = "Your cat's eyes are green.";
+    try testing.expect(judge.agreesWith(cat, q, ref, "Green (your sister's are brown).", known(cat)));
+    // negative control: brown in the reply's own clause still offers another note's value
+    try testing.expect(!judge.agreesWith(cat, q, ref, "Green or brown.", known(cat)));
+}
+
 test "promotion judge: a reply that will not say the fact plainly is not right, however much it lists" {
     const fact = "I like pears.";
     const hedge = "Based on the conversation history provided, the user's favorite fruit is not explicitly stated. The closest mentions are:\n\n- \"I like pears.\" (statement [28])\n- \"My dog really likes apples.\" (statement [19])\n- \"My sister likes orange best.\" (statement [23])";
     try testing.expect(!judge.agreesWith(fact, "What is my favorite fruit?", "Your favorite fruit is pears.", hedge, known(fact)));
+}
+
+test "promotion judge: a hedge stays a hedge when it names another subject" {
+    const cat = "My cat's eyes are green.";
+    // "or brown like your sister's" offers another value for the cat's eyes, though it names the sister
+    try testing.expect(!judge.agreesWith(cat, "What colour are my cat's eyes?", "Your cat's eyes are green.", "Green, or brown like your sister's.", known(cat)));
+    try testing.expect(!judge.agreesWith(cat, "What colour are my cat's eyes?", "Your cat's eyes are green.", "Your cat's eyes are green, but maybe brown like your sister's.", known(cat)));
 }
