@@ -92,8 +92,8 @@ pub const Taught = struct { kept: bool, neurons: []const Neuron = &.{}, question
 /// A question asked as production asks it, these note ids out of its block (null: no notes); think: thinking on.
 pub const Ask = struct { q: []const u8, exclude: ?[]const u32 = &.{}, think: bool = false };
 
-/// regress_notes: notes whose question joins the set (null: all); retries: tries after a miss; thinking: both modes.
-pub const Settings = struct { hold: u32 = 1, alone: u32 = 2, tolerance: u32 = 0, probes_per_fact: usize = 4, regress_notes: ?u32 = null, retries: u32 = 1, targeted: bool = true, thinking: bool = true };
+/// regress_notes: notes whose question joins the set (null: all); retries: after a miss; thinking: also asked thinking.
+pub const Settings = struct { hold: u32 = 1, alone: u32 = 2, tolerance: u32 = 0, probes_per_fact: usize = 4, regress_notes: ?u32 = null, retries: u32 = 1, targeted: bool = true, thinking: bool = false };
 
 /// Prompts that no lesson should change, asked before and after each night.
 pub const controls = [_][]const u8{ "What is the capital of France?", "How many legs does a spider have?", "Tell me something interesting about the ocean.", "What is my teacher's name?" };

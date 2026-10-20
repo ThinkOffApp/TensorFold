@@ -97,7 +97,7 @@ test "promotion: a thinking reply that copies the notes block is never judged; o
     const a = arena.allocator();
     var f: Fake = .{ .a = a, .thinking_copies = "boat=blue" };
     _ = try f.add("w1", "dog=Luna");
-    var s = promote.State.init(testing.allocator, .{});
+    var s = promote.State.init(testing.allocator, .{ .thinking = true });
     defer s.deinit();
     _ = try promote.night(&s, a, &f);
     _ = try f.add("w2", "boat=blue");

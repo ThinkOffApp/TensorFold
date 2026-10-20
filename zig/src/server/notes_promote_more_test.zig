@@ -43,6 +43,9 @@ test "promotion: --notes-promote-every takes a duration, off by default; hold an
     try testing.expectError(error.Usage, cli.parse(a, &.{ "m", "--notes-promote-regress", "some" }, &u));
     try testing.expect(plain.notes_promote_targeted);
     try testing.expect(!(try cli.parse(a, &.{ "m", "--notes-promote-targeted", "off" }, &u)).notes_promote_targeted);
+    try testing.expect(!plain.notes_promote_thinking); // off by default: the judge misreads long thinking answers
+    try testing.expect((try cli.parse(a, &.{ "m", "--notes-promote-thinking", "on" }, &u)).notes_promote_thinking);
+    try testing.expect(!(@import("notes/promote.zig").Settings{}).thinking);
 }
 
 test "promotion: a terse right reply agrees with its reference; a denied, doubted, wrong or mixed one does not" {

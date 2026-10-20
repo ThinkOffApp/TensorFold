@@ -42,7 +42,7 @@ Grades: **MEASURED** we ran it; **READ** we read it in code or a document; **INF
 | `--notes-promote-every DURATION` | a night every DURATION after the last ended (`600s`, `10m`, `24h`); needs `--notes` and `--slide` |
 | `--notes-promote-hold N` | nights a note must stay unchanged before it is due (default 1) |
 | `--notes-promote-alone N` | nights running its questions must come back without its note (default 2) |
-| `--notes-promote-thinking {on,off}` | every check asked with thinking on as well as off (default on); off: thinking off only |
+| `--notes-promote-thinking {on,off}` | on: every check also asked with thinking on (default off, see "On a GPU") |
 
 State lives in `SNAPSHOT.promote` beside the snapshot (JSON, format `tf-notes-promote/1`), written to a fresh
 temporary file, synced (`F_FULLFSYNC` on macOS, `fsync` elsewhere, the journal's rule), renamed over, and the folder
@@ -213,7 +213,20 @@ fixed since:
   needs a reference that gives its note, as a learner probe does (written once more, else none).
 - The night's summary said "plan add ... 0 worse" with an empty pocket: a lesson the learner did not keep passed its
   check. The plan is now "add" only when a kept fact was promoted.
-The fixes have not run on a GPU yet.
+
+**Run 2, with the fixes (`e854b60d`, the same 5 notes on a fresh copy; MEASURED, `~/tf-promote/spill2-20261020/`).**
+The copies are gone (1 thinking reply of 203 on night 1 and 0 on night 2 had two block lines, against 33 and 38 of 189;
+the one was a right answer citing two notes, and it was not judged). Thinking asks ran a median 774 tokens and none
+reached 2048. Nights took 47 and 39 minutes for 528 asks. Nine of 22 own questions were dropped (one good one among
+them, "My sister likes orange best." whose reference said "favorite color is orange"; one bad one survived on its
+second reference, "What is my sister's name?" for Bergen). But the result is the same: both add plans refused (night 1
+caught the amber spill again, thinking off), and the one-by-one pass blamed all four kept facts, so nothing was
+promoted. The thinking checks did it: 19 and 21 worse thinking verdicts against 5 and 0 with thinking off. Most are a
+long "don't know" that lists values on record, which the judge reads as a new value (14 of 19 and 15 of 21 by a phrase
+match, INFERRED), and right answers that name another subject in passing ("your own stated fruit preference is pears.
+(Your sister likes orange best, your dog likes apples...)" failed the subject rule). The judge was written for short
+thinking-off answers. So `--notes-promote-thinking` is off by default until the judge reads long answers; with it off,
+night 2's add plan would have been kept in both runs (INFERRED from the thinking-off verdicts, not run).
 
 **Retry.** A missed or rejected fact is due once more the next night (`retries`, kept in the state); not a third time.
 
@@ -348,8 +361,9 @@ prompt, which is the design), and the 2 in-weights facts cost one question when 
   learner still writes them. (Which probe went worse is in the probe log and the night's worse list.)
 - Missed and rejected facts are tried once more (`retries`), not a third time; only 2 of 29 facts reached in weights
   on the GB10 run.
-- The fixes after the first GPU run (thinking caps, copies unjudged, own questions checked) have not run on a GPU.
-  With the larger caps a night will take longer than the 31 to 39 minutes measured; not measured.
+- The judge misreads long thinking answers (above), so the thinking checks are off by default; reading them needs
+  clause-level subject and new-value rules, as the hedge rule already is. Promotion with the checks off has not been
+  run on a GPU since the fixes.
 - A notes chat with thinking on spends its first several hundred reasoning tokens copying the notes block (asus3,
   20 Oct, 287 to 1230 tokens): a cost for every such chat, not only the checks; not addressed here.
 - A spill-over that two facts cause only together is caught, since each fact is checked on top of the ones kept
