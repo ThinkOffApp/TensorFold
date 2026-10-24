@@ -79,8 +79,18 @@ word of an entity's name. The block holds the subjects' notes and the notes of
 the entities those notes name. An excluded note is never shown, and the link it
 states is never followed. A note written through `/v1/notes` without a subject
 is not sorted by who it is about, so such a note is a candidate whenever the
-plain lookup finds it. A question that names nobody the store knows, and finds
-none of those notes, gets no block. `"notes_lookup": "plain"` keeps the earlier lookup (Python's
+plain lookup finds it. When no subject or unsorted note is found, an explicit
+personal reference (`I`, `me`, `mine`, `myself`, `my ...`), a possessive, or a
+name-shaped word keeps the block empty. Query words such as "What" and acronyms
+such as "VAT" are not name cues. A name-shaped word already in the user's
+matching notes, or a sentence's first word unless possessive or comma-addressed,
+does not count as an unknown name. This keeps "Explain ..." and "The ..."
+questions on the normal lookup. A place named in the user's
+matching notes can identify a stored world fact, such as "Exampleland" in an
+imported VAT note filed under `me`; it is not treated as an unknown person.
+With no subject cue the normal lookup runs, so subject-free world questions
+still find imported facts. This is a lexical rule, not a general person-name
+parser. `"notes_lookup": "plain"` keeps the earlier lookup (Python's
 `retrieve()`), and `--notes-lookup plain` does so for the whole server. A
 request in German or Finnish (`notes_language` or `--notes-language`) keeps it
 too.
