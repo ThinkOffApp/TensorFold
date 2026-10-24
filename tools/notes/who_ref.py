@@ -230,7 +230,9 @@ def subject_cue(ns, O, question, pool):
         return True
     own = {m.group().translate(ASCII_FOLD) for i in pool if O.notes[i]['entity'] == 'me'
            for m in NAME_RUN.finditer(ns.line(O, i))}
+    first, previous = True, 0
     for m in NAME_RUN.finditer(question):
+        first = first or any(c in '.?!\n' for c in question[previous:m.start()])
         word = m.group()
         folded = word.translate(ASCII_FOLD)
         if folded == 'my':
@@ -238,6 +240,8 @@ def subject_cue(ns, O, question, pool):
         raw = word.encode()
         shaped = (65 <= raw[0] <= 90 or raw[0] >= 128) and any(97 <= c <= 122 or c >= 128 for c in raw)
         possessive = question[m.end():].startswith(("'s", '\u2019s'))
-        if (shaped or possessive) and folded not in QUERY_WORDS and folded not in own:
+        address = question[m.end():].startswith(',')
+        if (possessive or ((not first or address) and shaped)) and folded not in QUERY_WORDS and folded not in own:
             return True
+        first, previous = False, m.end()
     return False

@@ -83,6 +83,9 @@ plain lookup finds it. When no subject or unsorted note is found, an explicit
 personal reference (`I`, `me`, `mine`, `myself`, `my ...`), a possessive, or a
 name-shaped word keeps the block empty. Query words such as "What" and acronyms
 such as "VAT" are not name cues. A name-shaped word already in the user's
+matching notes, or a sentence's first word unless possessive or comma-addressed,
+does not count as an unknown name. This keeps "Explain ..." and "The ..."
+questions on the normal lookup. A place named in the user's
 matching notes can identify a stored world fact, such as "Exampleland" in an
 imported VAT note filed under `me`; it is not treated as an unknown person.
 With no subject cue the normal lookup runs, so subject-free world questions

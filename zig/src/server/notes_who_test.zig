@@ -32,6 +32,9 @@ test "who first: a subject-free question keeps an imported world fact, an unknow
         const q = "What is the VAT rate in Exampleland?";
         try testing.expectEqualSlices(u32, &.{1}, try idsOf(r, a, q, ""));
         try testing.expectEqualSlices(u32, &.{1}, try idsOf(r, a, "Tell me the VAT rate in Exampleland.", ""));
+        for ([_][]const u8{ "Explain the VAT rate in Exampleland.", "List the VAT rates.", "The VAT rate in Exampleland?", "What is my VAT rate in Exampleland?", "Thanks. Explain the VAT rate in Exampleland." }) |world| {
+            try testing.expectEqualSlices(u32, &.{1}, try idsOf(r, a, world, ""));
+        }
         try testing.expectEqualSlices(u32, try idsOf(r, a, q, ",\"notes_lookup\":\"plain\""), try idsOf(r, a, q, ""));
         try testing.expectEqual(@as(usize, 0), (try idsOf(r, a, q, ",\"notes_exclude\":[1]")).len);
         for ([_][]const u8{ "What is my cousin's VAT rate?", "What is Rafa's VAT rate?", "Tell me about Rafa.", "Rafa, what is the VAT rate?", "What is Zo\u{eb}'s VAT rate?" }) |unknown| {

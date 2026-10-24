@@ -104,8 +104,10 @@ fn isUnsorted(idx: *const Index, i: u32) bool {
 fn subjectCue(idx: *const Index, sc: *const Scratch, q: []const u8) bool {
     if (speaks(q)) return true;
     var i: usize = 0;
+    var first = true;
     while (i < q.len) {
         if (letterAt(q, i) == 0) {
+            if (std.mem.indexOfScalar(u8, ".?!\n", q[i]) != null) first = true;
             i += 1;
             continue;
         }
@@ -113,7 +115,9 @@ fn subjectCue(idx: *const Index, sc: *const Scratch, q: []const u8) bool {
         const w = q[i..end];
         if (std.ascii.eqlIgnoreCase(w, "my")) return true;
         const possessive = std.mem.startsWith(u8, q[end..], "'s") or std.mem.startsWith(u8, q[end..], "\u{2019}s");
-        if ((possessive or nameShaped(w)) and !queryWord(w) and !userWord(idx, sc, w)) return true;
+        const address = end < q.len and q[end] == ',';
+        if ((possessive or ((!first or address) and nameShaped(w))) and !queryWord(w) and !userWord(idx, sc, w)) return true;
+        first = false;
         i = end;
     }
     return false;
