@@ -7,7 +7,7 @@ const Allocator = std.mem.Allocator;
 pub const Turn = [2][]const u8;
 
 /// A kept conversation: its name and its turns.
-pub const Talk = struct { name: []const u8, turns: []const Turn };
+pub const Talk = struct { name: []const u8, turns: []const Turn, promotion_keys: []const []const u8 = &.{} };
 
 /// The conversations kept, their text held by the graph's arena.
 pub const Talks = struct {
@@ -29,9 +29,15 @@ pub const Talks = struct {
 
     /// `turns` kept as conversation `name`, copied into `arena`.
     pub fn keep(t: *Talks, gpa: Allocator, arena: Allocator, name: []const u8, turns: []const Turn) !void {
+        return t.keepOwned(gpa, arena, name, turns, &.{});
+    }
+
+    pub fn keepOwned(t: *Talks, gpa: Allocator, arena: Allocator, name: []const u8, turns: []const Turn, keys: []const []const u8) !void {
         const out = try arena.alloc(Turn, turns.len);
         for (out, turns) |*o, x| o.* = .{ try arena.dupe(u8, x[0]), try arena.dupe(u8, x[1]) };
-        try t.list.append(gpa, .{ .name = try arena.dupe(u8, name), .turns = out });
+        const provenance = try arena.alloc([]const u8, keys.len);
+        for (keys, provenance) |key, *copy| copy.* = try arena.dupe(u8, key);
+        try t.list.append(gpa, .{ .name = try arena.dupe(u8, name), .turns = out, .promotion_keys = provenance });
     }
 
     /// As the graph file holds them: [{"name", "turns": [[line, reply], ...]}].
@@ -43,6 +49,11 @@ pub const Talks = struct {
             const turns = try a.alloc(json.Value, x.turns.len);
             for (x.turns, turns) |turn, *tv| tv.* = try pair(a, turn);
             try o.put(a, "turns", .{ .array = turns });
+            if (x.promotion_keys.len > 0) {
+                const keys = try a.alloc(json.Value, x.promotion_keys.len);
+                for (x.promotion_keys, keys) |key, *vkey| vkey.* = .{ .string = key };
+                try o.put(a, "promotion_keys", .{ .array = keys });
+            }
             v.* = .{ .object = o };
         }
         return .{ .array = out };
@@ -56,7 +67,11 @@ pub const Talks = struct {
             for ((x.field("turns") orelse continue).items() orelse continue) |turn| if (turn.items()) |p| {
                 if (p.len == 2) try turns.append(a, .{ p[0].str() orelse "", p[1].str() orelse "" });
             };
-            try t.list.append(gpa, .{ .name = x.strField("name") orelse continue, .turns = turns.items });
+            var keys: std.ArrayList([]const u8) = .empty;
+            if (x.field("promotion_keys")) |vkeys| for (vkeys.items() orelse return error.BadGraph) |key| {
+                try keys.append(a, key.str() orelse return error.BadGraph);
+            };
+            try t.list.append(gpa, .{ .name = x.strField("name") orelse continue, .turns = turns.items, .promotion_keys = keys.items });
         }
     }
 };

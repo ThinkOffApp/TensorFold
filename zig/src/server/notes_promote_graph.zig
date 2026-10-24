@@ -87,7 +87,8 @@ pub fn capture(p: *np.Promoter, keys: []const []const u8) !void {
                 const overlaps = for (row.neurons) |n| {
                     if (promote.has(f.neurons, n)) break true;
                 } else false;
-                if (overlaps) {
+                const legacy_text = row.neurons.len == 0 and std.mem.eql(u8, row.source, "chat") and try legacyText(a, f.text, row.text);
+                if (overlaps or legacy_text) {
                     row.promotion_key = try g.arena.allocator().dupe(u8, f.key);
                     bound = true;
                     break;
@@ -134,6 +135,7 @@ pub fn scrub(p: *np.Promoter, keys: []const []const u8) !void {
     const g = &p.srv.slide;
     g.mutex.lockUncancelable(g.io);
     defer g.mutex.unlock(g.io);
+    const questions = try @import("notes_promote_talks.zig").scrub(g, keys);
     for (g.facts.items) |*f| if (f.promotion_key.len > 0 and includes(keys, f.promotion_key)) {
         f.* = .{ .id = f.id, .text = "", .source = "chat", .at = 0, .state = .deleted, .promotion_key = f.promotion_key };
         if (g.traced == f.id) {
@@ -142,10 +144,7 @@ pub fn scrub(p: *np.Promoter, keys: []const []const u8) !void {
             g.traced = 0;
         }
     };
-    if (keys.len > 0) {
-        g.talks.list.clearRetainingCapacity();
-        p.srv.teacher.forgetAnswers(p.io);
-    }
+    if (keys.len > 0) p.srv.teacher.forgetFact(p.io, questions);
     try g.persist();
 }
 
@@ -212,4 +211,16 @@ pub fn recoverOwned(p: *np.Promoter) !void {
         });
     };
     try capture(p, keys.items);
+}
+
+/// Legacy missed rows have no addresses; exact original wording or one original sentence establishes the copy.
+fn legacyText(a: Allocator, note: []const u8, row: []const u8) !bool {
+    const words = @import("slide_words.zig");
+    const actual = std.mem.trim(u8, words.unmark(row), " \t\r\n.!?");
+    if (actual.len == 0 or note.len == 0) return false;
+    if (std.ascii.eqlIgnoreCase(actual, std.mem.trim(u8, words.unmark(note), " \t\r\n.!?"))) return true;
+    for (try words.sentences(a, note)) |sentence| {
+        if (std.ascii.eqlIgnoreCase(actual, std.mem.trim(u8, sentence, " \t\r\n.!?"))) return true;
+    }
+    return false;
 }

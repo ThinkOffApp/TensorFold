@@ -143,7 +143,7 @@ pub const Graph = struct {
         g.enter(f, p);
         if (p != .writing) return;
         const old = f.*;
-        f.* = .{ .id = old.id, .text = old.text, .source = old.source, .at = old.at, .state = old.state, .phase = .writing, .since = old.since };
+        f.* = .{ .id = old.id, .text = old.text, .source = old.source, .at = old.at, .state = old.state, .promotion_key = old.promotion_key, .phase = .writing, .since = old.since };
         g.trace.clearRetainingCapacity();
         g.cuts.clearRetainingCapacity();
         g.traced = id;
@@ -279,7 +279,7 @@ pub const Graph = struct {
     pub fn keepTalk(g: *Graph, name: []const u8, turns: []const slide_talks.Turn) void {
         g.mutex.lockUncancelable(g.io);
         defer g.mutex.unlock(g.io);
-        g.talks.keep(g.gpa, g.arena.allocator(), name, turns) catch return;
+        @import("notes_promote_talks.zig").keep(g, name, turns) catch return;
         g.save();
     }
 

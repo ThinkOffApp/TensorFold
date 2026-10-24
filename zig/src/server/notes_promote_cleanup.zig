@@ -63,7 +63,7 @@ pub fn drain(p: *np.Promoter) bool {
         return false;
     };
     if (sources.len == 0 and !p.erasing.load(.acquire)) {
-        if (p.state.open != null or p.state.rebuild_next or p.rewind_pending) return false;
+        if (p.state.open != null or p.rewind_pending) return false;
         if (p.publish_pending.load(.acquire) and !p.tryPublish()) return false;
         night.acknowledged(p.srv);
         return true;

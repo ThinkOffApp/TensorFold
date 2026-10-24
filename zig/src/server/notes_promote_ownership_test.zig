@@ -154,14 +154,14 @@ test "promotion ownership: reversible probe hashes are purged and a failed purge
     var c = try Case.init(a, .in_weights);
     defer c.deinit();
     const logs = @import("notes_promote_logs.zig");
-    defer logs.fail_purge = false;
+    defer logs.tests.fail_purge = false;
     pjson.appendProbe(a, c.path, .{ .night = 1, .kind = "control", .q = "What is the code?", .reply = "7419" });
     try t.expectEqual(logs.Status.may_hold, logs.status(t.allocator, t.io, c.r.snap));
-    logs.fail_purge = true;
+    logs.tests.fail_purge = true;
     const failed = try c.erase();
     try t.expect(failed.value.get("retryable").?.bool);
     try t.expectEqualStrings("may_hold", failed.value.get("places").?.strField("promotion_probe_log").?);
-    logs.fail_purge = false;
+    logs.tests.fail_purge = false;
     const done = try c.erase();
     try t.expect(!done.value.get("retryable").?.bool);
     try t.expectEqualStrings("empty", done.value.get("places").?.strField("promotion_probe_log").?);
@@ -232,6 +232,16 @@ test "promotion ownership: manual fact deletion restores Notes prompts and is de
     try t.expect((try c.p.requestBody(a, .{ .object = body })).get("notes_exclude") == null);
     try t.expect(c.r.srv.promotion_pending.load(.acquire));
     try t.expect(c.p.state.rebuild_next);
+    c.p.recover();
+    try t.expect(!c.r.srv.promotion_pending.load(.acquire));
+    try t.expectEqual(@as(usize, 0), c.p.state.find(c.key).?.neurons.len);
+    try c.controlIntact();
+    const zeros = c.learner.zeroed;
+    const lesson = [_]@import("engine_api").Example{.{ .ids = &.{ 1, 2 }, .start = 1, .decide = 0 }};
+    try t.expect(slide.run(c.r.srv, a, &.{ .train = &lesson }, 0) != .failed);
+    _ = try c.erase();
+    try t.expect(c.learner.live_slot);
+    try t.expectEqual(zeros, c.learner.zeroed);
 }
 
 test "promotion ownership: completed-night state failures and missing state cannot orphan graph-owned neurons" {

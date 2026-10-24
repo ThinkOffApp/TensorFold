@@ -42,7 +42,9 @@ source key before fitting. Recovery finds partial lessons by that identity rathe
 matching. A failed rewind retains its mark and the corresponding promotion address snapshot in
 memory, so a later control retry restores the same checkpoint without LLM question generation.
 Small cleanup/control retries run at most every five seconds; a failed full night waits for the
-configured interval or an explicit POST before another full attempt. During a rebuild or failure,
+configured interval or an explicit POST before another full attempt. Settled rollback and metadata
+recovery release manual learning admission without another full LLM night. An interrupted partial
+lesson is retired through controls before its address record is cleared. During a rebuild or failure,
 notes remain in production prompts. A manual deletion of a promotion graph fact restores its note
 to prompts and fences a rebuild before another lesson can reuse its slots.
 
@@ -61,7 +63,8 @@ With the worker active, `DELETE /v1/notes/ID?erase=true` participates in the per
 transaction. It scrubs promotion text, questions, references, neighbours, pairs and night summaries
 for every fact status, and clears pairs on affected partner facts. The reply names those partner
 keys. It persists the scrubbed state and neuron addresses before retirement, zeros and saves the
-recorded promotion neurons, removes their owned graph text, answers, questions and chains, then
+recorded promotion neurons, removes their owned graph text, answers, questions, chains and
+source-tagged conversations, then
 commits retirement and publishes a sanitized report. The Notes mutex is released during model
 retirement/saving; journal retirement uses the current records so concurrent writes survive.
 An old interrupted lesson with no durable source identity remains pending instead of guessing.

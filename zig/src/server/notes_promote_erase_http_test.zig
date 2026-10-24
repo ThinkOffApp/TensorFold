@@ -20,13 +20,18 @@ const Learner = struct {
     live_slot: bool = true,
     save_enter: ?*std.Io.Event = null,
     save_release: ?*std.Io.Event = null,
+    erase_during_submit: ?*std.atomic.Value(bool) = null,
+    generations: usize = 0,
     fn engine(e: *@This()) api.Engine {
         return .{ .ctx = e, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory, .learn = learn } };
     }
     fn info(_: *anyopaque) api.Info {
         return .{};
     }
-    fn submit(_: *anyopaque, id: api.Id, _: *const api.Request, sink: api.Sink) api.SubmitError!void {
+    fn submit(ctx: *anyopaque, id: api.Id, _: *const api.Request, sink: api.Sink) api.SubmitError!void {
+        const e: *@This() = @ptrCast(@alignCast(ctx));
+        e.generations += 1;
+        if (e.erase_during_submit) |flag| flag.store(true, .release);
         sink.event(sink.ctx, id, &.{ .prefilled = 0 });
         sink.event(sink.ctx, id, &.{ .tokens = &.{'o'} });
         sink.event(sink.ctx, id, &.{ .finished = .{ .reason = .stop } });
@@ -72,13 +77,19 @@ pub const Case = struct {
     path: []const u8,
 
     pub fn init(a: std.mem.Allocator, fact_status: promote.Status) !Case {
+        return initText(a, fact_status, secret);
+    }
+    pub fn initText(a: std.mem.Allocator, fact_status: promote.Status, text: []const u8) !Case {
         const learner = try testing.allocator.create(Learner);
         learner.* = .{};
         errdefer testing.allocator.destroy(learner);
         const r = try rig.Rig.init(testing.allocator);
         errdefer r.deinit();
         r.srv.engine = learner.engine();
-        const added = try rig.request(r.srv, a, "POST", "/v1/notes", "{\"text\":\"My locker code is 7419.\",\"subject\":\"my locker\"}");
+        const body = try @import("json").newObject(a);
+        try body.put(a, "text", .{ .string = text });
+        try body.put(a, "subject", .{ .string = "my locker" });
+        const added = try rig.request(r.srv, a, "POST", "/v1/notes", try @import("json").stringify(a, .{ .object = body }, .{}));
         try testing.expectEqual(@as(u16, 201), added.status);
         const other = try rig.request(r.srv, a, "POST", "/v1/notes", "{\"text\":\"My umbrella is blue.\",\"subject\":\"my umbrella\"}");
         try testing.expectEqual(@as(u16, 201), other.status);
@@ -89,11 +100,11 @@ pub const Case = struct {
         const control_neurons = try a.dupe(promote.Neuron, &.{.{ .layer = 3, .neuron = 9, .key = .reply }});
         var state = promote.State.init(testing.allocator, .{});
         defer state.deinit();
-        const question: promote.Probe = .{ .q = "What is my locker code?", .ref = secret };
+        const question: promote.Probe = .{ .q = "What is my locker code?", .ref = text };
         const pair: promote.Pair = .{ .q = "Does my locker have the same code as my umbrella?", .ref = secret, .text = secret };
         try state.facts.append(state.alloc(), .{
             .key = key,
-            .text = secret,
+            .text = text,
             .status = fact_status,
             .neurons = if (active) neurons else &.{},
             .ask = question,

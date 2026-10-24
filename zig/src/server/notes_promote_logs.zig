@@ -16,11 +16,15 @@ pub fn status(gpa: std.mem.Allocator, io: std.Io, snapshot: []const u8) Status {
     return .may_hold;
 }
 
-pub var fail_purge: bool = false;
+pub const tests = if (@import("builtin").is_test) struct {
+    pub var fail_purge: bool = false;
+} else struct {};
 
 /// Erase the whole owned log: control and cross-fact probes can copy any note's answer or its reversible hash.
 pub fn purge(a: std.mem.Allocator, io: std.Io, snapshot: []const u8) !void {
-    if (@import("builtin").is_test and fail_purge) return error.ProbeLogWrite;
+    if (comptime @import("builtin").is_test) {
+        if (tests.fail_purge) return error.ProbeLogWrite;
+    }
     if (status(a, io, snapshot) == .off) return;
     const path = try std.fmt.allocPrint(a, "{s}.promote-probes.jsonl", .{snapshot});
     try pjson.writeFile(a, path, "");

@@ -299,7 +299,7 @@ pub const Promoter = struct {
         }
     }
 
-    fn recover(p: *Promoter) void {
+    pub fn recover(p: *Promoter) void {
         var arena = std.heap.ArenaAllocator.init(p.gpa);
         defer arena.deinit();
         const life = @import("notes_promote_life.zig");
@@ -308,8 +308,16 @@ pub const Promoter = struct {
         p.srv.teacher.learning.lockUncancelable(p.io);
         defer p.srv.teacher.learning.unlock(p.io);
         var b: Backend = .{ .p = p, .arena = arena.allocator() };
-        if (p.rewind_pending) b.rewind(arena.allocator()) catch return;
-        if (!p.erasing.load(.acquire) and (p.state.open != null or p.state.rebuild_next)) return;
+        if (p.rewind_pending) {
+            b.rewind(arena.allocator()) catch return;
+            p.state.open = null;
+        }
+        if (!p.erasing.load(.acquire) and (p.state.open != null or p.state.rebuild_next)) {
+            @import("notes_promote_recovery.zig").settle(p, arena.allocator(), &b) catch {
+                p.srv.promotion_pending.store(true, .release);
+            };
+            return;
+        }
         _ = p.drainPending();
     }
 
@@ -338,10 +346,13 @@ pub const Promoter = struct {
             // no reload (it allocates): the state in memory holds every neuron placed and is marked to rebuild
             log.line("notes promotion: night {d} stopped ({s}); the next night zeroes every promotion neuron and teaches again", .{ p.state.nights_done + 1, @errorName(e) });
             p.srv.promotion_pending.store(true, .release);
-            if (p.marked != null) b.rewind(arena.allocator()) catch {};
-            b.persist(&p.state) catch {};
-            p.srv.promotion_pending.store(true, .release); // the file already says the night is open, which a start reads as a rebuild
-            _ = p.tryPublish();
+            if (p.marked != null) {
+                if (b.rewind(arena.allocator())) |_| p.state.open = null else |_| {}
+            }
+            const committed = if (b.persist(&p.state)) |_| true else |_| false;
+            const published = p.tryPublish();
+            const pending = !committed or !published or b.control_failed or p.rewind_pending or p.state.open != null or p.erasing.load(.acquire);
+            p.srv.promotion_pending.store(pending, .release);
             if (p.erasing.load(.acquire) and !p.rewind_pending) _ = p.drainPending();
             return;
         };
