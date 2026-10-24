@@ -199,6 +199,7 @@ test {
 
 test {
     _ = @import("notes_promote_test.zig");
+    _ = @import("notes_promote_io_test.zig");
     _ = @import("notes_promote_alone_test.zig");
     _ = @import("notes_promote_spill_test.zig");
     _ = @import("notes_promote_thinking_test.zig");

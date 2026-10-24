@@ -213,36 +213,34 @@ pub fn decode(gpa: Allocator, bytes: []const u8, settings: promote.Settings) Loa
 
 pub const WriteError = error{ OutOfMemory, PromoteIo };
 
+/// Tests only: the next state's publication fails at this stage, then returns to normal.
+pub const WriteFault = enum { none, write, file_sync, rename, folder_sync };
+pub var write_fault: WriteFault = .none;
+
 /// Sync the temporary file, replace the state atomically, and report file or folder sync failure.
 pub fn writeFile(a: Allocator, path: []const u8, bytes: []const u8) WriteError!void {
-    const t = tmp.create(a, path) catch |e| return if (e == error.OutOfMemory) error.OutOfMemory else error.PromoteIo;
-    defer a.free(t.path);
-    var off: usize = 0;
-    while (off < bytes.len) {
-        const n = libc.write(t.fd, bytes[off..].ptr, bytes.len - off);
-        if (n <= 0) {
-            tmp.removeOwn(t);
-            return error.PromoteIo;
-        }
-        off += @intCast(n);
-    }
-    if (!journal.fullSync(t.fd, null)) {
-        tmp.removeOwn(t);
-        return error.PromoteIo;
-    }
+    const fault = if (@import("builtin").is_test) write_fault else .none;
+    if (@import("builtin").is_test) write_fault = .none;
     const target = try a.dupeSentinel(u8, path, 0);
     defer a.free(target);
-    if (libc.rename(t.path, target) != 0) {
-        tmp.removeOwn(t);
-        return error.PromoteIo;
-    }
-    _ = libc.close(t.fd);
     const dir = try a.dupeSentinel(u8, std.fs.path.dirname(path) orelse ".", 0);
     defer a.free(dir);
+    const t = tmp.create(a, path) catch |e| return if (e == error.OutOfMemory) error.OutOfMemory else error.PromoteIo;
+    defer a.free(t.path);
+    defer tmp.removeOwn(t);
+    var off: usize = 0;
+    while (off < bytes.len) {
+        const count = if (fault == .write) @max(@as(usize, 1), (bytes.len - off) / 2) else bytes.len - off;
+        const n = libc.write(t.fd, bytes[off..].ptr, count);
+        if (n <= 0 or fault == .write) return error.PromoteIo;
+        off += @intCast(n);
+    }
+    if (fault == .file_sync or !journal.fullSync(t.fd, null)) return error.PromoteIo;
+    if (fault == .rename or libc.rename(t.path, target) != 0) return error.PromoteIo;
     const dfd = libc.open(dir, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, @as(libc.mode_t, 0));
     if (dfd < 0) return error.PromoteIo;
     defer _ = libc.close(dfd);
-    if (!journal.fullSync(dfd, null)) return error.PromoteIo;
+    if (fault == .folder_sync or !journal.fullSync(dfd, null)) return error.PromoteIo;
 }
 
 /// `r` as a JSON line appended to STATE-probes.jsonl (best effort: a probe log that cannot be written is skipped).
