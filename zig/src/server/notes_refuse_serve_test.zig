@@ -38,7 +38,7 @@ test "--notes is refused with a writer or an engine erase cannot clear, before i
     defer env.deinit();
     try env.put("TENSORFOLD_NO_LIVE", "1");
     var bytes: Bytes = .{};
-    const args: @import("cli.zig").Args = .{ .host = "127.0.0.1", .port = 0, .notes = path };
+    const args: @import("cli.zig").Args = .{ .host = "127.0.0.1", .port = 0, .notes = .{ .path = path } };
 
     // an engine that can clear its states starts and takes a write, so the journal exists
     var clear: Echo = .{ .cache = true, .supports_forget = true };
