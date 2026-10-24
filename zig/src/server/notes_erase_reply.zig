@@ -1,4 +1,4 @@
-//! Allocate the erase reply before committing; its bounded diagnostics need no response allocations afterwards.
+//! Prepare ordinary diagnostics before commit; promotion detail allocation failures retain the intent for retry.
 const std = @import("std");
 const json = @import("json");
 const places = @import("notes_erase_places.zig");
@@ -29,19 +29,29 @@ pub const Reply = struct {
 
     pub fn finish(r: Reply, srv: *Server, a: std.mem.Allocator, e: *erase.Prepared) ![]const u8 {
         defer srv.text.forget();
+        const promotion = if (srv.promote) |p| p.erased(a, e.intent.removed) else null;
+        const extra = if (promotion) |rpt| try json.stringify(a, try rpt.value(a), .{}) else "";
+        const needed = r.prefix.len + extra.len + 16384;
+        const buffer = if (r.buffer.len >= needed) r.buffer else try a.alloc(u8, needed);
+
         const forgotten = places.forgetSpans(srv, e.intent.spans, e.intent.short);
         var checked = places.check(srv, forgotten, .{
             .this_process = e.source_num >= e.storage.start_source,
             .source_num = e.source_num,
         });
         if (e.unsynced) checked.set(.journal, .may_hold);
-        var retryable = e.unsynced or places.needsRetry(forgotten, checked);
+        if (promotion) |rpt| {
+            checked.set(.promotion_state, if (rpt.state_clear) .forgotten else .may_hold);
+            checked.set(.promotion_neurons, if (rpt.neurons_clear) .forgotten else .may_hold);
+            checked.set(.promotion_report, if (rpt.report_clear) .forgotten else .may_hold);
+        }
+        var retryable = e.unsynced or places.needsRetry(forgotten, checked) or (promotion != null and promotion.?.pending);
         if (retryable) checked.set(.journal, .may_hold) else e.finish(a) catch {
             e.retire_failed = true;
             retryable = true;
             checked.set(.journal, .may_hold);
         };
-        var b: Buffer = .{ .bytes = r.buffer };
+        var b: Buffer = .{ .bytes = buffer };
         try b.put("{s},\"places\":{{", .{r.prefix});
         var pending: usize = 0;
         for (std.enums.values(places.Place), 0..) |p, i| {
@@ -82,6 +92,7 @@ pub const Reply = struct {
         });
         if (e.retire_failed) try b.put(",\"error\":{{\"message\":\"erase applied; cleanup record could not be retired\",\"type\":\"server_error\",\"code\":500}}", .{});
         if (e.unsynced) try b.put(",\"error\":{{\"message\":\"erase applied but journal directory sync failed\",\"type\":\"server_error\",\"code\":500}}", .{});
+        if (extra.len > 0) try b.put(",\"promotion\":{s}", .{extra});
         try b.put("}}", .{});
         return b.bytes[0..b.len];
     }

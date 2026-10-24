@@ -241,12 +241,17 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         };
         log.line("notes: {d} notes, {d} writes replayed, {d} pending erases (GET /v1/notes); {s} index; language {s}; lookup {s}; a chat request sends \"notes\": true to have them looked up", .{ notes.model.notes.items.len, notes.replayed, notes.journal.?.erases.items.len, @tagName(notes.kind), @tagName(notes.language), @tagName(notes.lookup) });
     }
+    if (!@import("notes_promote_start.zig").create(srv, args)) return 2;
     switch (idle_unload.startServer(srv, args, s.reopen, s.model_dir, s.model_type)) {
         .disabled, .enabled => {},
         .no_reopen => log.line("idle unload off: this server has no reopen path", .{}),
         .out_of_memory => log.line("out of memory: idle unload stays off", .{}),
     }
-    defer idle_unload.stopServer(srv);
+    defer {
+        @import("notes_promote_start.zig").stop(srv);
+        idle_unload.stopServer(srv);
+    }
+    if (!@import("notes_promote_start.zig").start(srv)) return 2;
     if (args.loop_guard and !srv.info.loop_guard) {
         std.debug.print("tensorfold: --loop-guard is not supported by this native engine\n", .{});
         return 2;
@@ -288,6 +293,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
     var accept_stop: std.atomic.Value(bool) = .init(false);
     const accept = std.Thread.spawn(.{}, server_mod.Server.serve, .{ srv, lis, &accept_stop }) catch return 1;
     while (!stop_requested.load(.acquire)) std.Io.sleep(io, .fromMilliseconds(50), .awake) catch {};
+    if (srv.promote) |p| p.stop.store(true, .release);
     drain(srv, io, s.stop, drain_s);
     accept_stop.store(true, .release);
     accept.join();

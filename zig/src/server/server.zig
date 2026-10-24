@@ -139,6 +139,7 @@ pub const Server = struct {
     notes_mutex: std.Io.Mutex = .init,
     /// The facts the learner was taught and whether the weights recall them.
     slide: slide_graph.Graph,
+    promote: ?*@import("notes_promote.zig").Promoter = null,
     promotion_pending: std.atomic.Value(bool) = .init(false),
     teacher: slide_lesson.Teacher, // what every Sliding Weights lesson shares: keep prompts, the turn's end
     /// The folder's snapshot made or hashed whole by this process (under teacher.learning): later lessons trust it.
@@ -208,6 +209,7 @@ pub const Server = struct {
     }
 
     pub fn deinit(srv: *Server) void {
+        if (srv.promote) |p| p.deinit();
         if (srv.notes) |n| n.deinit();
         srv.stopKeepalive();
         if (srv.grammars) |g| g.close();

@@ -119,14 +119,25 @@ pub fn askThinkingBase(srv: *Server, cx: *Cx, user: []const u8, gone: anytype) c
     return thinkingFrom(srv, cx, user, true, gone);
 }
 
+/// A bounded thinking reply after an optional Notes block, using the same path as lesson checks.
+pub fn askThinkingAfter(srv: *Server, cx: *Cx, system: ?[]const u8, user: []const u8, budget: i64, max_tokens: i64, gone: anytype) chat.Failure!chat.Reply {
+    return thinkingAfter(srv, cx, system, user, budget, max_tokens, false, gone);
+}
+
 fn thinkingFrom(srv: *Server, cx: *Cx, user: []const u8, shipped: bool, gone: anytype) chat.Failure!chat.Reply {
+    return thinkingAfter(srv, cx, null, user, think_budget, think_reply, shipped, gone);
+}
+
+fn thinkingAfter(srv: *Server, cx: *Cx, system: ?[]const u8, user: []const u8, budget: i64, max_tokens: i64, shipped: bool, gone: anytype) chat.Failure!chat.Reply {
     const a = cx.a;
-    const asked = try a.dupe(Value, &.{try message(a, "user", user)});
+    var asked: std.ArrayList(Value) = .empty;
+    if (system) |text| try asked.append(a, try message(a, "system", text));
+    try asked.append(a, try message(a, "user", user));
     const fields = try json.newObject(a);
     try fields.put(a, "enable_thinking", .{ .bool = true });
     try fields.put(a, "temperature", .{ .float = 0 });
-    try fields.put(a, "thinking_budget", try json.intValue(a, think_budget));
-    var prepared = try chat.prepare(srv, cx, .{ .messages = .{ .array = asked }, .fields = .{ .object = fields }, .max_tokens = think_reply, .temperature = 0 }, gone);
+    try fields.put(a, "thinking_budget", try json.intValue(a, budget));
+    var prepared = try chat.prepare(srv, cx, .{ .messages = .{ .array = asked.items }, .fields = .{ .object = fields }, .max_tokens = max_tokens, .temperature = 0 }, gone);
     if (shipped) {
         prepared.request.decide = null;
         prepared.request.untaught = true;

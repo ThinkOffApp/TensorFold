@@ -24,6 +24,16 @@ pub fn status(gpa: std.mem.Allocator, io: std.Io, snapshot: []const u8) Status {
     return .off;
 }
 
+/// Disabling the worker cannot establish that an earlier promotion state or its neurons were erased.
+pub fn dormantState(io: std.Io, snapshot: []const u8) Status {
+    var buf: [4096]u8 = undefined;
+    const path = std.fmt.bufPrint(&buf, "{s}.promote", .{snapshot}) catch return .may_hold;
+    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |e|
+        return if (e == error.FileNotFound) .off else .may_hold;
+    file.close(io);
+    return .may_hold;
+}
+
 fn hashOnly(v: json.Value) bool {
     if (v != .object or !std.mem.eql(u8, v.strField("format") orelse "", pjson.probe_format)) return false;
     if (v.get("night") == null or v.get("kind") == null or v.get("ok") == null or v.get("q_sha256") == null)

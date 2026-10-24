@@ -360,7 +360,7 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         out.default_voice = v;
         return;
     }
-    if (notes_flags.parse(out, name, v)) return;
+    if (try notes_flags.parse(out, name, v, a, u)) return;
     if (is(name, "--chat-template")) {
         out.chat_template = v;
         return;
