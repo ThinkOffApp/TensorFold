@@ -2,6 +2,7 @@
 
 Promotion teaches retrieved, unchanged Notes into Sliding Weights on a writable model copy.
 It is off until `--notes-promote-every` is supplied, and requires both `--notes` and `--slide`.
+Explicit promotion settings without an interval are refused at startup.
 A learned note stays available to chat retrieval until its own questions pass without that note
 for the configured number of consecutive nights. An edited or withdrawn note returns to the
 prompt immediately; stale promotion neurons are rebuilt on the next night.
@@ -36,7 +37,18 @@ Controls and targeted probes can reject a night. Whole-night checkpoints are sep
 per-lesson checkpoints: pocket values, quantized shard writes, replay, graph and teacher state
 are restored for a refused plan. Failures keep recovery pending and prevent new lessons from
 reusing neuron slots. On restart, persisted promotion state is reconciled with the Notes journal
-before a new lesson is admitted.
+before a new lesson is admitted. Each shared sentence or reversed fact carries a durable Notes
+source key before fitting. Recovery finds partial lessons by that identity rather than whole-text
+matching. A failed rewind retains its mark and the corresponding promotion address snapshot in
+memory, so a later control retry restores the same checkpoint without LLM question generation.
+Small cleanup/control retries run at most every five seconds; a failed full night waits for the
+configured interval or an explicit POST before another full attempt. During a rebuild or failure,
+notes remain in production prompts. A manual deletion of a promotion graph fact restores its note
+to prompts and fences a rebuild before another lesson can reuse its slots.
+
+The whole-night mark is not persisted. After a process crash, recovery retires recorded promotion
+neurons; it does not promise to undo refits or quantized rounding of unrelated manually taught
+facts from an interrupted night.
 
 When a multi-fact night regresses, facts are retried in oldest-first order. This has a two-fact
 blame limit: an interaction between two facts can cause the later fact to be rejected even when
@@ -49,21 +61,29 @@ With the worker active, `DELETE /v1/notes/ID?erase=true` participates in the per
 transaction. It scrubs promotion text, questions, references, neighbours, pairs and night summaries
 for every fact status, and clears pairs on affected partner facts. The reply names those partner
 keys. It persists the scrubbed state and neuron addresses before retirement, zeros and saves the
-recorded promotion neurons, then commits retirement and publishes a sanitized report.
+recorded promotion neurons, removes their owned graph text, answers, questions and chains, then
+commits retirement and publishes a sanitized report. The Notes mutex is released during model
+retirement/saving; journal retirement uses the current records so concurrent writes survive.
+An old interrupted lesson with no durable source identity remains pending instead of guessing.
 
 Neuron, state or report failures leave the same erase retryable. A failure after physical retirement
 keeps new lessons blocked until the state transaction is committed, including after restart.
-The reply exposes `promotion_state`, `promotion_neurons`, `promotion_report`, a nested promotion
+The reply exposes `promotion_state`, `promotion_graph`, `promotion_neurons`, `promotion_report`, a nested promotion
 result, `retryable`, and `cleanup_complete`. Permanent remaining-place warnings keep `complete`
 false without retaining reversible journal token spans indefinitely.
 
 New probe JSONL records contain hashes, opaque source keys, note IDs, verdicts and modes rather
-than probe text. Hashes are not encryption and can be guessed for low-entropy values. Old plaintext,
-mixed, unreadable or oversized `.promote-probes.jsonl` files remain named as `promotion_probe_log`;
-they are not silently deleted. Operator-captured learning or historical promotion diagnostics remain
-named separately. Disabling the worker does not scrub an earlier `.promote` state or retire its
-neurons: known retained state and neurons are reported as remaining places; re-enable promotion
-on the same writable model copy to recover missing sources.
+than probe text. Hashes are not encryption and can be guessed for low-entropy values. An active
+erase atomically empties the whole owned `.promote-probes.jsonl`, including control and cross-fact
+copies; a failed purge keeps the erase retryable. With the worker disabled, every nonempty,
+unreadable or oversized log remains named `promotion_probe_log`. Operator-captured learning or
+historical promotion diagnostics remain named separately. Disabling the worker does not scrub an
+earlier `.promote` state or retire its neurons: known retained state and neurons are reported as
+remaining places; re-enable promotion on the same writable model copy to recover missing sources.
+
+If an erase meets a busy worker, it returns pending. Background promotion cleanup can settle its
+owned places, but the client must repeat the same DELETE for the final engine-place checks and
+journal token-span retirement. The worker does not yet send a completion notification.
 
 Selective promotion retirement does not prove that arbitrary Sliding Weights graph data, other
 learned model weights, external logs, client copies or all the remaining places in
