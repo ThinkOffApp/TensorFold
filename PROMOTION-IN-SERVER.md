@@ -182,19 +182,20 @@ rejected as before, no rewind of a blamed fact, the fact left unnamed in the pro
 
 **Thinking on too (item 9).** The server answers chats with thinking on by default (`--thinking`), but the checks
 above asked with thinking off only, in 48 tokens, so a lesson that changed only what a thinking reply says went
-unseen. Now every regression probe is asked a second time with thinking on: the same question after the same notes
-block, its reasoning bounded (1536 tokens of reasoning in a 2048-token reply, `notes_promote_backend.think_budget`
-and `think_reply`), and judged on the reply after the reasoning. Before and after are compared mode by mode. The
-alone check asks each probe in both modes too, and a fact leaves the prompt only when it is right in both. Thinking
-asks are marked `"thinking": true` in the probe log and "(thinking)" in the worse list. `--notes-promote-thinking
-off` asks with thinking off only. Cost: each check asks twice as many questions, the thinking ones up to 2048 tokens
-each instead of 48. Host tests (`notes_promote_thinking_test.zig`): damage seen only with thinking on rejects the
-night (control: off only, kept); every probe is asked in both modes; a fact right alone only with thinking off stays
-in the prompt (control: it leaves). In the alone rig (`notes_promote_alone_rig_test.zig`) the model writes its
-reasoning before `</think>` when asked to think, so the real backend, the store's block and the server's reasoning
-split are all in the path: the cat's eyes stay in the prompt, my eyes leave, and every thinking ask carried the block.
-Four negative controls each fail (no thinking copy of the set, the alone check in one mode, the backend ignoring the
-mode, a thinking ask without its block).
+unseen. With `--notes-promote-thinking on` (off by default since c8641581, see On a GPU below), every regression
+probe is asked a second time with thinking on: the same question after the same notes block, its reasoning bounded
+(1536 tokens of reasoning in a 2048-token reply, `notes_promote_backend.think_budget` and `think_reply`), and judged
+on the reply after the reasoning. Before and after are compared mode by mode. The alone check then asks each probe
+in both modes too, and a fact leaves the prompt only when it is right in both. Thinking asks are marked `"thinking":
+true` in the probe log and "(thinking)" in the worse list. Without the flag, the checks ask with thinking off only.
+Cost: each check asks twice as many questions, the thinking ones up to 2048 tokens each instead of 48. Host tests
+(`notes_promote_thinking_test.zig`): damage seen only with thinking on rejects the night (control: off only, kept);
+every probe is asked in both modes; a fact right alone only with thinking off stays in the prompt (control: it
+leaves). In the alone rig (`notes_promote_alone_rig_test.zig`) the model writes its reasoning before `</think>` when
+asked to think, so the real backend, the store's block and the server's reasoning split are all in the path: the
+cat's eyes stay in the prompt, my eyes leave, and every thinking ask carried the block. Four negative controls each
+fail (no thinking copy of the set, the alone check in one mode, the backend ignoring the mode, a thinking ask
+without its block).
 
 **On a GPU (asus3, 20 October 2026, `cf1d7403`; MEASURED, receipts in `~/tf-promote/spill-20261020/`).** A fresh
 untaught copy, the E1 store, 5 retrieved notes (the brother's amber eyes, the dog Bruno, the yellow tent, the sister in
