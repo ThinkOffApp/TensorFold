@@ -48,14 +48,42 @@ const Reader = struct {
     fd: platform.posix.socket_t,
     buf: [65536]u8 = undefined,
     len: usize = 0,
+    timeout_ms: i32 = 5000,
+    timed_out: bool = false,
+    started: std.atomic.Value(bool) = .init(false),
     fn run(r: *Reader) void {
+        const end = std.Io.Clock.awake.now(testing.io).toMilliseconds() + r.timeout_ms;
+        r.started.store(true, .release);
         while (r.len < r.buf.len) {
+            const left = end - std.Io.Clock.awake.now(testing.io).toMilliseconds();
+            if (left <= 0) {
+                r.timed_out = true;
+                return;
+            }
+            var fds = [_]platform.posix.pollfd{.{ .fd = r.fd, .events = platform.posix.POLL.IN, .revents = 0 }};
+            const ready = platform.posix.poll(&fds, @intCast(left)) catch return;
+            if (ready == 0) {
+                r.timed_out = true;
+                return;
+            }
             const n = platform.posix.system.read(r.fd, r.buf[r.len..].ptr, r.buf.len - r.len);
-            if (n <= 0) return;
+            if (n < 0 and platform.posix.errno(n) == .INTR) continue;
+            if (n <= 0) {
+                r.timed_out = std.Io.Clock.awake.now(testing.io).toMilliseconds() >= end;
+                return;
+            }
             r.len += @intCast(n);
         }
     }
 };
+
+fn finishWrite(fd: platform.posix.socket_t) bool {
+    while (true) {
+        const rc = platform.posix.system.shutdown(fd, 1);
+        if (rc == 0) return true;
+        if (platform.posix.errno(rc) != .INTR) return false;
+    }
+}
 
 fn exchange(srv: *Server, a: std.mem.Allocator, method: []const u8, path: []const u8, body: []const u8) !struct { code: u16, value: json.Value } {
     var pair: [2]platform.posix.socket_t = undefined;
@@ -71,8 +99,10 @@ fn exchange(srv: *Server, a: std.mem.Allocator, method: []const u8, path: []cons
     var reader: Reader = .{ .fd = pair[0] };
     const thread = try std.Thread.spawn(.{}, Reader.run, .{&reader});
     routes.dispatch(srv, &conn, a);
-    _ = platform.posix.system.shutdown(pair[1], 1);
+    const stopped = finishWrite(pair[1]);
     thread.join();
+    if (!stopped) return error.SocketShutdown;
+    if (reader.timed_out) return error.ResponseTimeout;
     const response = reader.buf[0..reader.len];
     const sep = std.mem.indexOf(u8, response, "\r\n\r\n") orelse return error.Response;
     const code = try std.fmt.parseInt(u16, response[9..12], 10);
@@ -473,4 +503,22 @@ test "review: a legacy nonnumeric source keeps retry work with unknown provenanc
     defer retry.deinit();
     try testing.expect(retry.retry);
     try testing.expectEqualStrings("legacy-A", retry.removed[0]);
+}
+
+test "review fixture: a peer withholding EOF cannot hang the response reader" {
+    var pair: [2]platform.posix.socket_t = undefined;
+    if (platform.windows) try platform.posix.socketpair(&pair) else if (platform.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair) != 0) return error.SocketPair;
+    defer _ = platform.posix.system.close(pair[0]);
+    defer _ = platform.posix.system.close(pair[1]);
+    var reader: Reader = .{ .fd = pair[0], .timeout_ms = 20 };
+    const thread = try std.Thread.spawn(.{}, Reader.run, .{&reader});
+    var joined = false;
+    defer if (!joined) thread.join();
+    while (!reader.started.load(.acquire)) std.Io.sleep(testing.io, .fromMilliseconds(1), .awake) catch {};
+    try std.Io.sleep(testing.io, .fromMilliseconds(50), .awake);
+    const stopped = finishWrite(pair[1]);
+    thread.join();
+    joined = true;
+    try testing.expect(stopped);
+    try testing.expect(reader.timed_out);
 }
