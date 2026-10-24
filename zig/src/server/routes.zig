@@ -31,9 +31,9 @@ const fact_path = "/v1/slide/fact/";
 
 pub fn dispatch(srv: *Server, conn: *Conn, a: Allocator) void {
     if (notes_http.route(auth.routePath(conn.path))) |r| return notes_http.handle(srv, conn, a, r);
-    if (std.mem.eql(u8, auth.routePath(conn.path), "/v1/promotion")) {
+    if (srv.promote != null and std.mem.eql(u8, auth.routePath(conn.path), "/v1/promotion")) {
         if (!std.mem.eql(u8, conn.method, "POST") and !consumeBody(conn, a)) return;
-        const p = srv.promote orelse return unknown(conn, a);
+        const p = srv.promote.?;
         if (!std.mem.eql(u8, conn.method, "GET") and !std.mem.eql(u8, conn.method, "POST"))
             return conn.sendJson(405, "{\"error\":{\"message\":\"promotion takes GET or POST\"}}");
         return p.handle(conn, a);

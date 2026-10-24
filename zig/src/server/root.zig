@@ -205,6 +205,7 @@ test {
     _ = @import("notes_promote_erase_http_test.zig");
     _ = @import("notes_promote_more_test.zig");
     _ = @import("notes_promote_lifecycle_test.zig");
+    _ = @import("notes_promote_off_test.zig");
     _ = @import("notes_promote_rig_test.zig");
     _ = @import("notes_promote_alone_rig_test.zig");
     _ = @import("notes_promote_rewind_test.zig");
