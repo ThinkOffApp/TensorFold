@@ -83,7 +83,7 @@ pub const NightLog = struct {
 };
 
 /// A night in progress, on disk before the weights change: the neurons placed so far, the text being taught.
-pub const Open = struct { night: u32, teaching: []const u8 = "", placed: []const Neuron = &.{} };
+pub const Open = struct { night: u32, teaching: []const u8 = "", source_key: []const u8 = "", placed: []const Neuron = &.{} };
 
 /// A note as the store lists it now.
 pub const Note = struct { id: u32, key: []const u8, text: []const u8, told: i64, fact: bool };
@@ -130,6 +130,7 @@ pub const State = struct {
     /// The keys whose notes production leaves out of the prompt.
     pub fn inWeights(s: *const State, a: Allocator) Allocator.Error![]const []const u8 {
         var out: std.ArrayList([]const u8) = .empty;
+        if (s.open != null or s.rebuild_next) return out.items;
         for (s.facts.items) |f| if (f.status == .in_weights) try out.append(a, f.key);
         return out.items;
     }
@@ -207,7 +208,7 @@ fn zeroAll(s: *State, a: Allocator, b: anytype) !void {
 fn teachAll(s: *State, a: Allocator, b: anytype, k: u32, list: []const *Fact, log: *NightLog) ![]Taught {
     const out = try a.alloc(Taught, list.len);
     for (list, out) |f, *t| {
-        s.open = .{ .night = k, .teaching = f.text, .placed = s.pocket };
+        s.open = .{ .night = k, .teaching = f.text, .source_key = f.key, .placed = s.pocket };
         try b.persist(s);
         t.* = try b.teach(a, f.text);
         log.taught += 1;

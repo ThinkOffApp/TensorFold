@@ -11,7 +11,9 @@ pub const Out = struct {
     a: std.mem.Allocator,
     open: bool = true,
     failed: ?[]const u8 = null,
-    results: std.ArrayList(struct { id: u32, recalled: bool }) = .empty,
+    results: std.ArrayList(Result) = .empty,
+    enrollment: ?Enrollment = null,
+
     io: ?std.Io = null,
     mutex: std.Io.Mutex = .init,
     ended: std.Io.Event = .unset,
@@ -22,6 +24,12 @@ pub const Out = struct {
     at: u32 = 0,
     of: u32 = 0,
 
+    pub const Result = struct { id: u32, recalled: bool };
+
+    pub const Enrollment = struct {
+        ctx: *anyopaque,
+        record: *const fn (*anyopaque, std.mem.Allocator, []const []const u8, []const u8) anyerror![]const u32,
+    };
     /// Start before any model generation; failure refuses the lesson instead of silently losing its heartbeat.
     pub fn start(o: *Out, io: std.Io, interval_ms: i64) !void {
         if (o.conn == null) return error.NoStream;

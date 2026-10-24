@@ -203,6 +203,9 @@ test {
     _ = @import("slide_teacher_marks.zig");
     _ = @import("slide_night_test.zig");
     _ = @import("notes_promote_erase_http_test.zig");
+    _ = @import("notes_promote_ownership_test.zig");
+    _ = @import("notes_promote_concurrent_test.zig");
+    _ = @import("notes_promote_schedule.zig");
     _ = @import("notes_promote_more_test.zig");
     _ = @import("notes_promote_lifecycle_test.zig");
     _ = @import("notes_promote_off_test.zig");

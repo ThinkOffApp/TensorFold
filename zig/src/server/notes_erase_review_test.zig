@@ -229,6 +229,6 @@ test "promotion: erase names retained plaintext probe logs without retaining rev
     const another = try exchange(srv, a, "POST", "/v1/notes", "{\"text\":\"My umbrella is blue.\"}");
     const next = try std.fmt.allocPrint(a, "/v1/notes/{d}?erase=true", .{another.value.get("id").?.int64().?});
     const clear = (try exchange(srv, a, "DELETE", next, "")).value;
-    try testing.expectEqualStrings("off", clear.get("places").?.strField("promotion_probe_log").?);
-    try testing.expect(clear.get("complete").?.bool and clear.get("cleanup_complete").?.bool);
+    try testing.expectEqualStrings("may_hold", clear.get("places").?.strField("promotion_probe_log").?);
+    try testing.expect(!clear.get("complete").?.bool and clear.get("cleanup_complete").?.bool);
 }

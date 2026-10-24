@@ -38,7 +38,7 @@ pub fn start(s: *p.State, a: Allocator, keys: []const []const u8) !Scrubbed {
     for (s.facts.items) |f| {
         if (includes(keys, f.key)) try neurons.appendSlice(a, f.neurons);
         const reset = if (f.pair) |pair| affected(pair, keys) else false;
-        if (reset or (f.pair_reset_by.len > 0 and includes(keys, f.pair_reset_by))) {
+        if (!includes(keys, f.key) and (reset or (f.pair_reset_by.len > 0 and includes(keys, f.pair_reset_by)))) {
             const key = try a.dupe(u8, f.key);
             errdefer a.free(key);
             try pairs.append(a, key);

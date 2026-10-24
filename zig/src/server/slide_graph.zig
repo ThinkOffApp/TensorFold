@@ -22,6 +22,7 @@ pub const Fact = struct {
     source: []const u8,
     at: i64,
     state: State,
+    promotion_key: []const u8 = "", // opaque Notes write identity, persisted before fitting
     neurons: []const api.Neuron = &.{}, // where its neurons sit in the pocket, once placed
     questions: []const []const u8 = &.{}, // the wordings its checks ask
     answers: []const Answer = &.{}, // what they expect: each held-out wording's answer, then those it never learned
@@ -114,7 +115,7 @@ pub const Graph = struct {
         const f = g.find(id) orelse return;
         f.state = state;
         if (state != .learning) f.phase = null;
-        if (state == .missed or state == .replaced or state == .deleted) f.neurons = &.{};
+        if ((state == .missed and f.promotion_key.len == 0) or state == .replaced or state == .deleted) f.neurons = &.{};
         g.save();
     }
 
@@ -388,6 +389,7 @@ pub const Graph = struct {
             try o.put(a, "id", try json.intValue(a, f.id));
             try o.put(a, "text", .{ .string = f.text });
             try o.put(a, "source", .{ .string = f.source });
+            if (f.promotion_key.len > 0) try o.put(a, "promotion_key", .{ .string = f.promotion_key });
             try o.put(a, "at", try json.intValue(a, f.at));
             try o.put(a, "state", .{ .string = @tagName(f.state) });
             try o.put(a, "links", .{ .array = links.items });
@@ -464,6 +466,7 @@ pub const Graph = struct {
         for ((root.field("facts") orelse return error.BadGraph).items() orelse return error.BadGraph) |f| {
             const state = std.meta.stringToEnum(State, f.strField("state") orelse "") orelse .queued;
             var fact: Fact = .{ .id = try int(u32, f.field("id")), .text = f.strField("text") orelse "", .source = f.strField("source") orelse "", .at = try int(i64, f.field("at")), .state = state };
+            fact.promotion_key = f.strField("promotion_key") orelse "";
             fact.message = f.strField("message") orelse "";
             fact.round = int(u32, f.field("round")) catch 0;
             fact.deleted = int(i64, f.field("deleted")) catch 0;

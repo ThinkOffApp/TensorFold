@@ -41,6 +41,7 @@ pub const Reply = struct {
         });
         if (e.unsynced) checked.set(.journal, .may_hold);
         if (promotion) |rpt| {
+            checked.set(.promotion_graph, if (rpt.graph_clear) .forgotten else .may_hold);
             checked.set(.promotion_state, if (rpt.state_clear) .forgotten else .may_hold);
             checked.set(.promotion_neurons, if (rpt.neurons_clear) .forgotten else .may_hold);
             checked.set(.promotion_report, if (rpt.report_clear) .forgotten else .may_hold);

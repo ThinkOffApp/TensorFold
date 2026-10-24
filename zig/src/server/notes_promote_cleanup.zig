@@ -14,6 +14,7 @@ pub const Result = struct {
     state_clear: bool = false,
     neurons_clear: bool = false,
     report_clear: bool = false,
+    graph_clear: bool = false,
     facts: usize = 0,
     neurons: usize = 0,
     pairs_reset: []const []const u8 = &.{},
@@ -54,7 +55,6 @@ pub fn erased(p: *np.Promoter, a: Allocator, sources: []const []const u8) Result
 
 /// Called under teacher.learning; the Notes snapshot is copied before any engine operation.
 pub fn drain(p: *np.Promoter) bool {
-    if (p.state.open != null) return false;
     var arena = std.heap.ArenaAllocator.init(p.gpa);
     defer arena.deinit();
     const a = arena.allocator();
@@ -63,6 +63,7 @@ pub fn drain(p: *np.Promoter) bool {
         return false;
     };
     if (sources.len == 0 and !p.erasing.load(.acquire)) {
+        if (p.state.open != null or p.state.rebuild_next or p.rewind_pending) return false;
         if (p.publish_pending.load(.acquire) and !p.tryPublish()) return false;
         night.acknowledged(p.srv);
         return true;
@@ -96,10 +97,18 @@ fn clean(p: *np.Promoter, a: Allocator, sources: []const []const u8, notes_held:
     p.srv.promotion_pending.store(true, .release);
     p.clearPublished();
     defer if (out.pending) p.srv.promotion_pending.store(true, .release);
-    if (p.state.open != null) {
-        out.failed = "an interrupted night must recover before promotion erasure";
+    if (p.rewind_pending) {
+        out.failed = "the interrupted night must finish its retained rewind before erasure";
         return out;
     }
+    @import("notes_promote_graph.zig").closeInterrupted(p) catch {
+        out.failed = "the interrupted lesson has no durable source identity; promotion cleanup remains pending";
+        return out;
+    };
+    @import("notes_promote_graph.zig").capture(p, sources) catch {
+        out.failed = "promotion graph ownership could not be committed; retry the same erase";
+        return out;
+    };
     for (p.state.facts.items) |f| for (sources) |key| if (std.mem.eql(u8, f.key, key)) {
         out.facts += 1;
         break;
@@ -110,17 +119,28 @@ fn clean(p: *np.Promoter, a: Allocator, sources: []const []const u8, notes_held:
     };
     out.pairs_reset = copied.pairs_reset;
     out.neurons = copied.neurons.len;
-    var b: Backend = .{ .p = p, .arena = a };
+    var b: Backend = .{ .p = p, .arena = a, .cleanup = true };
     b.persist(&p.state) catch {
         out.failed = "scrubbed promotion metadata could not be committed; retry the same erase";
         return out;
     };
     out.state_clear = true;
+    @import("notes_promote_logs.zig").purge(a, p.io, p.store.snapshot_path orelse "") catch {
+        out.failed = "the promotion probe log could not be purged; retry the same erase";
+        return out;
+    };
+    if (notes_held) p.srv.notes_mutex.unlock(p.io);
+    defer if (notes_held) p.srv.notes_mutex.lockUncancelable(p.io);
     if (copied.neurons.len > 0) b.retire(a, copied.neurons) catch {
         out.failed = "promotion neurons could not be zeroed and saved; retry the same erase";
         return out;
     };
     out.neurons_clear = true;
+    @import("notes_promote_graph.zig").scrub(p, sources) catch {
+        out.failed = "promotion graph text could not be removed and saved; retry the same erase";
+        return out;
+    };
+    out.graph_clear = true;
     scrub.finished(&p.state, sources) catch {
         out.failed = "promotion retirement could not be recorded; retry the same erase";
         return out;
@@ -129,8 +149,8 @@ fn clean(p: *np.Promoter, a: Allocator, sources: []const []const u8, notes_held:
         out.failed = "retired promotion addresses could not be committed; new lessons remain blocked";
         return out;
     };
-    if (!notes_held) p.srv.notes_mutex.lockUncancelable(p.io);
-    defer if (!notes_held) p.srv.notes_mutex.unlock(p.io);
+    p.srv.notes_mutex.lockUncancelable(p.io);
+    defer p.srv.notes_mutex.unlock(p.io);
     if (p.store.journal) |j| for (j.erases.items) |intent| for (intent.removed) |key| {
         if (p.state.find(key)) |f| if (!f.erased or f.neurons.len > 0) {
             out.failed = "another note was erased while cleanup ran; retry promotion cleanup";
@@ -144,6 +164,6 @@ fn clean(p: *np.Promoter, a: Allocator, sources: []const []const u8, notes_held:
         return out;
     }
     out.pending = false;
-    night.acknowledged(p.srv);
+    if (!p.state.rebuild_next and !p.rewind_pending) night.acknowledged(p.srv);
     return out;
 }

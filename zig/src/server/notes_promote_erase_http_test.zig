@@ -18,6 +18,8 @@ const Learner = struct {
     fail_state_after_save: bool = false,
     trained: usize = 0,
     live_slot: bool = true,
+    save_enter: ?*std.Io.Event = null,
+    save_release: ?*std.Io.Event = null,
     fn engine(e: *@This()) api.Engine {
         return .{ .ctx = e, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory, .learn = learn } };
     }
@@ -45,6 +47,10 @@ const Learner = struct {
             if (n.neuron == 9) e.touched_control = true;
         }
         e.saves += @intFromBool(request.save);
+        if (request.save) if (e.save_enter) |ready| {
+            ready.set(testing.io);
+            if (e.save_release) |release| release.waitUncancelable(testing.io);
+        };
         if (request.train.len > 0) {
             e.trained += 1;
             e.live_slot = true;
@@ -54,7 +60,7 @@ const Learner = struct {
     }
 };
 
-const Case = struct {
+pub const Case = struct {
     r: *rig.Rig,
     p: *promoter.Promoter,
     learner: *Learner,
@@ -64,7 +70,7 @@ const Case = struct {
     control_key: []const u8,
     path: []const u8,
 
-    fn init(a: std.mem.Allocator, fact_status: promote.Status) !Case {
+    pub fn init(a: std.mem.Allocator, fact_status: promote.Status) !Case {
         const learner = try testing.allocator.create(Learner);
         learner.* = .{};
         errdefer testing.allocator.destroy(learner);
@@ -112,7 +118,7 @@ const Case = struct {
         try testing.expect(seeded.ask != null and seeded.probes.len > 0 and seeded.neighbours.len > 0 and seeded.pair != null);
         return .{ .r = r, .p = p, .learner = learner, .a = a, .id = added.value.get("id").?.int64().?, .key = key, .control_key = control_key, .path = path };
     }
-    fn deinit(c: *Case) void {
+    pub fn deinit(c: *Case) void {
         promoter.Promoter.fail_persist = false;
         promoter.Promoter.fail_publish = false;
         c.r.srv.promote = null;
@@ -120,10 +126,10 @@ const Case = struct {
         c.r.deinit();
         testing.allocator.destroy(c.learner);
     }
-    fn erase(c: *Case) !rig.Reply {
+    pub fn erase(c: *Case) !rig.Reply {
         return rig.request(c.r.srv, c.a, "DELETE", try std.fmt.allocPrint(c.a, "/v1/notes/{d}?erase=true", .{c.id}), null);
     }
-    fn controlIntact(c: *Case) !void {
+    pub fn controlIntact(c: *Case) !void {
         const f = c.p.state.find(c.control_key) orelse return error.UnrelatedFactLost;
         try testing.expectEqualStrings(control_text, f.text);
         try testing.expectEqual(@as(usize, 1), f.neurons.len);
@@ -213,6 +219,10 @@ fn failedThenRetry(fault: enum { neuron, state, publish }, check_report: bool) !
         try testing.expect(!failed.value.get("complete").?.bool);
         try testing.expect(failed.value.get("retryable").?.bool);
     }
+    const places = failed.value.get("places").?;
+    try testing.expectEqualStrings(if (fault == .state) "may_hold" else "forgotten", places.strField("promotion_state").?);
+    try testing.expectEqualStrings(if (fault == .publish) "forgotten" else "may_hold", places.strField("promotion_neurons").?);
+    try testing.expectEqualStrings("may_hold", places.strField("promotion_report").?);
     c.learner.refuse = false;
     promoter.Promoter.fail_persist = false;
     promoter.Promoter.fail_publish = false;
@@ -312,7 +322,17 @@ fn afterRetirement(restart: bool) !void {
     if (restart) {
         c.r.srv.promote = null;
         c.p.deinit();
+        c.r.srv.deinit();
+        c.r.srv = try @import("server.zig").Server.init(testing.allocator, testing.io, c.learner.engine(), c.r.text.text(), .{
+            .served_name = "m",
+            .model_ids = &.{"m"},
+            .enable_thinking = false,
+            .use_drafts = false,
+        }, null);
         var why: []const u8 = "";
+        c.r.srv.notes = try @import("notes/storage.zig").Storage.openKind(testing.allocator, testing.io, c.r.snap, c.r.text.text(), "", c.r.kind, &why);
+        try c.r.srv.notes.?.beginRun(testing.allocator, .{});
+        try testing.expect(!c.r.srv.promotion_pending.load(.acquire));
         c.p = try promoter.Promoter.init(testing.allocator, testing.io, c.r.srv, c.r.store(), c.r.snap, .{ .every_ms = 600_000 }, &why);
         c.r.srv.promote = c.p;
     }
@@ -374,4 +394,60 @@ test "promotion erase HTTP: disabling promotion names its retained state and neu
     const bytes = try std.Io.Dir.cwd().readFileAlloc(testing.io, c.path, c.a, .limited(8 << 20));
     try testing.expect(std.mem.indexOf(u8, bytes, marker) != null);
     c.r.srv.promote = c.p;
+}
+
+test "promotion erase graph: served and saved lesson facts lose erased text while unrelated facts survive" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var c = try Case.init(arena.allocator(), .in_weights);
+    defer c.deinit();
+    const graph_path = try std.fmt.allocPrint(c.a, "{s}.graph", .{c.r.snap});
+    c.r.srv.slide.deinit();
+    c.r.srv.slide = .init(testing.allocator, testing.io, graph_path);
+    const id = c.r.srv.slide.add(secret, "chat", 1);
+    c.r.srv.slide.placed(id, c.p.state.find(c.key).?.neurons);
+    c.r.srv.slide.asked(id, &.{.{ .question = "What is my locker code?", .answer = secret }});
+    c.r.srv.slide.chained(id, .{ "What is the code?", secret });
+    c.r.srv.slide.note(id, secret);
+    c.r.srv.slide.mark(id, .learned);
+    const other = c.r.srv.slide.add(control_text, "chat", 1);
+    c.r.srv.slide.placed(other, c.p.state.find(c.control_key).?.neurons);
+    c.r.srv.slide.mark(other, .learned);
+    const reply = try c.erase();
+    try testing.expect(!reply.value.get("promotion").?.get("pending").?.bool);
+    const got = try rig.request(c.r.srv, c.a, "GET", "/v1/slide/graph", null);
+    try testing.expectEqual(@as(u16, 200), got.status);
+    try testing.expect(std.mem.indexOf(u8, got.body, marker) == null);
+    try testing.expect(std.mem.indexOf(u8, got.body, control_text) != null);
+    c.r.srv.slide.deinit();
+    c.r.srv.slide = .init(testing.allocator, testing.io, graph_path);
+    const loaded = try c.r.srv.slide.render(c.a, null);
+    try testing.expect(std.mem.indexOf(u8, loaded, marker) == null);
+    try testing.expect(std.mem.indexOf(u8, loaded, control_text) != null);
+    try c.controlIntact();
+}
+
+test "promotion erase graph: interrupted split and reversed facts recover every placed neuron after graph reload" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var c = try Case.init(arena.allocator(), .note);
+    defer c.deinit();
+    const text = "The lodge gate is green. Its locker code is 7419.";
+    const graph_path = try std.fmt.allocPrint(c.a, "{s}.graph", .{c.r.snap});
+    c.r.srv.slide.deinit();
+    c.r.srv.slide = .init(testing.allocator, testing.io, graph_path);
+    const row = c.r.srv.slide.add("7419 is the lodge locker code.", "chat", 1);
+    const ns = [_]promote.Neuron{.{ .layer = 3, .neuron = 1, .key = .reply }};
+    if (comptime @hasField(@import("slide_graph.zig").Fact, "promotion_key")) {
+        c.r.srv.slide.find(row).?.promotion_key = try c.r.srv.slide.arena.allocator().dupe(u8, c.key);
+    }
+    c.r.srv.slide.placed(row, &ns);
+    c.r.srv.slide.mark(row, .learned);
+    c.r.srv.slide.deinit();
+    c.r.srv.slide = .init(testing.allocator, testing.io, graph_path);
+    c.p.state.open = .{ .night = 2, .teaching = text };
+    if (comptime @hasField(promote.Open, "source_key")) c.p.state.open.?.source_key = c.key;
+    var b: @import("notes_promote_backend.zig").Backend = .{ .p = c.p, .arena = c.a };
+    const recovered = try b.placedFor(c.a, text);
+    try testing.expectEqualSlices(promote.Neuron, &ns, recovered);
 }

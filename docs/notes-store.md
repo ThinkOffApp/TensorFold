@@ -123,14 +123,23 @@ when other places remain unresolved. Then `cleanup_complete` is true and
 DELETE returns 404 and can never target a different note. Erasing a take-back can
 also make a later write redundant; that write is explicitly listed as removed.
 
-Promotion probe diagnostics use `tf-notes-probe-hashes/1`: questions, references,
-replies and reasons are SHA-256 hashes; source IDs and verdict metadata stay readable.
-An erase checks `SNAPSHOT.promote-probes.jsonl` up to 1 MiB. Older plaintext lines,
-mixed formats, unreadable files and larger logs appear as `promotion_probe_log`
-in `remaining_places`. The log remains untouched. This warning keeps `complete`
-false but does not keep a reversible erase intent after actionable cleanup finishes.
-A verified hash-only log does not add this warning. This bounded synchronous scan
-has no measured latency guarantee.
+Promotion probe diagnostics use `tf-notes-probe-hashes/1`; hashes of short answers
+can still be guessed. An active promotion erase therefore atomically empties the
+whole owned `SNAPSHOT.promote-probes.jsonl`, including control and cross-fact probes.
+A failed purge keeps the erase retryable. With the worker disabled, any nonempty,
+unreadable or oversized log remains named `promotion_probe_log`. Operator-captured
+Sliding Weights stderr remains a separate, unsearched diagnostics limit.
+
+Promotion tags each shared lesson's graph rows with its opaque Notes source before
+fitting, including sentence splits and reversed forms. Erase retires their neurons
+and removes their text, questions, answers and chains from the persisted graph;
+`promotion_graph` reports that commit separately. An older interrupted lesson with
+no durable source identity remains pending rather than guessing ownership.
+
+The shared Sliding Weights path also changes when `--notes` is off: graph saves use
+atomic replacement and sync, a graph commit must precede model-shard saving, and an
+emptied pocket is saved again. Failed take-out controls retain promotion-owned
+neuron addresses. These storage changes are separate from model-output qualification.
 
 The reply's place list also covers the refused writers (Recall prompt/reply
 records, compaction files, request logs), so a lifted refusal reports its place

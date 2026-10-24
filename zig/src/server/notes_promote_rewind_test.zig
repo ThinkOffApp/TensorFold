@@ -186,10 +186,9 @@ test "promotion rig: a refused night rewinds the learner, then saves; the graph 
     e.replaced = boat;
     e.erase = kite.value.get("id").?.int64().?;
     p.runNight();
-    const log = p.state.nights.items[0];
-    try testing.expectEqual(@as(u32, 1), log.rejected);
-    try testing.expectEqualStrings("none", log.plan);
-    try testing.expectEqual(promote.Status.rejected, status(&p.state, tent.value.strField("source").?));
+    try testing.expectEqual(@as(usize, 0), p.state.nights.items.len);
+    try testing.expect(p.state.rebuild_next);
+    try testing.expectEqual(promote.Status.note, status(&p.state, tent.value.strField("source").?));
     // mark, the lesson's save, the rewind (no retire; it writes the files itself), then the erase's zeroing and save
     try testing.expectEqual(@as(?bool, true), e.pending); // the night held the learner: the erase waited for its end
     try testing.expectEqualStrings("mswrs", e.letters.items);

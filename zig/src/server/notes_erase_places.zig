@@ -20,6 +20,7 @@ pub const Place = enum {
     promotion,
     promotion_probe_log,
     promotion_state,
+    promotion_graph,
     promotion_neurons,
     promotion_report,
     promotion_diagnostics,
@@ -39,10 +40,11 @@ pub const Place = enum {
             .request_log => "this or an earlier run may have logged a chat body quoting this note to an operator-selected path; those files have not been searched",
             .promotion => "this or an earlier Sliding Weights run may retain this fact in its graph or saved model weights; disabling --slide does not remove it",
             .promotion_state => "promotion metadata has not been committed without the erased note's copies; an earlier state requires the promotion worker to recover",
+            .promotion_graph => "promotion lesson text or derived graph fields have not been removed and committed",
             .promotion_neurons => "promotion neurons have not been zeroed and saved",
             .promotion_diagnostics => "operator-captured Sliding Weights or promotion diagnostics may quote this note; those destinations have not been searched",
             .promotion_report => "the promotion report has not been refreshed after erasure",
-            .promotion_probe_log => "the snapshot's .promote-probes.jsonl retains plaintext probe questions or replies, or could not be verified as hash-only; the diagnostic file has not been erased",
+            .promotion_probe_log => "the snapshot's .promote-probes.jsonl retains probe text or reversible hashes, or could not be read; the diagnostic file has not been erased",
             .requests => "the engine is running or queueing requests now, and one may carry this note in its prompt or its reply; they are not cancelled",
         };
     }
@@ -210,6 +212,7 @@ pub fn check(srv: *Server, forgot: Forget, origin: Origin) std.EnumArray(Place, 
     if (srv.notes) |s| if (s.snapshot_path) |path| {
         if (srv.promote == null and @import("notes_promote_logs.zig").dormantState(srv.io, path) == .may_hold) {
             out.set(.promotion_state, .may_hold);
+            out.set(.promotion_graph, .may_hold);
             out.set(.promotion_neurons, .may_hold);
         }
         out.set(.promotion_probe_log, switch (@import("notes_promote_logs.zig").status(srv.gpa, srv.io, path)) {

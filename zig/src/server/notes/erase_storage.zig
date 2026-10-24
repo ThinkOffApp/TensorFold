@@ -10,7 +10,7 @@ const index = @import("index.zig");
 const alias = @import("alias.zig");
 const Allocator = std.mem.Allocator;
 
-/// Caller serializes the entire preparation/commit lifetime, including response serialization.
+/// Caller serializes preparation, commit and finish; model cleanup may release the lock between commit and finish.
 pub const Prepared = struct {
     storage: *Storage,
     fresh: *model.Model,
@@ -71,9 +71,11 @@ pub const Prepared = struct {
     pub fn finish(p: *Prepared, a: Allocator) !void {
         const j = &p.storage.journal.?;
         if (j.poisoned) return error.JournalPoisoned;
+        var current: std.ArrayList(write.Record) = .empty;
+        for (p.storage.log.items.items) |entry| try current.append(a, entry.r);
         for (j.erases.items, 0..) |i, k| if (i.id == p.intent.id) {
             const removed = j.erases.orderedRemove(k);
-            j.rewrite(a, p.kept, p.log.next_source) catch |e| {
+            j.rewrite(a, current.items, p.storage.log.next_source) catch |e| {
                 j.erases.insertAssumeCapacity(k, removed);
                 return e;
             };

@@ -3,6 +3,7 @@ const std = @import("std");
 
 pub const Options = struct {
     every_ms: ?i64 = null,
+    configured: bool = false,
     hold: u32 = 1,
     alone: u32 = 2,
     regress: ?u32 = null,
@@ -39,6 +40,7 @@ pub fn parse(o: *Options, name: []const u8, value: []const u8) error{BadValue}!b
     } else if (std.mem.eql(u8, name, "--notes-promote-thinking")) {
         o.thinking = std.mem.eql(u8, value, "on");
     } else return false;
+    o.configured = true;
     return true;
 }
 

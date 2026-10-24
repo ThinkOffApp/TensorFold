@@ -57,6 +57,10 @@ pub fn route(srv: *Server, conn: *Conn, a: Allocator, raw_id: []const u8) void {
 /// Why a delete cannot run now, else null with the learning lock taken: one learn or delete at a time, under --slide.
 pub fn admit(srv: *Server, a: Allocator) ?Refused {
     if (!srv.teacher.learning.tryLock()) return .{ .code = 503, .message = busy };
+    if (srv.promotion_pending.load(.acquire)) {
+        srv.teacher.learning.unlock(srv.io);
+        return .{ .code = 503, .message = slide.promotion_recovery };
+    }
     switch (slide.run(srv, a, &.{}, 0)) {
         .refused => |e| {
             srv.teacher.learning.unlock(srv.io);
@@ -147,6 +151,7 @@ pub fn delete(srv: *Server, cx: *errors.Cx, out: *slide.Out, facts: []const Fact
     };
     if (slide.saveAll(srv, a)) |failed| return unsaved(srv, a, out, id, failed);
     written = true;
+    if (srv.promote) |p| @import("notes_promote_graph.zig").invalidated(p, a, facts[at].promotion_key);
     srv.teacher.forgetFact(srv.io, questions);
     srv.slide.remove(id, slide.now(srv), reason) catch |e| return ended(out, id, .deleting, try std.fmt.allocPrint(a, "the shards are written without the fact, but the graph file could not be ({s}): it still marks the fact deleting; send the delete again to settle it", .{@errorName(e)}));
     log.line("slide: fact {d} is deleted in {d:.1} s: {d} neurons silenced and written, {d} other facts checked", .{ id, slide.seconds(srv, began), zeroed, kept.len - 1 });
@@ -170,6 +175,7 @@ fn unsaved(srv: *Server, a: Allocator, out: *slide.Out, id: u32, failed: []const
 
 /// A fact left `deleting` whose neurons are silent already: an earlier delete reached the shards, so it is recorded.
 fn settle(srv: *Server, a: Allocator, out: *slide.Out, f: Fact, reason: []const u8) !void {
+    if (srv.promote) |p| @import("notes_promote_graph.zig").invalidated(p, a, f.promotion_key);
     srv.teacher.forgetFact(srv.io, try questionsOf(a, f));
     srv.slide.remove(f.id, slide.now(srv), reason) catch |e| return ended(out, f.id, .deleting, try std.fmt.allocPrint(a, "its neurons are silent, so an earlier delete reached the shards, but the graph file could not be written ({s}) and still marks it deleting", .{@errorName(e)}));
     log.line("slide: fact {d}'s earlier delete had reached the shards; the graph file now records it", .{f.id});

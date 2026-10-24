@@ -46,21 +46,18 @@ pub const Backend = struct {
     arena: Allocator, // the night's
     listed: ?[]const ops.View = null, // the current notes, listed once a night
     control_failed: bool = false,
-    marked: ?slide.Mark = null, // the graph and teacher as the learner's last mark tonight found them
+    cleanup: bool = false,
 
     fn srv(b: *Backend) *Server {
         return b.p.srv;
     }
     fn stopper(b: *Backend) Stop {
-        return .{ .flag = &b.p.stop };
+        return .{ .flag = &b.p.stop, .erasing = &b.p.erasing };
     }
 
     /// The neurons the slide graph records for learned facts of `text` (a lesson a stop or a failure left unrecorded).
     pub fn placedFor(b: *Backend, a: Allocator, text: []const u8) ![]const promote.Neuron {
-        const graph = try b.srv().slide.learnedChat(a, 0, std.math.maxInt(usize));
-        var out: std.ArrayList(promote.Neuron) = .empty;
-        for (graph) |g| if (std.mem.eql(u8, g.text, text)) try out.appendSlice(a, g.neurons);
-        return out.items;
+        return @import("notes_promote_graph.zig").placedFor(b.p, a, text);
     }
 
     pub fn notes(b: *Backend, a: Allocator) ![]promote.Note {
@@ -85,17 +82,24 @@ pub const Backend = struct {
 
     /// The fact's text through the learn route's own code; a text that splits into facts not all kept keeps none.
     pub fn teach(b: *Backend, a: Allocator, text: []const u8) !promote.Taught {
-        if (b.p.stop.load(.acquire)) return error.Stopped;
-        var out: slide.Out = .{ .conn = null, .a = a };
+        if (b.stopper().check()) return error.Stopped;
+        const op = b.p.state.open orelse return error.NoLessonIdentity;
+        var owner: @import("notes_promote_graph.zig").Admission = .{ .p = b.p, .key = op.source_key, .text = text };
+        var out: slide.Out = .{ .conn = null, .a = a, .enrollment = owner.enrollment() };
         slide.teachText(b.srv(), a, text, "chat", b.stopper(), &out);
-        if (b.p.stop.load(.acquire)) return error.Stopped;
+        if (b.stopper().check()) return error.Stopped;
         if (out.failed != null) return error.LessonFailed;
-        if (out.results.items.len == 0) return .{ .kept = false, .why = "missed: the learner found no fact in its text" };
+        if (b.srv().promotion_pending.load(.acquire)) return error.ControlFailed;
+        return b.taught(a, out.results.items);
+    }
+
+    pub fn taught(b: *Backend, a: Allocator, results: []const slide.Out.Result) !promote.Taught {
+        if (results.len == 0) return .{ .kept = false, .why = "missed: the learner found no fact in its text" };
         const graph = try b.srv().slide.learnedChat(a, 0, std.math.maxInt(usize));
         var neurons: std.ArrayList(promote.Neuron) = .empty;
         var qs: std.ArrayList([]const u8) = .empty;
         var all = true;
-        for (out.results.items) |r| {
+        for (results) |r| {
             all = all and r.recalled;
             if (!r.recalled) continue;
             for (graph) |g| if (g.id == r.id) {
@@ -119,19 +123,24 @@ pub const Backend = struct {
     }
 
     /// The learner keeps the pocket as it is, the graph and teacher beside it (a new mark replaces the last one).
-    pub fn mark(b: *Backend, a: Allocator) !void {
-        b.marked = slide.mark(b.srv(), a) orelse return error.MarkRefused;
+    pub fn mark(b: *Backend, _: Allocator) !void {
+        if (b.p.rewind_pending) return error.RewindPending;
+        _ = b.p.mark_arena.reset(.retain_capacity);
+        b.p.marked = null;
+        b.p.marked = slide.mark(b.srv(), b.p.mark_arena.allocator()) orelse return error.MarkRefused;
     }
 
     /// The pocket, graph and teacher put back as the last mark found them and saved; refused without a mark.
     pub fn rewind(b: *Backend, a: Allocator) !void {
-        const m = b.marked orelse return error.NothingToRewind;
+        const m = b.p.marked orelse return error.NothingToRewind;
+        b.p.rewind_pending = true;
         if (!slide.rewind(b.srv(), a, m, "taken back: the night that taught it made answers worse")) {
             b.control_failed = true;
             return error.RewindRefused;
         }
         b.control_failed = false;
-        b.marked = null;
+        b.p.marked = null;
+        b.p.rewind_pending = false;
     }
 
     /// Each question answered by the untaught model with the fact before it, as a lesson writes its answers.
@@ -279,10 +288,11 @@ pub const Backend = struct {
     }
 
     pub fn persist(b: *Backend, s: *const promote.State) !void {
-        if (Promoter.fail_persist) return error.PromoteIo;
+        if (!b.cleanup and b.p.erasing.load(.acquire)) return error.ErasePending;
+        if (@import("builtin").is_test and Promoter.fail_persist) return error.PromoteIo;
         var arena: std.heap.ArenaAllocator = .init(b.p.gpa);
         defer arena.deinit();
         try pjson.writeFile(arena.allocator(), b.p.path, try pjson.encode(s, arena.allocator()));
-        if (!b.control_failed) @import("slide_night.zig").acknowledged(b.srv());
+        if (!b.control_failed and !b.p.rewind_pending and !b.p.erasing.load(.acquire)) @import("slide_night.zig").acknowledged(b.srv());
     }
 };

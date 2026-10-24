@@ -90,16 +90,7 @@ fn teachUsing(srv: *Server, a: Allocator, text: []const u8, source: []const u8, 
         out.done();
         return;
     }
-    const ids = a.alloc(u32, facts.len) catch return;
-    for (facts, ids) |fact, *id| {
-        id.* = srv.slide.add(fact, source, now(srv));
-        if (id.* == 0) {
-            out.event("failed", .{ .message = "out of memory recording the fact before learning" });
-            out.done();
-            return;
-        }
-        out.event("fact", .{ .id = id.*, .text = fact });
-    }
+    const ids = @import("slide_fact_record.zig").record(srv, a, facts, source, out) catch |err| return out.fail(&cx, err);
     defer finishLearning(srv, a, out);
     // facts learned before this server started asked once, so a fact a lesson finds forgotten is one it made forget
     if (recheck.check(srv, &cx, 0, .unjudged, &.{}, gone)) |before| {
@@ -229,8 +220,7 @@ pub fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone
         log.line("slide: round {d}: {d} steps ({d:.1} s learning, {d:.1} s checking); the held-out answers {s} token for token, and {s} when asked", .{ round + 1, out.steps, learned, seconds(srv, checked), if (held) "come back" else "do not come back", if (std.mem.allEqual(bool, verdict.recalled, true)) "come back" else "do not come back" });
         if (verdict.took) |took| {
             if (routed == teach.reroutes) {
-                _ = run(srv, a, &.{ .drop = true }, 0);
-                srv.slide.placed(id, &.{});
+                _ = @import("slide_control.zig").take(srv, a, id, false);
                 out.why = std.fmt.allocPrint(a, "taken out: it kept answering questions about something else, last \"{s}\"", .{took.question}) catch "taken out: it kept answering questions about something else";
                 @memset(out.recalled, false);
                 return out;
@@ -252,8 +242,7 @@ pub fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone
             continue;
         }
         if (verdict.damage) |why| {
-            _ = run(srv, a, &.{ .undo = true }, 0);
-            srv.slide.placed(id, &.{});
+            _ = @import("slide_control.zig").take(srv, a, id, true);
             @memset(out.recalled, false); // the undo took the whole fact out: nothing of it is kept
             out.why = std.fmt.allocPrint(a, "round {d} taken back: {s}", .{ round + 1, why }) catch why;
             return out;
@@ -315,8 +304,7 @@ pub fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone
         return out;
     }
     if (!std.mem.allEqual(bool, out.recalled, true)) {
-        _ = run(srv, a, &.{ .drop = true }, 0);
-        srv.slide.placed(id, &.{});
+        _ = @import("slide_control.zig").take(srv, a, id, false);
     }
     return out;
 }
@@ -361,8 +349,7 @@ fn afterTakeOut(srv: *Server, cx: *errors.Cx, o: *Out, id: u32, before: []const 
 
 /// The open lesson taken out whole (its neurons free, earlier ones it fitted again as they were), and why.
 fn takeOut(srv: *Server, a: Allocator, out: *Rounds, id: u32, why: []const u8) void {
-    _ = run(srv, a, &.{ .drop = true }, 0);
-    srv.slide.placed(id, &.{});
+    _ = @import("slide_control.zig").take(srv, a, id, false);
     @memset(out.recalled, false);
     out.why = why;
     log.line("slide: fact {d}: {s}", .{ id, why });

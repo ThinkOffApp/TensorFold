@@ -7,7 +7,13 @@ const log = @import("log.zig");
 
 pub fn create(srv: *Server, args: cli.Args) bool {
     const o = args.notes.promotion;
-    const every = o.every_ms orelse return true;
+    const every = o.every_ms orelse {
+        if (o.configured) {
+            std.debug.print("tensorfold: --notes-promote-* settings need --notes-promote-every\n", .{});
+            return false;
+        }
+        return true;
+    };
     const store = srv.notes orelse {
         std.debug.print("tensorfold: --notes-promote-every needs --notes and --slide\n", .{});
         return false;
@@ -16,8 +22,12 @@ pub fn create(srv: *Server, args: cli.Args) bool {
         std.debug.print("tensorfold: --notes-promote-every needs --slide on a writable model copy\n", .{});
         return false;
     }
+    const snapshot = args.notes.path orelse {
+        std.debug.print("tensorfold: --notes-promote-every needs --notes SNAPSHOT\n", .{});
+        return false;
+    };
     var why: []const u8 = "";
-    srv.promote = np.Promoter.init(srv.gpa, srv.io, srv, store, args.notes.path.?, .{
+    srv.promote = np.Promoter.init(srv.gpa, srv.io, srv, store, snapshot, .{
         .every_ms = every,
         .settings = .{ .hold = o.hold, .alone = o.alone, .regress_notes = o.regress, .targeted = o.targeted, .thinking = o.thinking },
     }, &why) catch |e| {

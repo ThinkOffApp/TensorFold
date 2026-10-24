@@ -38,8 +38,9 @@ pub fn keyOf(a: Allocator, v: ops.View) Allocator.Error![]const u8 {
 /// A night's stop check for the learner and the chat calls: true once the server stops.
 pub const Stop = struct {
     flag: *std.atomic.Value(bool),
+    erasing: ?*std.atomic.Value(bool) = null,
     pub fn check(s: Stop) bool {
-        return s.flag.load(.acquire);
+        return s.flag.load(.acquire) or (if (s.erasing) |f| f.load(.acquire) else false);
     }
 };
 
@@ -51,6 +52,9 @@ pub const Promoter = struct {
     path: []u8, // the state file, SNAPSHOT.promote
     every_ms: i64,
     state: promote.State, // nights and erases hold teacher.learning
+    mark_arena: std.heap.ArenaAllocator,
+    marked: ?slide.Mark = null,
+    rewind_pending: bool = false,
     mu: std.Io.Mutex = .init, // everything below
     seen: std.StringHashMapUnmanaged(u32) = .empty, // key -> nights done when first in a block
     retrieved: std.StringHashMapUnmanaged(void) = .empty,
@@ -67,6 +71,7 @@ pub const Promoter = struct {
     running: std.atomic.Value(bool) = .init(false),
     thread: ?std.Thread = null,
     last_end_ms: i64 = 0,
+    last_recovery_ms: i64 = 0,
     erasing: std.atomic.Value(bool) = .init(false),
     publish_pending: std.atomic.Value(bool) = .init(false), // the in-weights list and report lag the state: refreshed at the next try
 
@@ -88,7 +93,8 @@ pub const Promoter = struct {
             problem.* = "the promotion state file cannot be read";
             return e;
         }
-        p.* = .{ .gpa = gpa, .io = io, .srv = srv, .store = store, .path = path, .every_ms = o.every_ms, .state = state, .nights_done = state.nights_done, .last_end_ms = clockMs(io) };
+        p.* = .{ .gpa = gpa, .io = io, .srv = srv, .store = store, .path = path, .every_ms = o.every_ms, .state = state, .mark_arena = .init(gpa), .nights_done = state.nights_done, .last_end_ms = clockMs(io) };
+        if (@import("notes_promote_graph.zig").lost(p)) p.state.rebuild_next = true;
         var pending_arena = std.heap.ArenaAllocator.init(gpa);
         defer pending_arena.deinit();
         if (@import("notes_promote_cleanup.zig").pendingSources(p, pending_arena.allocator())) |keys| {
@@ -133,6 +139,7 @@ pub const Promoter = struct {
         g.free(p.report);
         g.free(p.path);
         p.state.deinit();
+        p.mark_arena.deinit();
         g.destroy(p);
     }
 
@@ -145,7 +152,7 @@ pub const Promoter = struct {
 
     /// publish(), its failure kept in `publish_pending` (every caller goes through here, the test switch too).
     pub fn tryPublish(p: *Promoter) bool {
-        const ok = if (fail_publish or p.erasing.load(.acquire)) false else if (p.publish()) |_| true else |_| false;
+        const ok = if ((@import("builtin").is_test and fail_publish) or p.erasing.load(.acquire)) false else if (p.publish()) |_| true else |_| false;
         p.publish_pending.store(!ok, .release);
         return ok;
     }
@@ -271,21 +278,26 @@ pub const Promoter = struct {
     }
 
     fn loop(p: *Promoter) void {
-        p.recover();
+        p.srv.teacher.learning.lockUncancelable(p.io);
+        const interrupted = p.state.open != null or p.state.rebuild_next;
+        p.srv.teacher.learning.unlock(p.io);
+        if (interrupted) p.runNight() else p.recover();
         while (!p.stop.load(.acquire)) {
             std.Io.sleep(p.io, .fromMilliseconds(500), .awake) catch {};
             const now = clockMs(p.io);
-            const due = now - p.last_end_ms >= p.every_ms;
-            const recovery = p.srv.promotion_pending.load(.acquire) and now - p.last_end_ms >= 5000;
             const asked = p.wake.swap(false, .acq_rel);
-            if (!due and !recovery and !asked) continue;
-            if (due or asked or p.state.open != null or p.state.rebuild_next) p.runNight() else p.recover();
-            p.last_end_ms = clockMs(p.io);
+            switch (@import("notes_promote_schedule.zig").next(now, p.last_end_ms, p.last_recovery_ms, p.every_ms, asked, p.srv.promotion_pending.load(.acquire))) {
+                .wait => {},
+                .night => p.runNight(),
+                .recover => {
+                    p.recover();
+                    p.last_recovery_ms = clockMs(p.io);
+                },
+            }
         }
     }
 
     fn recover(p: *Promoter) void {
-        if (p.state.open != null or p.state.rebuild_next) return p.runNight();
         var arena = std.heap.ArenaAllocator.init(p.gpa);
         defer arena.deinit();
         const life = @import("notes_promote_life.zig");
@@ -293,6 +305,9 @@ pub const Promoter = struct {
         defer life.end(p.srv);
         p.srv.teacher.learning.lockUncancelable(p.io);
         defer p.srv.teacher.learning.unlock(p.io);
+        var b: Backend = .{ .p = p, .arena = arena.allocator() };
+        if (p.rewind_pending) b.rewind(arena.allocator()) catch return;
+        if (!p.erasing.load(.acquire) and (p.state.open != null or p.state.rebuild_next)) return;
         _ = p.drainPending();
     }
 
@@ -307,20 +322,27 @@ pub const Promoter = struct {
         const life = @import("notes_promote_life.zig");
         if (!life.begin(p.srv, arena.allocator())) return;
         defer life.end(p.srv);
+        defer p.last_end_ms = clockMs(p.io);
         var b: Backend = .{ .p = p, .arena = arena.allocator() };
-        if (p.state.open == null and !p.drainPending()) return;
+        if (p.rewind_pending) b.rewind(arena.allocator()) catch return;
+        p.clearPublished();
+        if ((p.state.open == null or p.erasing.load(.acquire)) and !p.drainPending()) return;
         log.line("notes promotion: night {d} begins", .{p.state.nights_done + 1});
         const n = promote.nightOrRebuild(&p.state, arena.allocator(), &b) catch |e| {
             // no reload (it allocates): the state in memory holds every neuron placed and is marked to rebuild
             log.line("notes promotion: night {d} stopped ({s}); the next night zeroes every promotion neuron and teaches again", .{ p.state.nights_done + 1, @errorName(e) });
             p.srv.promotion_pending.store(true, .release);
+            if (p.marked != null) b.rewind(arena.allocator()) catch {};
             b.persist(&p.state) catch {};
             p.srv.promotion_pending.store(true, .release); // the file already says the night is open, which a start reads as a rebuild
             _ = p.tryPublish();
+            if (p.erasing.load(.acquire) and !p.rewind_pending) _ = p.drainPending();
             return;
         };
         if (n.worse_list.len > 0) log.line("notes promotion: night {d}: worse-list SHA-256 {s}", .{ n.night, pjson.hashText(n.worse_list) });
         log.line("notes promotion: night {d}: {d} due, {d} stale, plan {s} ({d} tried, {d} rejected; {d} one by one, {d} blamed), {d} taught ({d} kept, {d} missed), {d} worse of {d} probes; alone {d} of {d} right in {d} rounds, {d} left the prompt, {d} back; {d} in weights, {d} in the pocket; {d} asks in {d:.1} s", .{ n.night, n.due, n.stale, n.plan, n.tries, n.rejected, n.one_by_one, n.blamed, n.taught, n.kept, n.missed, n.worse, n.probes, n.alone_right, n.alone_asked, n.alone_rounds, n.left_prompt, n.back_to_prompt, n.in_weights, n.pocket, n.asks, n.secs });
+        p.marked = null;
+        _ = p.mark_arena.reset(.free_all);
         p.compact();
         _ = p.tryPublish();
         _ = p.drainPending();

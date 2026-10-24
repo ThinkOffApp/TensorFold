@@ -41,6 +41,7 @@ pub fn value(s: *const State, a: Allocator) !Value {
         const x = try json.newObject(a);
         try x.put(a, "night", try int(a, op.night));
         try x.put(a, "teaching", .{ .string = op.teaching });
+        try x.put(a, "source_key", .{ .string = op.source_key });
         try x.put(a, "placed", try neurons(a, op.placed));
         try o.put(a, "open", .{ .object = x });
     } else try o.put(a, "open", .null);
@@ -152,6 +153,9 @@ pub fn decode(gpa: Allocator, bytes: []const u8, settings: promote.Settings) Loa
     s.rebuild_next = if (v.field("rebuild_next")) |b| b == .bool and b.bool else false;
     s.pocket = try readNeurons(sa, v.field("pocket"));
     if (v.field("open")) |op| s.open = .{ .night = try uint(u32, op.field("night")), .teaching = try str(sa, op.field("teaching")), .placed = try readNeurons(sa, op.field("placed")) };
+    if (s.open != null) if (v.field("open").?.field("source_key")) |key| {
+        s.open.?.source_key = try str(sa, key);
+    };
     for ((v.field("facts") orelse return error.BadState).items() orelse return error.BadState) |x| {
         var f: promote.Fact = .{ .key = try str(sa, x.field("key")), .text = try str(sa, x.field("text")) };
         f.erased = if (x.field("erased")) |b| b == .bool and b.bool else false;
