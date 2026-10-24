@@ -114,6 +114,14 @@ def schema_of():
                 "domain": [], "extra": [], "topic": []} for a in {x[1] for x in STORE}}
 
 
+def world_snapshot(nm, nx, tok):
+    schema = {"vat": {"multi": False, "applies": ["self"], "domain": [], "extra": [], "topic": []}}
+    ns = nm.NoteStore(tok, schema=schema)
+    ns.write(OWNER, {"id": "world-vat", "op": "ASSERT", "e": "me", "a": "vat", "v": "24%",
+                     "text": "The VAT rate in Exampleland is 24%.", "told": 739901000100})
+    return nx.snapshot(ns, OWNER, meta={"store": "imported world fact", "tokenizer": "bytes"})[0]
+
+
 def answer(nm, ns, owner, q, past, cap, ex):
     w = who_ref.lookup(nm, ns, owner, q, cap=cap, past=past, exclude=ex)
     sha = hashlib.sha256(w["block"].encode()).hexdigest() if w["block"] else None
@@ -170,6 +178,7 @@ def main():
     import notes_export as nx  # noqa: E402
 
     tok = fixture.bytes_tok(nm)
+    fixture.dump(os.path.join(args.out, "who_world_bytes_snapshot.json"), world_snapshot(nm, nx, tok))
     ns = write_store(nm.NoteStore(tok, schema=schema_of()))
     snap, _v = nx.snapshot(ns, OWNER, meta={"store": "who made-up", "tokenizer": "bytes"})
     cases = []
