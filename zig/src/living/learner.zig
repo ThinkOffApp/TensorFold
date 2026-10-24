@@ -39,7 +39,7 @@ const replay_cap = 256; // earlier lessons' answers a new lesson leaves as they 
 const replay_each = 8; // of a lesson's answers, its first (plain questions) join the replay, so every fact keeps some
 
 /// A lesson builds (build) and learns (steps); an edit is written at its subject (edit), more rounds report (again).
-const Phase = enum { idle, build, steps, undo, reroute, drop, save, edit, again, probe, pocket, retire };
+const Phase = enum { idle, build, steps, undo, reroute, drop, save, edit, again, probe, pocket, retire, mark, rewind };
 
 /// The lessons over host H: its trainer and hooks (family.zig), routed blocks only when its trainer keeps `sites`.
 pub fn Learner(comptime H: type) type {
@@ -93,6 +93,7 @@ pub fn Learner(comptime H: type) type {
         method: whole_lessons.Method, // how a whole lesson changes the model: a pocket's neurons by default
         probe: Probes,
         pockets: Pockets, // every MoE layer's pocket of learned neurons
+        marked: ?@import("whole_night.zig").Marked = null,
         pocketed: bool = false, // the last lesson put neurons in the pocket
         plain: [4]std.ArrayList(Example) = @splat(.empty), // a lesson's lists as this learner reads them (readable)
 
@@ -105,6 +106,7 @@ pub fn Learner(comptime H: type) type {
             if (has_edits) l.edits.deinit();
             if (has_edits) l.probe.deinit();
             if (has_pocket) l.pockets.deinit();
+            @import("whole_night.zig").dropLessons(l);
             disownLesson(l.gpa, l.owned);
             for (l.extra.items) |ex| l.gpa.free(ex.ids);
             l.extra.deinit(l.gpa);
@@ -138,7 +140,8 @@ pub fn Learner(comptime H: type) type {
         /// Start a lesson's round; its examples must stay valid until its last step.
         pub fn begin(l: *Self, lesson: Lesson) !void {
             std.debug.assert(l.phase == .idle);
-            if (has_pocket and l.trainer != null) {
+            if (has_pocket and l.trainer != null and !lesson.rewind) {
+                if (l.pockets.night_pending) return error.NightRecoveryPending;
                 if (lesson.save) try whole_lessons.healLive(l) else try whole_lessons.heal(l);
             }
             l.lesson = lesson;
@@ -163,6 +166,11 @@ pub fn Learner(comptime H: type) type {
             if (lesson.retire.len > 0 or lesson.unretire or lesson.forget.len > 0 or lesson.unforget) {
                 try l.ready();
                 l.phase = .retire;
+                return;
+            }
+            if (lesson.mark or lesson.rewind) {
+                try l.ready();
+                l.phase = if (lesson.mark) .mark else .rewind;
                 return;
             }
             if (lesson.train.len == 0) return;
@@ -268,6 +276,7 @@ pub fn Learner(comptime H: type) type {
                     if (has_whole and l.whole) if (try whole_lessons.retire(l, l.lesson)) |s| return s;
                     return .{ .done = true };
                 },
+                .mark, .rewind => return if (has_pocket) @import("whole_night.zig").advance(l) else error.MarksUnsupported,
                 .edit => return if (has_edits) whole_lessons.editOnce(l) else unreachable,
                 .probe => return if (has_edits) whole_lessons.probeOnce(l) else unreachable,
                 .pocket => return if (has_pocket) whole_lessons.pocketOnce(l) else unreachable,

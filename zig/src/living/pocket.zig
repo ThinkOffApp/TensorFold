@@ -13,6 +13,7 @@ const loading = @import("pocket_load.zig");
 const family = @import("family.zig");
 const forgetting = @import("pocket_forget.zig");
 const marks = @import("pocket_mark.zig");
+const nights = @import("pocket_night.zig");
 const neuron_math = @import("neuron.zig");
 
 const Example = examples.Example;
@@ -153,9 +154,12 @@ pub fn Pocket(comptime T: type, comptime F: family.Family) type {
         save_pending: bool = false,
         forgot: forgetting.Kept = .{}, // what the last delete changed, until a save writes it or it is put back
         snap: marks.Snap(Learned) = .{},
+        night_mark: ?*nights.Kept(Self) = null,
+        night_pending: bool = false,
+        written: bool = false,
 
         pub fn mark(p: *Self) !void {
-            if (p.restore_pending or p.retire_pending or p.saved_mismatch or p.save_pending or p.forgot.stale) return error.PocketUnresolved;
+            if (p.night_pending or p.restore_pending or p.retire_pending or p.saved_mismatch or p.save_pending or p.forgot.stale) return error.PocketUnresolved;
             return marks.mark(p);
         }
 
@@ -169,6 +173,7 @@ pub fn Pocket(comptime T: type, comptime F: family.Family) type {
             p.read.deinit(p.gpa);
             p.v.deinit(p.gpa);
             p.snap.deinit(p.gpa);
+            nights.drop(p);
             p.forgot.deinit(p.gpa);
         }
 

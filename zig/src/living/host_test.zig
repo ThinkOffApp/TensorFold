@@ -97,7 +97,7 @@ fn Host(comptime F: fam.Family) type {
         pub const family = F;
         pub const Ctx = *Seen;
 
-        pub const Seen = struct { fail_save: enum { none, before, partial } = .none, partial: bool = false, dir: []const u8 = &.{}, disk: u64 = 0, uploads: usize = 0, saved: usize = 0, gate_ok: bool = true, up_ok: bool = true, written: []const usize = &.{} };
+        pub const Seen = struct { fail_save: enum { none, before, partial } = .none, fail_upload: ?usize = null, partial: bool = false, dir: []const u8 = &.{}, disk: u64 = 0, uploads: usize = 0, saved: usize = 0, gate_ok: bool = true, up_ok: bool = true, written: []const usize = &.{} };
 
         pub fn layout(_: Ctx) fam.Layout {
             var every: fam.Layers = .empty;
@@ -127,7 +127,8 @@ fn Host(comptime F: fam.Family) type {
             return 0;
         }
 
-        pub fn pocket(s: Ctx, _: usize, _: []const f32, _: []const f32, _: usize) !void {
+        pub fn pocket(s: Ctx, layer: usize, _: []const f32, _: []const f32, _: usize) !void {
+            if (s.fail_upload == layer) return error.InjectedUpload;
             s.uploads += 1;
         }
 
@@ -143,7 +144,8 @@ fn Host(comptime F: fam.Family) type {
         }
 
         /// The forward's rows before a save: each gate row sharp^2 times its up row (g = sharp u, w = u / sharp).
-        pub fn pocketSwiglu(s: Ctx, _: usize, gate: []const f32, up: []const f32, _: []const f32, _: usize) !void {
+        pub fn pocketSwiglu(s: Ctx, layer: usize, gate: []const f32, up: []const f32, _: []const f32, _: usize) !void {
+            if (s.fail_upload == layer) return error.InjectedUpload;
             s.uploads += 1;
             if (s.saved > 0) return; // after a save the rows are as written, each rounded its own way
             for (gate, up) |g, w| if (@abs(g - F.neuron.sharp * F.neuron.sharp * w) > 1e-5 * @abs(g) + 1e-30) {
@@ -324,4 +326,89 @@ test "Save recovery: partial throwing save preserves the accepted lesson and ret
 
 test "Trainer admission: an ungated dense SwiGLU lesson uses the identical judged save gate" {
     try run(@import("families.zig").qwen3_5);
+}
+
+fn complete(l: anytype) !void {
+    for (0..10_000) |_| {
+        const result = l.step();
+        if (result.report) |report| if (report == .failed) {
+            std.debug.print("learner failed: {s}\n", .{report.failed});
+            return error.LearnerFailed;
+        };
+        if (result.done) return;
+    }
+    return error.LearnerDidNotFinish;
+}
+
+fn nightRecovery(comptime F: fam.Family, partial: bool) !void {
+    const t = std.testing;
+    const H = Host(F);
+    var seen: H.Seen = .{};
+    var l = learner.Learner(H).init(t.allocator, t.io, &seen);
+    defer l.deinit();
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var first: [6]Example = undefined;
+    var second: [6]Example = undefined;
+    for (&first, &second, 0..) |*one, *two, i| {
+        one.* = try qa(a, 7, @intCast(i));
+        two.* = try qa(a, 17, @intCast(i));
+    }
+    const held_first = [_]Example{ try qa(a, 7, 10), try qa(a, 7, 11) };
+    const held_second = [_]Example{ try qa(a, 17, 10), try qa(a, 17, 11) };
+    try l.begin(.{ .train = &first, .held = &held_first });
+    try complete(&l);
+    try l.begin(.{ .save = true });
+    try complete(&l);
+    const before = state(&l.pockets);
+    const disk_before = seen.disk;
+    const rounds_before = l.rounds;
+    const lessons_before = l.lessons;
+    try l.begin(.{ .mark = true });
+    try complete(&l);
+    try t.expect(l.marked != null and l.pockets.night_mark != null);
+    try l.begin(.{ .train = &second, .held = &held_second });
+    try complete(&l);
+    try l.begin(.{ .save = true });
+    try complete(&l);
+    const night = state(&l.pockets);
+    try t.expect(night != before);
+    seen.fail_save = if (partial) .partial else .before;
+    try l.begin(.{ .rewind = true });
+    const failed_write = l.step();
+    try t.expect(failed_write.done and failed_write.stale and failed_write.report.? == .failed);
+    try t.expectEqual(night, state(&l.pockets));
+    try t.expect(l.marked != null and l.pockets.night_mark != null);
+    try t.expectError(error.NightRecoveryPending, l.begin(.{ .train = &second, .held = &held_second }));
+    try t.expectError(error.NightRecoveryPending, l.begin(.{ .save = true }));
+    seen.fail_save = .none;
+    seen.fail_upload = 1;
+    try l.begin(.{ .rewind = true });
+    const failed_upload = l.step();
+    try t.expect(failed_upload.done and failed_upload.stale and failed_upload.report.? == .failed);
+    try t.expectEqual(before, state(&l.pockets));
+    try t.expect(l.marked != null and l.pockets.night_mark != null);
+    try t.expectError(error.NightRecoveryPending, l.begin(.{ .train = &second, .held = &held_second }));
+    seen.fail_upload = null;
+    try l.begin(.{ .rewind = true });
+    const repaired = l.step();
+    try t.expect(repaired.done and !repaired.stale and repaired.report == null);
+    try t.expectEqual(before, state(&l.pockets));
+    try t.expectEqual(disk_before, seen.disk);
+    try t.expectEqual(rounds_before, l.rounds);
+    try t.expectEqual(lessons_before, l.lessons);
+    try t.expectEqualSlices(u32, held_first[0].ids, l.owned.held[0].ids);
+    try t.expect(l.marked == null and l.pockets.night_mark == null);
+    try t.expectError(error.NothingToContinue, l.begin(.{ .more = true, .train = &second }));
+    try l.begin(.{ .train = &second, .held = &held_second });
+    l.abort();
+}
+
+test "Night recovery: relu and SwiGLU checkpoints survive failed writes, uploads and per-lesson marks" {
+    inline for (.{ families.nemotron_h, families.qwen4_exp, families.qwen3_5 }) |F| try nightRecovery(F, false);
+}
+
+test "Night recovery: partial persistence blocks new lessons until the full checkpoint is restored" {
+    inline for (.{ families.nemotron_h, families.qwen4_exp, families.qwen3_5 }) |F| try nightRecovery(F, true);
 }

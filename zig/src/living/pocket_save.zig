@@ -32,6 +32,7 @@ pub fn save(p: anytype, t: anytype, host: anytype) !usize {
         return error.PocketSavedDifferently;
     }
     if (@hasDecl(@TypeOf(host), "saveFinish")) try host.saveFinish();
+    p.written = true;
     p.saved_mismatch = false;
     p.save_pending = false;
     p.snap.valid = false;

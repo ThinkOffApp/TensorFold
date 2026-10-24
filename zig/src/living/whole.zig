@@ -206,6 +206,7 @@ pub fn retire(l: anytype, lesson: Lesson) !?@import("learner.zig").Step {
 /// A put-back the device has not taken yet, tried again; it fails until the device takes every layer of it.
 pub fn heal(l: anytype) !void {
     if (l.method != .pocket) return;
+    if (l.pockets.night_pending) return error.NightRecoveryPending;
     if (l.pockets.saved_mismatch) return error.PocketSavedDifferently;
     if (l.pockets.save_pending) return error.PocketSaveUncertain;
     try healLive(l);
@@ -222,7 +223,7 @@ pub fn healLive(l: anytype) !void {
 
 /// Whether the device lacks a put-back the pocket holds: replies are refused until `heal` lands it.
 pub fn stale(l: anytype) bool {
-    return l.method == .pocket and (l.pockets.save_pending or l.pockets.saved_mismatch or l.pockets.retire_pending or l.pockets.restore_pending or forgetting.stale(&l.pockets));
+    return l.method == .pocket and (l.pockets.night_pending or l.pockets.save_pending or l.pockets.saved_mismatch or l.pockets.retire_pending or l.pockets.restore_pending or forgetting.stale(&l.pockets));
 }
 
 /// The pocket into the shards (an unrecalled lesson out first), held-out answers asked again; false if not a pocket.
@@ -235,7 +236,7 @@ pub fn save(l: anytype) !bool {
     }
     // a pocket a delete emptied still writes: the shards hold the deleted fact until it does
     const forgot = forgetting.pending(&l.pockets);
-    if (l.pockets.empty() and !forgot and !l.pockets.save_pending) return true;
+    if (l.pockets.empty() and !l.pockets.written and !forgot and !l.pockets.save_pending) return true;
     const t0 = H.seconds(l.io);
     const bytes = try l.pockets.save(l.trainer.?, hooks(l));
     forgetting.settle(&l.pockets);

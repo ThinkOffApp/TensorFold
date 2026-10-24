@@ -25,6 +25,8 @@ pub const Lesson = struct {
     retire: []const [2]u16 = &.{}, // (layer, neuron) of facts a newer one replaces, zeroed
     unretire: bool = false, // the last retire's neurons put back
     forget: []const [2]u16 = &.{}, // (layer, neuron) of a fact deleted on request, their input weights zeroed
+    mark: bool = false,
+    rewind: bool = false,
     unforget: bool = false, // the last forget undone, bit for bit
 };
 

@@ -7,6 +7,8 @@ pub const Layers = family.Layers;
 
 pub const learner = @import("learner.zig");
 pub const whole = @import("whole.zig");
+pub const whole_night = @import("whole_night.zig");
+pub const pocket_night = @import("pocket_night.zig");
 pub const choice = @import("choice.zig");
 pub const editor = @import("editor.zig");
 pub const probe = @import("probe.zig");

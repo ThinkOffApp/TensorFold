@@ -8,11 +8,16 @@ const Fixture = struct {
     pub const Learner = struct {
         pub const Progress = struct { phase: enum { read, fit, values, check, done }, at: usize, of: usize, loss: f32 };
         pub const Placed = api.Neuron;
+        marked: bool = false,
+        rewound: bool = false,
         pub fn init(_: std.mem.Allocator, _: std.Io, _: void) @This() {
             return .{};
         }
         pub fn deinit(_: *@This()) void {}
-        pub fn begin(_: *@This(), _: anytype) !void {}
+        pub fn begin(l: *@This(), request: anytype) !void {
+            l.marked = request.mark;
+            l.rewound = request.rewind;
+        }
         pub fn abort(_: *@This()) void {}
         pub fn progress(_: *@This()) ?Progress {
             return .{ .phase = .read, .at = 0, .of = 100, .loss = 0 };
@@ -44,6 +49,17 @@ test "lesson adapter: publish reading zero before the first long unit" {
     const hook = a.hook();
     try hook.begin(hook.ctx, &.{}, .{ .ctx = &seen, .event = Seen.on });
     try std.testing.expectEqual(@as(usize, 1), seen.reads);
+}
+test "lesson adapter: a full-night mark and rewind reach the learner" {
+    var a = Adapter(Fixture).init(std.testing.allocator, std.testing.io, {});
+    defer a.deinit();
+    var seen: Seen = .{};
+    const hook = a.hook();
+    const sink: api.LearnSink = .{ .ctx = &seen, .event = Seen.on };
+    try hook.begin(hook.ctx, &.{ .mark = true }, sink);
+    try std.testing.expect(a.learner.marked and !a.learner.rewound);
+    try hook.begin(hook.ctx, &.{ .rewind = true }, sink);
+    try std.testing.expect(!a.learner.marked and a.learner.rewound);
 }
 const NoLinks = struct {
     pub fn linked(_: std.mem.Allocator, _: std.Io, _: []const u8) !?[]const u8 {

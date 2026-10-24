@@ -4,7 +4,7 @@ const whole = @import("whole.zig");
 pub fn failed(l: anytype, operation: anytype, e: anyerror, comptime sites: bool, comptime pocket: bool) learner.Step {
     if (sites and operation == .steps) l.trainer.?.sites.restore();
     var stale = false;
-    if (pocket and l.whole and l.pocketed and operation != .retire and operation != .save) {
+    if (pocket and l.whole and l.pocketed and operation != .retire and operation != .save and operation != .mark and operation != .rewind) {
         l.pockets.undo(l.trainer.?, whole.Hooks(@TypeOf(l.*).Host){ .b = l.b, .gpa = l.gpa, .io = l.io }) catch {
             stale = true;
         };
