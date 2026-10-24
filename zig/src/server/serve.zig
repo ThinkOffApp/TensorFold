@@ -201,12 +201,28 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
     defer srv.deinit();
     srv.recall = s.recall;
     if (args.notes) |path| {
+        const refuse = @import("notes_refuse.zig");
+        const writers: refuse.Writers = .{
+            .recall = srv.recall != null,
+            .compact_memory = config.compact_memory != null,
+            .request_log = config.request_log != null,
+            .cortheon = srv.cortheon != null,
+            .speech = srv.info.speech != null,
+        };
+        if (refuse.flags(writers) orelse refuse.engine(srv.engine, srv.info)) |why| {
+            std.debug.print("tensorfold: --notes refused on {s}: {s}; an erase here could not complete\n", .{ if (s.model_type.len > 0) s.model_type else s.served, why });
+            return 2;
+        }
         var why: []const u8 = "";
         srv.notes = @import("notes/storage.zig").Storage.open(gpa, io, path, s.text, s.model_dir, &why) catch |e| {
             std.debug.print("tensorfold: --notes {s}: {s} ({s})\n", .{ path, why, @errorName(e) });
             return 2;
         };
         const notes = srv.notes.?;
+        if (refuse.history(notes.journal.?.runs.items)) |old| {
+            std.debug.print("tensorfold: --notes {s} refused: {s}; erase cannot show that start's copies gone, so start from a new snapshot journal\n", .{ path, old });
+            return 2;
+        }
         notes.beginRun(a, .{
             .learn = args.learn or args.learn_conversations,
             .recall = srv.recall != null,

@@ -11,6 +11,27 @@ writer is refused from startup, including before the first write. The journal
 uses format 3 for stable identities and retry work; older formats are upgraded
 under the writer lock, and older binaries refuse the new format. Without `--notes`, `/v1/notes` routes return 404.
 
+`--notes` does not start beside a writer whose copies erase does not reach.
+Startup refuses it, naming the cause, with `--recall`, `--compact-memory`,
+`TENSORFOLD_REQUEST_LOG`, `--cortheon` or a speech model. It also refuses an
+engine that cannot erase its prompt states: startup asks the engine to forget a
+span no tokenizer emits, and refuses when the hook is missing or when a peer
+does not acknowledge dropped states (GLM-DSA, expert-parallel GLM, a
+tensor-parallel pair). A journal that recorded an earlier start with one of
+those writers on is refused too.
+
+On an accepted configuration, erase does not yet fully reach these places, and
+its reply names them with `complete: false` when they may hold the note:
+
+- learned prompt states with `--learn` or `--learn-conversations`: erase
+  removes matching states and saved conversations under the current root, but
+  cannot show earlier roots, unowned learned folders or token traces clear;
+- Sliding Weights with `--slide` (or an existing pocket): the graph and saved
+  weights may keep the fact;
+- stored Responses (`/v1/responses` with `store`), kept in memory;
+- requests queued or running at the time, which are counted, not cancelled;
+- copies outside the server, such as a client's own history.
+
 The routes use the server's existing authentication:
 
 | Request | Behavior |
@@ -52,12 +73,11 @@ when other places remain unresolved. Then `cleanup_complete` is true and
 DELETE returns 404 and can never target a different note. Erasing a take-back can
 also make a later write redundant; that write is explicitly listed as removed.
 
-The reply names unresolved places, including Recall prompt/reply records,
-engine token traces, running requests, stored Responses,
-compaction files, request logs and learned weights. Learned-folder diagnostics
-cover only the current configured root; they do not prove that earlier roots or
-another server's files are clear. Enabling a learned writer therefore remains
-conservative even after the current conversation states have been removed.
+The reply's place list also covers the refused writers (Recall prompt/reply
+records, compaction files, request logs), so a lifted refusal reports its place
+from the first erase. Learned-folder diagnostics cover only the current
+configured root; they do not prove that earlier roots or another server's files
+are clear.
 
 Erase matching is linear for engine requests of at most 64k tokens. Sibling
 inspection stops at 16 folders and refuses indexes over 8 MiB, reporting an
