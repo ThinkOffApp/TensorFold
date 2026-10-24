@@ -11,7 +11,7 @@ const testing = std.testing;
 const Started = struct {
     code: u8 = 255,
     fn run(x: *Started, args: @import("cli.zig").Args, setup: serve.Setup) void {
-        x.code = serve.run(testing.allocator, testing.io, args, setup);
+        @atomicStore(u8, &x.code, serve.run(testing.allocator, testing.io, args, setup), .release);
     }
 };
 
@@ -50,24 +50,40 @@ test "--notes is refused with a writer or an engine erase cannot clear, before i
         try env.put("TENSORFOLD_REQUEST_LOG", try std.fs.path.join(a, &.{ dir, "requests.jsonl" }));
         defer _ = env.swapRemove("TENSORFOLD_REQUEST_LOG");
         var echo: Echo = .{};
-        try testing.expectEqual(@as(u8, 2), serve.run(testing.allocator, io, args, .{ .engine = echo.engine(), .text = bytes.text(), .served = "echo", .model_dir = dir, .environ = &env }));
+        try refused(args, .{ .engine = echo.engine(), .text = bytes.text(), .served = "echo", .model_dir = dir, .environ = &env });
         try testing.expectEqual(size, (try tmp.dir.statFile(io, "snap.json.journal", .{})).size);
     }
     // an engine with a prompt cache and no prompt-state erase: refused
     {
         var echo: Echo = .{ .cache = true };
-        try testing.expectEqual(@as(u8, 2), serve.run(testing.allocator, io, args, .{ .engine = echo.engine(), .text = bytes.text(), .served = "echo", .model_dir = dir, .environ = &env }));
+        try refused(args, .{ .engine = echo.engine(), .text = bytes.text(), .served = "echo", .model_dir = dir, .environ = &env });
         try testing.expectEqual(size, (try tmp.dir.statFile(io, "snap.json.journal", .{})).size);
     }
     // a peer that does not acknowledge dropped states: refused
     {
         var echo: Echo = .{ .cache = true, .supports_forget = true, .forgotten = .{ .held = 1 } };
-        try testing.expectEqual(@as(u8, 2), serve.run(testing.allocator, io, args, .{ .engine = echo.engine(), .text = bytes.text(), .served = "echo", .model_dir = dir, .environ = &env }));
+        try refused(args, .{ .engine = echo.engine(), .text = bytes.text(), .served = "echo", .model_dir = dir, .environ = &env });
         try testing.expectEqual(size, (try tmp.dir.statFile(io, "snap.json.journal", .{})).size);
     }
     // the control: an accepted start opens the store and appends its run, so the size check can fail
     try accepted(a, args, .{ .engine = clear.engine(), .text = bytes.text(), .served = "echo", .model_dir = dir, .environ = &env, .on_listen = onListen }, false);
     try testing.expect((try tmp.dir.statFile(io, "snap.json.journal", .{})).size > size);
+}
+
+/// serve.run on its own thread must return 2 within the deadline; a start that serves instead is stopped and fails.
+fn refused(args: @import("cli.zig").Args, setup: serve.Setup) !void {
+    const io = testing.io;
+    var x: Started = .{};
+    const t = try std.Thread.spawn(.{}, Started.run, .{ &x, args, setup });
+    var waited: u32 = 0;
+    while (@atomicLoad(u8, &x.code, .acquire) == 255 and waited < 20_000) : (waited += 10) std.Io.sleep(io, .fromMilliseconds(10), .awake) catch {};
+    if (@atomicLoad(u8, &x.code, .acquire) == 255) {
+        try posix.raise(.TERM); // it started serving: stop it so the test fails instead of hanging
+        t.join();
+        return error.NotRefused;
+    }
+    t.join();
+    try testing.expectEqual(@as(u8, 2), x.code);
 }
 
 /// serve.run on its own thread until it listens; it lists notes (and writes one), then SIGTERM stops it cleanly.
@@ -76,7 +92,7 @@ fn accepted(a: std.mem.Allocator, args: @import("cli.zig").Args, setup: serve.Se
     drain.listen_port.store(0, .release);
     var x: Started = .{};
     const t = try std.Thread.spawn(.{}, Started.run, .{ &x, args, setup });
-    while (drain.listen_port.load(.acquire) == 0 and x.code == 255) std.Io.sleep(io, .fromMilliseconds(2), .awake) catch {};
+    while (drain.listen_port.load(.acquire) == 0 and @atomicLoad(u8, &x.code, .acquire) == 255) std.Io.sleep(io, .fromMilliseconds(2), .awake) catch {};
     try testing.expectEqual(@as(u8, 255), x.code); // listening, not refused
     const port = drain.listen_port.load(.acquire);
     try testing.expectEqual(@as(u16, 200), (try drain.request(a, io, port, "GET", "/v1/notes", "")).status);
