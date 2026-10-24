@@ -196,3 +196,13 @@ test {
     _ = @import("request_provenance_test.zig");
     _ = @import("request_cost_test.zig");
 }
+
+test {
+    _ = @import("notes_promote_test.zig");
+    _ = @import("notes_promote_alone_test.zig");
+    _ = @import("notes_promote_spill_test.zig");
+    _ = @import("notes_promote_thinking_test.zig");
+    _ = @import("notes_promote_judge_test.zig");
+    _ = @import("notes_promote_judge_long_test.zig");
+    _ = @import("notes/promote_erase.zig");
+}

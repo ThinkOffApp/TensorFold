@@ -16,6 +16,8 @@ pub const LearnRequest = struct {
     save: bool = false, // every kept lesson written beside the model's shards, each with its router
     retire: []const Neuron = &.{}, // instead zero these neurons of facts a newer fact replaces
     unretire: bool = false, // instead put back the neurons the last retire zeroed (the newer fact was not learned)
+    mark: bool = false, // keep the whole promotion night separately from per-lesson checkpoints
+    rewind: bool = false, // restore the saved promotion night and release its mark
     // instead zero these neurons' input weights (a fact deleted on request), kept to put back
     forget: []const Neuron = &.{},
     // instead put back, bit for bit, what the last forget changed (a kept fact did not come back)
