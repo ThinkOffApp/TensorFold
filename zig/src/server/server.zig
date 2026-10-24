@@ -139,6 +139,7 @@ pub const Server = struct {
     notes_mutex: std.Io.Mutex = .init,
     /// The facts the learner was taught and whether the weights recall them.
     slide: slide_graph.Graph,
+    promotion_pending: std.atomic.Value(bool) = .init(false),
     teacher: slide_lesson.Teacher, // what every Sliding Weights lesson shares: keep prompts, the turn's end
     /// The folder's snapshot made or hashed whole by this process (under teacher.learning): later lessons trust it.
     snapshot_checked: bool = false,

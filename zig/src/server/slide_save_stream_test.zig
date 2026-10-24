@@ -128,3 +128,38 @@ test "lesson stream: a closed writer still saves on cleanup, including errors" {
         try t.expect(!out.open);
     }
 }
+
+test "promotion: internal teaching records a failed save without an HTTP stream" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    var text: ByteText = .{};
+    var model: Model = .{ .fail = true };
+    model.release.set(t.io);
+    const srv = try Server.init(t.allocator, t.io, model.engine(), text.text(), .{ .served_name = "m", .model_ids = &.{"m"} }, null);
+    defer srv.deinit();
+    var out: slide.Out = .{ .conn = null, .a = arena.allocator() };
+    slide.finishLearning(srv, arena.allocator(), &out);
+    try t.expect(out.failed != null);
+    try t.expectEqualStrings("save sentinel failure", out.failed.?);
+    try t.expect(!out.open);
+    try t.expectEqual(@as(usize, 1), model.saves.load(.monotonic));
+}
+
+test "promotion: a graph write failure refuses the model save before any shard is changed" {
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var text: ByteText = .{};
+    var model: Model = .{ .fail = false };
+    model.release.set(t.io);
+    const srv = try Server.init(t.allocator, t.io, model.engine(), text.text(), .{ .served_name = "m", .model_ids = &.{"m"} }, null);
+    defer srv.deinit();
+    srv.slide.deinit();
+    const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/graph.json", .{tmp.sub_path});
+    srv.slide = @import("slide_graph.zig").Graph.init(t.allocator, t.io, path);
+    srv.slide.fault = .write;
+    try t.expect(slide.saveAll(srv, a) != null);
+    try t.expectEqual(@as(usize, 0), model.saves.load(.monotonic));
+}

@@ -91,13 +91,18 @@ pub const Teacher = struct {
         t.bank = null;
     }
 
+    pub const keepNow = @import("slide_teacher_marks.zig").keep;
+    pub const putBack = @import("slide_teacher_marks.zig").restore;
+
     pub fn deinit(t: *Teacher) void {
         t.arena.deinit();
     }
 };
 
+pub const Kept = @import("slide_teacher_marks.zig").Kept;
+
 /// A bank question, the model's first answer to it, and that answer as an example.
-const Banked = struct { question: []const u8, before: []const u8, ex: api.Example };
+pub const Banked = struct { question: []const u8, before: []const u8, ex: api.Example };
 
 /// The keep prompts and bank questions (by index) a lesson's facts answer: what a kept lesson changes.
 pub const Stale = struct { keep: []const usize = &.{}, bank: []const usize = &.{} };
@@ -123,7 +128,7 @@ pub fn refresh(srv: *Server, cx: *Cx, teacher: *Teacher, stale: Stale, gone: any
 }
 
 /// The keep and personal prompts in one other language, with the model's answers to the keep prompts, written once.
-const Local = struct { keep: []const api.Example, personal: []const []const u8 };
+pub const Local = struct { keep: []const api.Example, personal: []const []const u8 };
 
 /// Keep and personal prompts in the facts' language `name` (null when the model gives no translation).
 pub fn local(srv: *Server, cx: *Cx, teacher: *Teacher, name: []const u8, end: []const u32, gone: anytype) !?Local {

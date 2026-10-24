@@ -433,26 +433,24 @@ pub const Graph = struct {
         try o.put(a, "trace", .{ .array = rounds });
     }
 
-    /// Write the file through a renamed temporary; a failed write keeps the old file (called under the lock).
+    /// Best-effort publication; transactional callers use persist and handle its failure (called under the lock).
     fn save(g: *Graph) void {
         g.persist() catch {};
     }
 
-    /// `save` with its failure returned, the old file then kept whole (called under the lock).
+    /// Publish whole graph bytes and report file or folder sync failure (called under the lock).
     pub fn persist(g: *Graph) !void {
         const path = g.path orelse return;
         var scratch = std.heap.ArenaAllocator.init(g.gpa);
         defer scratch.deinit();
         const a = scratch.allocator();
         const body = try g.document(a, false);
-        const tmp = try std.fmt.allocPrint(a, "{s}.tmp", .{path});
         if (std.fs.path.dirname(path)) |dir| try Io.Dir.cwd().createDirPath(g.io, dir);
         const fault: Fault = if (builtin.is_test) g.fault else .none;
         if (builtin.is_test) g.fault = .none;
         if (fault == .write) return error.GraphWrite;
-        try Io.Dir.cwd().writeFile(g.io, .{ .sub_path = tmp, .data = body });
         if (fault == .rename) return error.GraphRename;
-        try Io.Dir.cwd().rename(tmp, Io.Dir.cwd(), path, g.io);
+        try @import("notes/promote_json.zig").writeFile(a, path, body);
     }
 
     fn load(g: *Graph) !void {

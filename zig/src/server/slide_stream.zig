@@ -7,9 +7,11 @@ const errors = @import("errors.zig");
 const Conn = @import("http_conn.zig").Conn;
 
 pub const Out = struct {
-    conn: *Conn,
+    conn: ?*Conn,
     a: std.mem.Allocator,
     open: bool = true,
+    failed: ?[]const u8 = null,
+    results: std.ArrayList(struct { id: u32, recalled: bool }) = .empty,
     io: ?std.Io = null,
     mutex: std.Io.Mutex = .init,
     ended: std.Io.Event = .unset,
@@ -22,6 +24,7 @@ pub const Out = struct {
 
     /// Start before any model generation; failure refuses the lesson instead of silently losing its heartbeat.
     pub fn start(o: *Out, io: std.Io, interval_ms: i64) !void {
+        if (o.conn == null) return error.NoStream;
         o.io = io;
         o.interval_ms = interval_ms;
         o.thread = try std.Thread.spawn(.{}, beat, .{o});
@@ -52,7 +55,7 @@ pub const Out = struct {
             if (o.ended.isSet() or !o.open) return;
             var buf: [256]u8 = undefined;
             const frame = std.fmt.bufPrint(&buf, "event: progress\ndata: {{\"id\":{d},\"phase\":\"{s}\",\"at\":{d},\"of\":{d},\"heartbeat\":true}}\n\n", .{ o.id, o.phase, o.at, o.of }) catch unreachable;
-            o.conn.writeAll(frame) catch {
+            o.conn.?.writeAll(frame) catch {
                 o.open = false;
                 return;
             };
@@ -62,7 +65,7 @@ pub const Out = struct {
     pub fn check(o: *Out) bool {
         o.lock();
         defer o.unlock();
-        return !o.open or o.conn.peerGone();
+        return !o.open or (if (o.conn) |c| c.peerGone() else false);
     }
 
     pub fn stage(o: *Out, id: u32, phase: []const u8) void {
@@ -88,6 +91,10 @@ pub const Out = struct {
     pub fn event(o: *Out, kind: []const u8, fields: anytype) void {
         o.lock();
         defer o.unlock();
+        if (comptime @hasField(@TypeOf(fields), "message")) {
+            if (std.mem.eql(u8, kind, "failed")) o.failed = fields.message;
+        }
+        const conn = o.conn orelse return;
         if (!o.open) return;
         const obj = json.newObject(o.a) catch return;
         inline for (@typeInfo(@TypeOf(fields)).@"struct".field_names) |name| {
@@ -100,14 +107,20 @@ pub const Out = struct {
             };
             obj.put(o.a, name, value) catch return;
         }
-        sse.event(o.conn, o.a, kind, .{ .object = obj }) catch {
+        sse.event(conn, o.a, kind, .{ .object = obj }) catch {
             o.open = false;
+        };
+    }
+
+    pub fn record(o: *Out, id: u32, recalled: bool) void {
+        o.results.append(o.a, .{ .id = id, .recalled = recalled }) catch {
+            o.failed = "out of memory recording the lesson result";
         };
     }
 
     pub fn done(o: *Out) void {
         o.stop();
-        if (o.open) sse.done(o.conn) catch {};
+        if (o.open) if (o.conn) |conn| sse.done(conn) catch {};
         o.open = false;
     }
 

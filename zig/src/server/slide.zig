@@ -21,37 +21,8 @@ const Server = @import("server.zig").Server;
 const Conn = @import("http_conn.zig").Conn;
 const Allocator = std.mem.Allocator;
 
-const page = @embedFile("slide.html");
-
-/// The page's scripts, each served at /slide/NAME.
-const scripts = [_]struct { []const u8, []const u8 }{
-    .{ "data.js", @embedFile("slide_data.js") },
-    .{ "panel.js", @embedFile("slide_panel.js") },
-    .{ "flat.js", @embedFile("slide_flat.js") },
-    .{ "scene.js", @embedFile("slide_scene.js") },
-    .{ "tower.js", @embedFile("slide_tower.js") },
-    .{ "fx.js", @embedFile("slide_fx.js") },
-    .{ "bloom.js", @embedFile("slide_bloom.js") },
-    .{ "layout.js", @embedFile("slide_layout.js") },
-};
-
-pub fn view(_: *Server, conn: *Conn, _: Allocator) void {
-    send(conn, "text/html; charset=utf-8", page);
-}
-
-/// One of the page's scripts by name, else the unknown path.
-pub fn script(_: *Server, conn: *Conn, a: Allocator, name: []const u8) void {
-    for (scripts) |x| if (std.mem.eql(u8, x[0], name)) return send(conn, "text/javascript; charset=utf-8", x[1]);
-    routes.unknown(conn, a);
-}
-
-fn send(conn: *Conn, kind: []const u8, body: []const u8) void {
-    conn.startResponse(200, null) catch return;
-    conn.addHeader("Content-Type", kind) catch return;
-    var len: [24]u8 = undefined;
-    conn.addHeader("Content-Length", std.fmt.bufPrint(&len, "{d}", .{body.len}) catch return) catch return;
-    conn.finish(body) catch {};
-}
+pub const view = @import("slide_view.zig").view;
+pub const script = @import("slide_view.zig").script;
 
 pub fn graph(srv: *Server, conn: *Conn, a: Allocator) void {
     const body = srv.slide.render(a, folder(srv)) catch return refuse(conn, a, 500, "out of memory");
@@ -74,6 +45,7 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
         .ok => |v| v,
         .err => |message| return refuse(conn, a, 400, message),
     };
+    if (srv.promotion_pending.load(.acquire)) return refuse(conn, a, 503, promotion_recovery);
     const text = body.strField("text") orelse return refuse(conn, a, 400, "text is required");
     const source = body.strField("source") orelse "chat";
     const supplied = supplied_questions.read(a, body) catch |e| switch (e) {
@@ -90,13 +62,28 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
     }
     srv.teacher.learning.lockUncancelable(srv.io);
     defer srv.teacher.learning.unlock(srv.io);
+    if (srv.promotion_pending.load(.acquire)) return refuse(conn, a, 503, promotion_recovery);
     if (!keepOriginals(srv, conn, a)) return;
     sse.open(conn) catch return;
     var out: Out = .{ .conn = conn, .a = a };
     var cx: errors.Cx = .{ .a = a };
     defer out.stop();
     out.start(srv.io, 5000) catch |e| return out.fail(&cx, e);
-    const gone = &out;
+    teachUsing(srv, a, text, source, supplied, &out, &out);
+}
+
+/// Promotion learns through the same lesson checks and save handling, without opening an HTTP stream.
+pub fn teachText(srv: *Server, a: Allocator, text: []const u8, source: []const u8, gone: anytype, out: *Out) void {
+    if (!keepOriginals(srv, null, a)) {
+        out.event("failed", .{ .message = "the original model files could not be kept before promotion" });
+        out.done();
+        return;
+    }
+    teachUsing(srv, a, text, source, &.{}, gone, out);
+}
+
+fn teachUsing(srv: *Server, a: Allocator, text: []const u8, source: []const u8, supplied: []const []const u8, gone: anytype, out: *Out) void {
+    var cx: errors.Cx = .{ .a = a };
     const facts = found.facts(srv, &cx, text, source, gone) catch |e| return out.fail(&cx, e);
     if (facts.len == 0) {
         out.event("failed", .{ .message = "no facts found in the text: nothing was learned" });
@@ -106,9 +93,14 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
     const ids = a.alloc(u32, facts.len) catch return;
     for (facts, ids) |fact, *id| {
         id.* = srv.slide.add(fact, source, now(srv));
+        if (id.* == 0) {
+            out.event("failed", .{ .message = "out of memory recording the fact before learning" });
+            out.done();
+            return;
+        }
         out.event("fact", .{ .id = id.*, .text = fact });
     }
-    defer finishLearning(srv, a, &out);
+    defer finishLearning(srv, a, out);
     // facts learned before this server started asked once, so a fact a lesson finds forgotten is one it made forget
     if (recheck.check(srv, &cx, 0, .unjudged, &.{}, gone)) |before| {
         for (before) |r| out.event("recheck", .{ .id = @as(u32, 0), .fact = r.fact.id, .text = r.fact.text, .recalled = r.recalled, .was = r.recalled });
@@ -126,17 +118,17 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
         const document = !std.mem.eql(u8, source, "chat") or !wording.firstPerson(fact);
         const gave = if (document) &.{} else giveWay(srv, a, &cx, fact, id, gone);
         const plan = (teach.lesson(srv, &cx, &srv.teacher, &.{fact}, &kept, document, facts, supplied, gone) catch |e| {
-            missed(srv, &out, id, words(&cx, e));
+            missed(srv, out, id, words(&cx, e));
             putBack(srv, a, gave, id);
             continue;
         }) orelse {
-            missed(srv, &out, id, "too few clean answers to learn from");
+            missed(srv, out, id, "too few clean answers to learn from");
             putBack(srv, a, gave, id);
             continue;
         };
         log.line("slide: fact {d}'s lesson written in {d:.1} s", .{ id, seconds(srv, written) });
         srv.slide.asked(id, expected(a, plan));
-        const result = rounds(srv, a, &cx, plan, gone, id, &out);
+        const result = rounds(srv, a, &cx, plan, gone, id, out);
         const back = result.recalled.len == 1 and result.recalled[0];
         srv.teacher.ended(back); // a lesson given up leaves the next one's checks as if it never ran
         if (!back) putBack(srv, a, gave, id);
@@ -145,6 +137,7 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
         srv.slide.mark(id, if (back) .learned else .missed);
         if (back) talks.chainAfter(srv, id, plan);
         if (back and document) for (plan.held) |h| if (h.subject.len > 0 and h.context.len == 0) srv.teacher.remember(h.subject, h.question, h.answer) catch {};
+        out.record(id, back);
         if (result.why) |why| {
             out.event("learned", .{ .id = id, .recalled = back, .steps = result.steps, .message = why });
         } else out.event("learned", .{ .id = id, .recalled = back, .steps = result.steps });
@@ -161,13 +154,13 @@ pub fn finishLearning(srv: *Server, a: Allocator, out: *Out) void {
 }
 
 /// The folder's original files kept before its first lesson or delete, else refused with why; true to go on.
-pub fn keepOriginals(srv: *Server, conn: *Conn, a: Allocator) bool {
+pub fn keepOriginals(srv: *Server, conn: ?*Conn, a: Allocator) bool {
     const dir = folder(srv) orelse return true;
     var why: []const u8 = "";
     const o: api.originals.Options = .{ .checked = srv.snapshot_checked };
     const kept = api.originals.keep(srv.io, dir, srv.config.slide_graph, o, a, &why) catch |e| {
         log.line("slide: {s}", .{why});
-        refuse(conn, a, if (e == error.NoSpace) 507 else 500, why);
+        if (conn) |c| refuse(c, a, if (e == error.NoSpace) 507 else 500, why);
         return false;
     };
     srv.snapshot_checked = true;
@@ -377,6 +370,10 @@ fn takeOut(srv: *Server, a: Allocator, out: *Rounds, id: u32, why: []const u8) v
 
 /// Every kept lesson into the model's shards, timed, with the shards it changed; why it failed, or null.
 pub fn saveAll(srv: *Server, a: Allocator) ?[]const u8 {
+    srv.slide.mutex.lockUncancelable(srv.io);
+    const recorded = if (srv.slide.persist()) |_| true else |_| false;
+    srv.slide.mutex.unlock(srv.io);
+    if (!recorded) return "the fact graph could not be committed before the model's weights";
     srv.slide.saving(folder(srv));
     const began = now(srv);
     const failed: ?[]const u8 = switch (run(srv, a, &.{ .save = true }, 0)) {
@@ -426,6 +423,7 @@ fn putBack(srv: *Server, a: Allocator, olds: []const slide_graph.Fact, id: u32) 
 fn missed(srv: *Server, out: *Out, id: u32, why: []const u8) void {
     srv.slide.note(id, why);
     srv.slide.mark(id, .missed);
+    out.record(id, false);
     out.event("learned", .{ .id = id, .recalled = false, .message = why });
 }
 
@@ -443,6 +441,7 @@ pub fn run(srv: *Server, a: Allocator, request: *const api.LearnRequest, id: u32
 
 /// A lesson with progress sent to its open stream as well as its graph.
 pub fn runReported(srv: *Server, a: Allocator, request: *const api.LearnRequest, id: u32, out: ?*Out) Outcome {
+    if (request.train.len > 0 and srv.promotion_pending.load(.acquire)) return .{ .failed = promotion_recovery };
     var box: Box = .{ .io = srv.io, .gpa = srv.gpa };
     defer box.deinit();
     srv.engine.learn(request, box.sink()) catch |e| return .{ .refused = e };
@@ -474,6 +473,12 @@ pub fn runReported(srv: *Server, a: Allocator, request: *const api.LearnRequest,
         if (finished) return outcome;
     }
 }
+
+pub const Mark = @import("slide_night.zig").Mark;
+pub const mark = @import("slide_night.zig").mark;
+pub const rewind = @import("slide_night.zig").rewind;
+pub const retire = @import("slide_night.zig").retire;
+pub const promotion_recovery = "promotion cleanup is incomplete; new lessons wait for its saved state to be reconciled";
 
 pub const Out = @import("slide_stream.zig").Out;
 
