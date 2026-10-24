@@ -127,7 +127,12 @@ pub const Backend = struct {
         if (b.p.rewind_pending) return error.RewindPending;
         _ = b.p.mark_arena.reset(.retain_capacity);
         b.p.marked = null;
-        b.p.marked = slide.mark(b.srv(), b.p.mark_arena.allocator()) orelse return error.MarkRefused;
+        const a = b.p.mark_arena.allocator();
+        b.p.mark_pocket = try a.dupe(promote.Neuron, b.p.state.pocket);
+        const facts = try a.alloc(@typeInfo(@TypeOf(b.p.mark_facts)).pointer.child, b.p.state.facts.items.len);
+        for (b.p.state.facts.items, facts) |f, *copy| copy.* = .{ .key = try a.dupe(u8, f.key), .neurons = try a.dupe(promote.Neuron, f.neurons) };
+        b.p.mark_facts = facts;
+        b.p.marked = slide.mark(b.srv(), a) orelse return error.MarkRefused;
     }
 
     /// The pocket, graph and teacher put back as the last mark found them and saved; refused without a mark.
@@ -138,6 +143,18 @@ pub const Backend = struct {
             b.control_failed = true;
             return error.RewindRefused;
         }
+        const sa = b.p.state.alloc();
+        const pocket = try sa.dupe(promote.Neuron, b.p.mark_pocket);
+        const restored = try sa.alloc([]const promote.Neuron, b.p.mark_facts.len);
+        for (b.p.mark_facts, restored) |f, *ns| ns.* = try sa.dupe(promote.Neuron, f.neurons);
+        for (b.p.state.facts.items) |*f| {
+            f.neurons = &.{};
+            for (b.p.mark_facts, restored) |old, ns| if (std.mem.eql(u8, old.key, f.key)) {
+                f.neurons = ns;
+                break;
+            };
+        }
+        b.p.state.pocket = pocket;
         b.control_failed = false;
         b.p.marked = null;
         b.p.rewind_pending = false;

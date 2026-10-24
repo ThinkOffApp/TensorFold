@@ -68,6 +68,7 @@ pub const Case = struct {
     id: i64,
     key: []const u8,
     control_key: []const u8,
+    control_id: i64,
     path: []const u8,
 
     pub fn init(a: std.mem.Allocator, fact_status: promote.Status) !Case {
@@ -116,7 +117,7 @@ pub const Case = struct {
         try testing.expect(std.mem.indexOf(u8, p.report, marker) != null);
         const seeded = p.state.find(key).?;
         try testing.expect(seeded.ask != null and seeded.probes.len > 0 and seeded.neighbours.len > 0 and seeded.pair != null);
-        return .{ .r = r, .p = p, .learner = learner, .a = a, .id = added.value.get("id").?.int64().?, .key = key, .control_key = control_key, .path = path };
+        return .{ .r = r, .p = p, .learner = learner, .a = a, .id = added.value.get("id").?.int64().?, .key = key, .control_key = control_key, .control_id = other.value.get("id").?.int64().?, .path = path };
     }
     pub fn deinit(c: *Case) void {
         promoter.Promoter.fail_persist = false;
@@ -134,6 +135,11 @@ pub const Case = struct {
         try testing.expectEqualStrings(control_text, f.text);
         try testing.expectEqual(@as(usize, 1), f.neurons.len);
         try testing.expect(!c.learner.touched_control);
+        const current = for (try @import("notes/operations.zig").list(c.r.store(), c.a, false)) |v| {
+            if (std.mem.eql(u8, v.source orelse "", c.control_key)) break v;
+        } else return error.UnrelatedNoteLost;
+        try testing.expectEqual(c.control_id, @as(i64, current.id));
+        try testing.expectEqualStrings(control_text, current.text);
     }
     fn fieldsScrubbed(c: *Case) !void {
         try c.controlIntact();

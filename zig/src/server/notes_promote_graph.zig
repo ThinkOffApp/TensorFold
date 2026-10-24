@@ -80,6 +80,7 @@ pub fn capture(p: *np.Promoter, keys: []const []const u8) !void {
     g.mutex.lockUncancelable(g.io);
     defer g.mutex.unlock(g.io);
     const a = s.alloc();
+    var bound = false;
     for (g.facts.items) |*row| {
         if (row.promotion_key.len == 0) {
             for (s.facts.items) |f| if (includes(keys, f.key)) {
@@ -88,6 +89,7 @@ pub fn capture(p: *np.Promoter, keys: []const []const u8) !void {
                 } else false;
                 if (overlaps) {
                     row.promotion_key = try g.arena.allocator().dupe(u8, f.key);
+                    bound = true;
                     break;
                 }
             };
@@ -100,6 +102,10 @@ pub fn capture(p: *np.Promoter, keys: []const []const u8) !void {
             .status = .freed,
         });
         const f = s.find(row.promotion_key).?;
+        const missing = for (row.neurons) |n| {
+            if (!promote.has(f.neurons, n) or !promote.has(s.pocket, n)) break true;
+        } else false;
+        if (!missing) continue;
         var ns: std.ArrayList(promote.Neuron) = .empty;
         try ns.appendSlice(a, f.neurons);
         var pocket: std.ArrayList(promote.Neuron) = .empty;
@@ -111,7 +117,7 @@ pub fn capture(p: *np.Promoter, keys: []const []const u8) !void {
         f.neurons = ns.items;
         s.pocket = pocket.items;
     }
-    try g.persist();
+    if (bound) try g.persist();
 }
 
 /// Under teacher.learning, take ownership of the stopped lesson before discarding its open text.
@@ -159,8 +165,13 @@ pub fn lost(p: *np.Promoter) bool {
     g.mutex.lockUncancelable(g.io);
     defer g.mutex.unlock(g.io);
     for (g.facts.items) |row| {
-        if (row.promotion_key.len == 0 or (row.state != .deleted and row.state != .deleting)) continue;
-        const f = p.state.find(row.promotion_key) orelse continue;
+        if (row.promotion_key.len == 0) continue;
+        const f = p.state.find(row.promotion_key) orelse {
+            if (row.neurons.len > 0) return true;
+            continue;
+        };
+        for (row.neurons) |n| if (!promote.has(f.neurons, n) or !promote.has(p.state.pocket, n)) return true;
+        if (row.state != .deleted and row.state != .deleting) continue;
         if (f.erased or !promote.active(f.status)) continue;
         if (row.state == .deleting or f.neurons.len == 0) return true;
         for (f.neurons) |n| {
@@ -171,4 +182,34 @@ pub fn lost(p: *np.Promoter) bool {
         }
     }
     return false;
+}
+
+/// A physical rewind or missing state file can leave more owned neurons in the graph than the state records.
+pub fn recoverOwned(p: *np.Promoter) !void {
+    const a = p.state.alloc();
+    if (lost(p)) p.state.rebuild_next = true;
+    var keys: std.ArrayList([]const u8) = .empty;
+    {
+        const g = &p.srv.slide;
+        g.mutex.lockUncancelable(g.io);
+        defer g.mutex.unlock(g.io);
+        for (g.facts.items) |row| if (row.promotion_key.len > 0 and !includes(keys.items, row.promotion_key)) {
+            try keys.append(a, try a.dupe(u8, row.promotion_key));
+        };
+    }
+    var notes: ?[]ops.View = null;
+    for (keys.items) |key| if (p.state.find(key) == null) {
+        if (notes == null) notes = try p.snapshotNotes(a, false);
+        const current = for (notes.?) |n| {
+            if (std.mem.eql(u8, try np.keyOf(a, n), key)) break n;
+        } else null;
+        try p.state.facts.append(a, .{
+            .key = key,
+            .text = if (current) |n| try a.dupe(u8, n.text) else "",
+            .told = if (current) |n| n.told else 0,
+            .erased = current == null,
+            .status = if (current == null) .freed else .note,
+        });
+    };
+    try capture(p, keys.items);
 }

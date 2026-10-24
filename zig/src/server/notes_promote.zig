@@ -54,6 +54,8 @@ pub const Promoter = struct {
     state: promote.State, // nights and erases hold teacher.learning
     mark_arena: std.heap.ArenaAllocator,
     marked: ?slide.Mark = null,
+    mark_pocket: []const promote.Neuron = &.{},
+    mark_facts: []const struct { key: []const u8, neurons: []const promote.Neuron } = &.{},
     rewind_pending: bool = false,
     mu: std.Io.Mutex = .init, // everything below
     seen: std.StringHashMapUnmanaged(u32) = .empty, // key -> nights done when first in a block
@@ -326,6 +328,10 @@ pub const Promoter = struct {
         var b: Backend = .{ .p = p, .arena = arena.allocator() };
         if (p.rewind_pending) b.rewind(arena.allocator()) catch return;
         p.clearPublished();
+        @import("notes_promote_graph.zig").recoverOwned(p) catch {
+            p.srv.promotion_pending.store(true, .release);
+            return;
+        };
         if ((p.state.open == null or p.erasing.load(.acquire)) and !p.drainPending()) return;
         log.line("notes promotion: night {d} begins", .{p.state.nights_done + 1});
         const n = promote.nightOrRebuild(&p.state, arena.allocator(), &b) catch |e| {

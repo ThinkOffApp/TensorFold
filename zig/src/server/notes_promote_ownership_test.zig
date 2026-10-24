@@ -90,6 +90,7 @@ test "promotion ownership: a refused rewind retains its mark across backend and 
         defer scratch.deinit();
         var b: backend = .{ .p = c.p, .arena = scratch.allocator() };
         try b.mark(scratch.allocator());
+        c.p.state.find(c.key).?.neurons = c.p.state.find(c.control_key).?.neurons;
         c.learner.refuse = true;
         try t.expectError(error.RewindRefused, b.rewind(scratch.allocator()));
     }
@@ -98,6 +99,9 @@ test "promotion ownership: a refused rewind retains its mark across backend and 
     var retry: backend = .{ .p = c.p, .arena = a };
     try retry.rewind(a);
     try t.expect(!c.p.rewind_pending and c.p.marked == null);
+    try t.expectEqual(@as(usize, 0), c.p.state.find(c.key).?.neurons.len);
+    _ = try c.erase();
+    try t.expect(!c.learner.touched_control);
     retry.control_failed = true;
     c.r.srv.promotion_pending.store(true, .release);
     try retry.persist(&c.p.state);
@@ -228,4 +232,29 @@ test "promotion ownership: manual fact deletion restores Notes prompts and is de
     try t.expect((try c.p.requestBody(a, .{ .object = body })).get("notes_exclude") == null);
     try t.expect(c.r.srv.promotion_pending.load(.acquire));
     try t.expect(c.p.state.rebuild_next);
+}
+
+test "promotion ownership: completed-night state failures and missing state cannot orphan graph-owned neurons" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var c = try Case.init(a, .note);
+    defer c.deinit();
+    const id = try owned.add(&c.r.srv.slide, secret, "chat", c.key, 1);
+    const ns = [_]@import("notes/promote.zig").Neuron{.{ .layer = 3, .neuron = 1, .key = .reply }};
+    c.r.srv.slide.placed(id, &ns);
+    c.r.srv.slide.mark(id, .learned);
+    try t.expect(c.p.state.open == null);
+    try owned.recoverOwned(c.p);
+    try t.expect(c.p.state.rebuild_next);
+    try t.expect(@import("notes/promote.zig").has(c.p.state.pocket, ns[0]));
+    try t.expect(@import("notes/promote.zig").has(c.p.state.find(c.key).?.neurons, ns[0]));
+    _ = c.p.state.facts.orderedRemove(0);
+    try owned.recoverOwned(c.p);
+    try t.expectEqualStrings(secret, c.p.state.find(c.key).?.text);
+    try t.expect(!c.p.state.find(c.key).?.erased);
+    try t.expect(@import("notes/promote.zig").has(c.p.state.find(c.key).?.neurons, ns[0]));
+    const erased = try c.erase();
+    try t.expect(!erased.value.get("promotion").?.get("pending").?.bool);
+    try t.expect(!c.learner.live_slot);
 }
