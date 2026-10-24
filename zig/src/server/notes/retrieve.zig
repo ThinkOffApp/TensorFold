@@ -8,7 +8,7 @@ const who = @import("who.zig");
 const Storage = @import("storage.zig").Storage;
 const Allocator = std.mem.Allocator;
 
-/// A chat request's lookup: who first (the subjects the question names; none known, no block), or retrieve()'s.
+/// A chat request's lookup: who first (unknown subject: none; subject-free: normal lookup), or retrieve()'s.
 pub const Lookup = enum { who, plain };
 
 /// How one lookup is made: the hop (null: the snapshot's), and who first with the question's text.

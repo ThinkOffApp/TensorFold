@@ -13,6 +13,8 @@ NAME_LETTER = "A-Za-z\u00c0-\u00d6\u00d8-\u00f6\u00f8-\u04ff\u1e00-\u1eff"  # La
 NAME_RUN = re.compile(f"[{NAME_LETTER}]+(?:-[{NAME_LETTER}]+)*")
 CHAIN = 4  # a name is up to this many runs of name letters, one space apart
 LOOSE = "note:"  # the attribute prefix of a note the server wrote without sorting it
+QUERY_WORDS = frozenset('what which who where when why how is are was were do does did can could will would tell give show please'.split())
+ASCII_FOLD = str.maketrans('ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')
 
 
 CLAUSE_MARKS = ".,;:"  # a clause mark and a space open a later clause of a note
@@ -193,7 +195,9 @@ def lookup(nm, ns, owner, question, cap=None, past=None, exclude=()):
     notes = O.notes
     loose = {i for i in pool if notes[i]["entity"] == "me" and notes[i]["attribute"].startswith(LOOSE)}
     if not subj and not loose:
-        return res
+        if subject_cue(ns, O, question, pool):
+            return res
+        return ns.retrieve(owner, question, cap=cap, past=past, exclude=exclude)
 
     def notes_of(e):
         got = set(O.ent_cur.get(e, ()))
@@ -219,3 +223,21 @@ def lookup(nm, ns, owner, question, cap=None, past=None, exclude=()):
     hist = sorted((i for i in chosen if notes[i]["state"] != nm.CURRENT), key=lambda i: notes[i]["told"])
     res.update(ids=cur + hist, block=block, tokens=ntok, candidates=len(cand))
     return res
+
+
+def subject_cue(ns, O, question, pool):
+    if FIRST.search(TELL_ME.sub(' ', question)):
+        return True
+    own = {m.group().translate(ASCII_FOLD) for i in pool if O.notes[i]['entity'] == 'me'
+           for m in NAME_RUN.finditer(ns.line(O, i))}
+    for m in NAME_RUN.finditer(question):
+        word = m.group()
+        folded = word.translate(ASCII_FOLD)
+        if folded == 'my':
+            return True
+        raw = word.encode()
+        shaped = (65 <= raw[0] <= 90 or raw[0] >= 128) and any(97 <= c <= 122 or c >= 128 for c in raw)
+        possessive = question[m.end():].startswith(("'s", '\u2019s'))
+        if (shaped or possessive) and folded not in QUERY_WORDS and folded not in own:
+            return True
+    return False

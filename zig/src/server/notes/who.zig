@@ -1,4 +1,4 @@
-//! Who first: the notes of the subjects a question names and of the entities those notes name; nobody known, none.
+//! Who first: named subjects' notes, no block for an unknown subject, normal lookup for a subject-free question.
 const std = @import("std");
 const index = @import("index.zig");
 const lk = @import("lookup.zig");
@@ -64,7 +64,7 @@ const Found = struct {
 
 /// lookup.lookup() who first: the subjects' notes, one hop, and the unsorted notes it ranks, by its scores and weights.
 pub fn lookup(idx: *const Index, sc: *Scratch, text: anytype, question: []const u8, qids: []const u32, past: bool, cap: u32, exclude: []const u32, long: index.Long) Allocator.Error!lk.Packed {
-    _ = try lk.scored(idx, sc, qids, past, cap, exclude, long);
+    const plain_cands = try lk.scored(idx, sc, qids, past, cap, exclude, long);
     var f: Found = .{ .gpa = sc.gpa };
     defer f.deinit();
     try phrases(idx, sc, &f);
@@ -73,7 +73,12 @@ pub fn lookup(idx: *const Index, sc: *Scratch, text: anytype, question: []const 
     // the user's unsorted notes do not say whom they are about: those the plain lookup ranks are always candidates
     if (idx.self_entity) |me| for (sc.pool.items) |i| if (idx.entityAt(i) == me and isUnsorted(idx, i)) try sc.loose.append(sc.gpa, i);
     const long_n: u32 = @intCast(sc.long.items.len);
-    if (f.subjects.items.len == 0 and sc.loose.items.len == 0) return .{ .chosen = &.{}, .tokens = 0, .candidates = 0, .long = long_n };
+    if (f.subjects.items.len == 0 and sc.loose.items.len == 0) {
+        if (subjectCue(idx, sc, question)) return .{ .chosen = &.{}, .tokens = 0, .candidates = 0, .long = long_n };
+        sc.keys.clearRetainingCapacity();
+        for (sc.pool.items) |i| sc.keys.appendAssumeCapacity(lk.orderKey(sc.get(i), idx.rankAt(i)));
+        return lk.pack(idx, sc, cap, past, plain_cands, long_n);
+    }
     for (sc.pool.items) |i| sc.slot[i].pstamp = 0; // the pool is who first's candidates from here
     sc.pool.clearRetainingCapacity();
     for (f.subjects.items) |e| take(idx, sc, e, past);
@@ -93,6 +98,58 @@ pub fn lookup(idx: *const Index, sc: *Scratch, text: anytype, question: []const 
 
 fn isUnsorted(idx: *const Index, i: u32) bool {
     return std.mem.startsWith(u8, idx.attributeName(idx.pairAttribute(idx.pairAt(i))), unsorted);
+}
+
+/// Personal possessives or a name-shaped word not already present in the user's candidate notes name a subject.
+fn subjectCue(idx: *const Index, sc: *const Scratch, q: []const u8) bool {
+    if (speaks(q)) return true;
+    var i: usize = 0;
+    while (i < q.len) {
+        if (letterAt(q, i) == 0) {
+            i += 1;
+            continue;
+        }
+        const end = runEnd(q, i);
+        const w = q[i..end];
+        if (std.ascii.eqlIgnoreCase(w, "my")) return true;
+        const possessive = std.mem.startsWith(u8, q[end..], "'s") or std.mem.startsWith(u8, q[end..], "\u{2019}s");
+        if ((possessive or nameShaped(w)) and !queryWord(w) and !userWord(idx, sc, w)) return true;
+        i = end;
+    }
+    return false;
+}
+
+fn queryWord(w: []const u8) bool {
+    for ([_][]const u8{ "what", "which", "who", "where", "when", "why", "how", "is", "are", "was", "were", "do", "does", "did", "can", "could", "will", "would", "tell", "give", "show", "please" }) |word| {
+        if (std.ascii.eqlIgnoreCase(w, word)) return true;
+    }
+    return false;
+}
+
+fn nameShaped(w: []const u8) bool {
+    if (!std.ascii.isUpper(w[0]) and w[0] < 0x80) return false;
+    for (w) |c| if (std.ascii.isLower(c) or c >= 0x80) return true;
+    return false; // an acronym such as VAT is a topic, not a personal-name cue
+}
+
+/// Imported world facts can be filed under me: a place named in such a matching note is not an unknown person.
+fn userWord(idx: *const Index, sc: *const Scratch, word: []const u8) bool {
+    const me = idx.self_entity orelse return false;
+    for (sc.pool.items) |p| {
+        if (idx.entityAt(p) != me) continue;
+        const line = idx.lineAt(p);
+        var i: usize = 0;
+        while (i < line.len) {
+            if (letterAt(line, i) == 0) {
+                i += 1;
+                continue;
+            }
+            const end = runEnd(line, i);
+            if (std.ascii.eqlIgnoreCase(line[i..end], word)) return true;
+            i = end;
+        }
+    }
+    return false;
 }
 
 /// An entity's current notes (and for a question about the past every note of its pairs), excluded ones left out.

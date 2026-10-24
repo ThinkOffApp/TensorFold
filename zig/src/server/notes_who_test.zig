@@ -20,6 +20,25 @@ const l6_who_json = @embedFile("notes/testdata/l6_bytes_who.json");
 const l6s2_snapshot = @embedFile("notes/testdata/l6s2_bytes_snapshot.json");
 const l6s2_who_json = @embedFile("notes/testdata/l6s2_bytes_who.json");
 const empty_snapshot = @embedFile("notes/testdata/tb_empty_bytes_snapshot.json");
+const world_snapshot = @embedFile("notes/testdata/who_world_bytes_snapshot.json");
+
+test "who first: a subject-free question keeps an imported world fact, an unknown subject does not" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (rig.kinds) |kind| {
+        const r = try rig.Rig.initWithSnap(testing.allocator, kind, world_snapshot);
+        defer r.deinit();
+        const q = "What is the VAT rate in Exampleland?";
+        try testing.expectEqualSlices(u32, &.{1}, try idsOf(r, a, q, ""));
+        try testing.expectEqualSlices(u32, &.{1}, try idsOf(r, a, "Tell me the VAT rate in Exampleland.", ""));
+        try testing.expectEqualSlices(u32, try idsOf(r, a, q, ",\"notes_lookup\":\"plain\""), try idsOf(r, a, q, ""));
+        try testing.expectEqual(@as(usize, 0), (try idsOf(r, a, q, ",\"notes_exclude\":[1]")).len);
+        for ([_][]const u8{ "What is my cousin's VAT rate?", "What is Rafa's VAT rate?", "Tell me about Rafa.", "Rafa, what is the VAT rate?", "What is Zo\u{eb}'s VAT rate?" }) |unknown| {
+            try testing.expectEqual(@as(usize, 0), (try idsOf(r, a, unknown, "")).len);
+        }
+    }
+}
 
 /// One chat request's notes field, the reply checked to be a 200.
 fn notesOf(r: *rig.Rig, a: Allocator, question: []const u8, extra: []const u8) !json.Value {
@@ -50,13 +69,13 @@ fn written(r: *rig.Rig, a: Allocator, text: []const u8, subject: []const u8) !u3
     return @intCast(got.value.get("id").?.int64().?);
 }
 
-test "who first: a question that names nobody the store knows gets no block, today's lookup sends notes" {
+test "who first: an unknown subject gets no block, a subject-free question keeps normal lookup" {
     const r = try rig.Rig.initWithSnap(testing.allocator, .{}, snapshot);
     defer r.deinit();
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    for ([_][]const u8{ "What colour are my cousin's eyes?", "Tell me about Rafa.", "What is the weather like?", "Is my van taxed?" }) |q| {
+    for ([_][]const u8{ "What colour are my cousin's eyes?", "Tell me about Rafa.", "Is my van taxed?" }) |q| {
         const notes = try notesOf(r, a, q, "");
         try testing.expectEqualStrings("who", notes.strField("lookup").?);
         try testing.expectEqual(@as(usize, 0), notes.get("ids").?.array.len);
@@ -67,6 +86,8 @@ test "who first: a question that names nobody the store knows gets no block, tod
     }
     const cousin = try idsOf(r, a, "What colour are my cousin's eyes?", ",\"notes_lookup\":\"plain\"");
     try testing.expect(has(cousin, 2) and has(cousin, 10));
+    const general = "What is the weather like?";
+    try testing.expectEqualSlices(u32, try idsOf(r, a, general, ",\"notes_lookup\":\"plain\""), try idsOf(r, a, general, ""));
 }
 
 test "who first: a known subject's notes and the notes of the entities they name, no one else's" {
