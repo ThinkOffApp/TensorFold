@@ -49,7 +49,7 @@ test "promotion alone: every alone ask is recorded with its night, fact, questio
     try testing.expectEqual(promote.Status.promoted, status(&s, "w1"));
 }
 
-test "promotion alone: a probe record's JSON line: an alone ask's fields, and a regression probe's as before" {
+test "promotion alone: disk probe records retain verdict metadata and hashes for alone and regression asks" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -61,16 +61,21 @@ test "promotion alone: a probe record's JSON line: an alone ask's fields, and a 
     try testing.expectEqual(@as(i64, 7), v.get("night").?.int64().?);
     try testing.expectEqualStrings("alone", v.strField("kind").?);
     try testing.expectEqualStrings("s2", v.strField("key").?);
-    try testing.expectEqualStrings("Which colour are my cat's eyes?", v.strField("q").?);
+    try testing.expectEqualStrings(pjson.probe_format, v.strField("format").?);
+    try testing.expect(v.get("q") == null);
+    try testing.expectEqualStrings(&pjson.hashText("Which colour are my cat's eyes?"), v.strField("q_sha256").?);
     const ids = v.get("exclude").?.items().?;
     try testing.expectEqual(@as(usize, 2), ids.len);
     try testing.expectEqual(@as(i64, 10), ids[1].int64().?);
-    try testing.expectEqualStrings("Your cat's eyes are brown.", v.strField("reply").?);
-    try testing.expectEqualStrings("Your cat's eyes are green.", v.strField("ref").?);
+    try testing.expectEqualStrings(&pjson.hashText("Your cat's eyes are brown."), v.strField("reply_sha256").?);
+    try testing.expectEqualStrings(&pjson.hashText("Your cat's eyes are green."), v.strField("ref_sha256").?);
     try testing.expect(!v.get("ok").?.bool);
-    // a regression probe's line has the fields it always had, in their order
+    // Regression verdicts retain both reply hashes, so changes remain comparable without storing either reply.
     const old = try pjson.probeLine(a, .{ .night = 3, .kind = "fact", .q = "Q:dog", .before = "Luna", .after = "Bruno", .ok = false });
-    try testing.expectEqualStrings("{\"night\": 3, \"kind\": \"fact\", \"q\": \"Q:dog\", \"before\": \"Luna\", \"after\": \"Bruno\", \"ok\": false}", old);
+    const regression = (try json.parse(a, old)).ok;
+    try testing.expectEqualStrings(&pjson.hashText("Luna"), regression.strField("before_sha256").?);
+    try testing.expectEqualStrings(&pjson.hashText("Bruno"), regression.strField("after_sha256").?);
+    try testing.expect(regression.get("before") == null and regression.get("after") == null);
 }
 
 /// The cat's eyes and mine, both green, and a note that joins them in the block ("the same colour as mine").

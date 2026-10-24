@@ -123,11 +123,21 @@ when other places remain unresolved. Then `cleanup_complete` is true and
 DELETE returns 404 and can never target a different note. Erasing a take-back can
 also make a later write redundant; that write is explicitly listed as removed.
 
+Promotion probe diagnostics use `tf-notes-probe-hashes/1`: questions, references,
+replies and reasons are SHA-256 hashes; source IDs and verdict metadata stay readable.
+An erase checks `SNAPSHOT.promote-probes.jsonl` up to 1 MiB. Older plaintext lines,
+mixed formats, unreadable files and larger logs appear as `promotion_probe_log`
+in `remaining_places`. The log remains untouched. This warning keeps `complete`
+false but does not keep a reversible erase intent after actionable cleanup finishes.
+A verified hash-only log does not add this warning. This bounded synchronous scan
+has no measured latency guarantee.
+
 The reply's place list also covers the refused writers (Recall prompt/reply
 records, compaction files, request logs), so a lifted refusal reports its place
 from the first erase. Learned-folder diagnostics cover only the current
 configured root; they do not prove that earlier roots or another server's files
 are clear.
+
 
 Erase matching is linear for engine requests of at most 64k tokens. Sibling
 inspection stops at 16 folders and refuses indexes over 8 MiB, reporting an

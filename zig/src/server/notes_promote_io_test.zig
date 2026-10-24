@@ -48,3 +48,37 @@ test "promotion: failed state writes keep the old file until rename and always c
         try t.expectEqualStrings("new complete state", retried);
     }
 }
+
+test "promotion: future probe logs contain hashes and opaque ids instead of note text" {
+    var dir = t.tmpDir(.{ .iterate = true });
+    defer dir.cleanup();
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/state.promote", .{dir.sub_path});
+    const secret = "My locker code is 7419.";
+    const log_path = "state.promote-probes.jsonl";
+    pjson.appendProbe(a, path, .{
+        .night = 2,
+        .kind = "alone",
+        .key = "w17",
+        .q = secret,
+        .before = secret,
+        .after = secret,
+        .reply = secret,
+        .ref = secret,
+        .why = secret,
+        .exclude = &.{ 17, 23 },
+        .round = 2,
+        .ok = false,
+        .thinking = true,
+    });
+    const bytes = try dir.dir.readFileAlloc(t.io, log_path, a, .limited(4096));
+    try t.expect(std.mem.indexOf(u8, bytes, secret) == null);
+    const v = (try @import("json").parse(a, bytes)).ok;
+    try t.expectEqualStrings("w17", v.strField("key").?);
+    try t.expectEqual(@as(i64, 23), v.get("exclude").?.array[1].int64().?);
+    try t.expect(v.get("thinking").?.bool);
+    try t.expectEqual(@as(usize, 64), v.strField("q_sha256").?.len);
+    for ([_][]const u8{ "q", "before", "after", "reply", "ref", "why" }) |name| try t.expect(v.get(name) == null);
+}

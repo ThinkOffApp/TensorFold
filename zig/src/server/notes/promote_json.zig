@@ -243,36 +243,55 @@ pub fn writeFile(a: Allocator, path: []const u8, bytes: []const u8) WriteError!v
     if (fault == .folder_sync or !journal.fullSync(dfd, null)) return error.PromoteIo;
 }
 
-/// `r` as a JSON line appended to STATE-probes.jsonl (best effort: a probe log that cannot be written is skipped).
+pub const probe_format = "tf-notes-probe-hashes/1";
+
+/// Append a probe's hashes and opaque ids; older plaintext lines in this file still require erase disclosure.
 pub fn appendProbe(a: Allocator, state_path: []const u8, r: promote.Record) void {
     const line = probeLine(a, r) catch return;
+    defer a.free(line);
     const path = std.fmt.allocPrintSentinel(a, "{s}-probes.jsonl", .{state_path}, 0) catch return;
+    defer a.free(path);
     const fd = libc.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true, .CLOEXEC = true }, @as(libc.mode_t, 0o600));
     if (fd < 0) return;
     defer _ = libc.close(fd);
-    _ = libc.write(fd, line.ptr, line.len);
+    var off: usize = 0;
+    while (off < line.len) {
+        const n = libc.write(fd, line[off..].ptr, line.len - off);
+        if (n <= 0) return;
+        off += @intCast(n);
+    }
     _ = libc.write(fd, "\n", 1);
 }
 
-/// One record as its JSON line: the fields it has, a regression probe's as before (night, kind, q, before, after, ok).
+pub fn hashText(text: []const u8) [64]u8 {
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(text, &digest, .{});
+    return std.fmt.bytesToHex(digest, .lower);
+}
+
+fn putHash(o: *json.Object, a: Allocator, comptime name: []const u8, text: []const u8) !void {
+    const hash = hashText(text);
+    try o.put(a, name ++ "_sha256", .{ .string = try a.dupe(u8, &hash) });
+}
+
+/// A disk probe record keeps verdicts and hashes; its question, references and replies remain only in the live judge.
 pub fn probeLine(a: Allocator, r: promote.Record) ![]u8 {
     const o = try json.newObject(a);
+    try o.put(a, "format", .{ .string = probe_format });
     try o.put(a, "night", try int(a, r.night));
     try o.put(a, "kind", .{ .string = r.kind });
     if (r.key.len > 0) try o.put(a, "key", .{ .string = r.key });
-    try o.put(a, "q", .{ .string = r.q });
+    try putHash(o, a, "q", r.q);
     if (r.exclude) |ids| {
         const xs = try a.alloc(Value, ids.len);
         for (ids, xs) |id, *x| x.* = try int(a, id);
         try o.put(a, "exclude", .{ .array = xs });
     }
     if (r.round > 0) try o.put(a, "round", try int(a, r.round));
-    if (r.before) |s| try o.put(a, "before", .{ .string = s });
-    if (r.after) |s| try o.put(a, "after", .{ .string = s });
-    if (r.reply) |s| try o.put(a, "reply", .{ .string = s });
-    if (r.ref.len > 0) try o.put(a, "ref", .{ .string = r.ref });
+    inline for (.{ "before", "after", "reply" }) |field| if (@field(r, field)) |text| try putHash(o, a, field, text);
+    if (r.ref.len > 0) try putHash(o, a, "ref", r.ref);
     try o.put(a, "ok", .{ .bool = r.ok });
-    if (r.why.len > 0) try o.put(a, "why", .{ .string = r.why });
+    if (r.why.len > 0) try putHash(o, a, "why", r.why);
     if (r.thinking) try o.put(a, "thinking", .{ .bool = true });
     return json.stringify(a, .{ .object = o }, .{});
 }

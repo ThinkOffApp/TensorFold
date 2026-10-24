@@ -18,6 +18,7 @@ pub const Place = enum {
     compaction_memory,
     request_log,
     promotion,
+    promotion_probe_log,
     requests,
 
     /// What may still hold the note there, said to the client.
@@ -33,6 +34,7 @@ pub const Place = enum {
             .compaction_memory => "this or an earlier run may have written compaction memory files quoting this note; those files have not been searched",
             .request_log => "this or an earlier run may have logged a chat body quoting this note to an operator-selected path; those files have not been searched",
             .promotion => "this or an earlier Sliding Weights run may retain this fact in its graph or saved model weights; disabling --slide does not remove it",
+            .promotion_probe_log => "the snapshot's .promote-probes.jsonl retains plaintext probe questions or replies, or could not be verified as hash-only; the diagnostic file has not been erased",
             .requests => "the engine is running or queueing requests now, and one may carry this note in its prompt or its reply; they are not cancelled",
         };
     }
@@ -196,6 +198,13 @@ pub fn check(srv: *Server, forgot: Forget, origin: Origin) std.EnumArray(Place, 
     out.set(.compaction_memory, if (srv.config.compact_memory != null) .may_hold else diskOff(srv, origin, .compact));
     out.set(.request_log, if (srv.config.request_log != null) .may_hold else diskOff(srv, origin, .log));
     out.set(.promotion, if (pocketMade(srv)) .may_hold else diskOff(srv, origin, .slide));
+    if (srv.notes) |s| if (s.snapshot_path) |path| {
+        out.set(.promotion_probe_log, switch (@import("notes_promote_logs.zig").status(srv.gpa, srv.io, path)) {
+            .off => .off,
+            .empty => .empty,
+            .may_hold => .may_hold,
+        });
+    };
     var engine: @import("engine_api").Status = .{};
     srv.engine.status(&engine, &.{});
     out.set(.requests, if (held or engine.running + engine.waiting > 0 or forgot.out.in_flight > 0) .may_hold else .empty);

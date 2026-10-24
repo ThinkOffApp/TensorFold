@@ -192,3 +192,43 @@ test "new: pending erases are listed after restart and disappear after engine cl
     const after = try exchange(srv, a, "GET", "/v1/notes", "");
     try testing.expectEqual(@as(usize, 0), after.value.get("pending_erases").?.items().?.len);
 }
+
+test "promotion: erase names retained plaintext probe logs without retaining reversible journal spans" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realPathFileAlloc(testing.io, ".", a);
+    var bytes: Bytes = .{};
+    var e: Clear = .{};
+    const srv = try open(a, &bytes, &e, dir, false);
+    defer srv.deinit();
+    srv.notes.?.snapshot_path = try std.fs.path.join(srv.notes.?.zeroing.allocator(), &.{ dir, "notes.json" });
+    srv.notes.?.io = testing.io;
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "notes.json", .data = snapshot });
+    const legacy = "{\"q\":\"My locker code is 7419.\",\"reply\":\"7419\"}\n";
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "notes.json.promote-probes.jsonl", .data = legacy });
+    const added = try exchange(srv, a, "POST", "/v1/notes", "{\"text\":\"My locker code is 7419.\"}");
+    const path = try std.fmt.allocPrint(a, "/v1/notes/{d}?erase=true", .{added.value.get("id").?.int64().?});
+    const erased = (try exchange(srv, a, "DELETE", path, "")).value;
+    try testing.expectEqualStrings("may_hold", erased.get("places").?.strField("promotion_probe_log") orelse "missing");
+    try testing.expect(!erased.get("complete").?.bool);
+    try testing.expect(erased.get("cleanup_complete").?.bool and !erased.get("retryable").?.bool);
+    var named = false;
+    for (erased.get("remaining_places").?.array) |place| {
+        if (std.mem.eql(u8, place.str().?, "promotion_probe_log")) named = true;
+    }
+    try testing.expect(named);
+    try testing.expectEqual(@as(usize, 0), srv.notes.?.journal.?.erases.items.len);
+    const kept = try tmp.dir.readFileAlloc(testing.io, "notes.json.promote-probes.jsonl", a, .limited(4096));
+    try testing.expectEqualStrings(legacy, kept);
+    const pjson = @import("notes/promote_json.zig");
+    const hashed = try pjson.probeLine(a, .{ .night = 1, .kind = "alone", .key = "w7", .q = "My umbrella is blue.", .ok = true });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "notes.json.promote-probes.jsonl", .data = hashed });
+    const another = try exchange(srv, a, "POST", "/v1/notes", "{\"text\":\"My umbrella is blue.\"}");
+    const next = try std.fmt.allocPrint(a, "/v1/notes/{d}?erase=true", .{another.value.get("id").?.int64().?});
+    const clear = (try exchange(srv, a, "DELETE", next, "")).value;
+    try testing.expectEqualStrings("off", clear.get("places").?.strField("promotion_probe_log").?);
+    try testing.expect(clear.get("complete").?.bool and clear.get("cleanup_complete").?.bool);
+}
