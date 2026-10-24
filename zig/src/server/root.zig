@@ -22,6 +22,9 @@ test {
     _ = @import("notes_refuse.zig");
     _ = @import("notes_refuse_serve_test.zig");
     _ = @import("notes_index_test.zig");
+    _ = @import("notes/lookup.zig");
+    _ = @import("notes/past.zig");
+    _ = @import("notes/lang.zig");
     _ = @import("vision_markers_test.zig");
     _ = @import("embedding_protocol_test.zig");
     _ = @import("embedding_service_test.zig");
