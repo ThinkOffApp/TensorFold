@@ -36,6 +36,7 @@ pub fn held(p: *np.Promoter) bool {
 /// The caller holds Notes and learning locks (or is initializing before workers start).
 pub fn blockedHeld(p: *np.Promoter) bool {
     // erasing is set under Notes before learning.tryLock, and cleared there only after every intent is checked.
+
     // Journal records may still await non-promotion cleanup after owned addresses have safely been retired.
     return p.erasing.load(.acquire) or p.rewind_pending;
 }
