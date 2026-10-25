@@ -75,6 +75,14 @@ The reply exposes `promotion_state`, `promotion_graph`, `promotion_neurons`, `pr
 result, `retryable`, and `cleanup_complete`. Permanent remaining-place warnings keep `complete`
 false without retaining reversible journal token spans indefinitely.
 
+`promotion_graph` covers the owned-row removal commit: a write failure is retryable
+and reports `may_hold`; a successful retry reports `forgotten`. The separate
+`promotion_graph_unowned` place is a standing scope warning when untagged rows have
+text or legacy conversations have turns, even if their wording differs. Manual
+lessons are untagged, and deleting a manual fact keeps its text, so that warning can
+remain permanently. The server preserves those copies rather than guessing ownership.
+It keeps `complete` false but does not retain erase spans or make cleanup retryable.
+
 New probe JSONL records contain hashes, opaque source keys, note IDs, verdicts and modes rather
 than probe text. Hashes are not encryption and can be guessed for low-entropy values. An active
 erase atomically empties the whole owned `.promote-probes.jsonl`, including control and cross-fact

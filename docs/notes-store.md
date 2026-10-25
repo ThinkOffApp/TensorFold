@@ -145,7 +145,8 @@ fitting, including sentence splits and reversed forms. Erase retires their neuro
 and removes their text, questions, answers and chains from the persisted graph;
 `promotion_graph` reports that commit separately. An older interrupted lesson with
 no durable source identity remains pending rather than guessing ownership.
-Untagged rows with text and legacy conversations keep `promotion_graph: may_hold`,
+`promotion_graph` reports only the owned-row removal commit. Untagged rows with
+text and legacy conversations keep `promotion_graph_unowned: may_hold`,
 even when their wording differs: the server cannot prove they contain no copy.
 They are preserved rather than bound to a guessed owner. This permanent scope limit
 leaves `complete` false but does not keep erase spans or make cleanup retryable.

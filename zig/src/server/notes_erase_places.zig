@@ -21,6 +21,7 @@ pub const Place = enum {
     promotion_probe_log,
     promotion_state,
     promotion_graph,
+    promotion_graph_unowned,
     promotion_neurons,
     promotion_report,
     promotion_diagnostics,
@@ -40,7 +41,8 @@ pub const Place = enum {
             .request_log => "this or an earlier run may have logged a chat body quoting this note to an operator-selected path; those files have not been searched",
             .promotion => "this or an earlier Sliding Weights run may retain this fact in its graph or saved model weights; disabling --slide does not remove it",
             .promotion_state => "promotion metadata has not been committed without the erased note's copies; an earlier state requires the promotion worker to recover",
-            .promotion_graph => "promotion graph removal is uncommitted, or unowned lesson rows or legacy conversations may retain copies",
+            .promotion_graph => "promotion-owned graph removal has not been committed",
+            .promotion_graph_unowned => "untagged lesson rows or legacy conversations may retain copies; manual fact deletion keeps their text",
             .promotion_neurons => "promotion neurons have not been zeroed and saved",
             .promotion_diagnostics => "operator-captured Sliding Weights or promotion diagnostics may quote this note; those destinations have not been searched",
             .promotion_report => "the promotion report has not been refreshed after erasure",
@@ -208,6 +210,7 @@ pub fn check(srv: *Server, forgot: Forget, origin: Origin) std.EnumArray(Place, 
     out.set(.compaction_memory, if (srv.config.compact_memory != null) .may_hold else diskOff(srv, origin, .compact));
     out.set(.request_log, if (srv.config.request_log != null) .may_hold else diskOff(srv, origin, .log));
     out.set(.promotion, if (pocketMade(srv)) .may_hold else diskOff(srv, origin, .slide));
+    out.set(.promotion_graph_unowned, if (@import("notes_promote_graph.zig").hasUnowned(&srv.slide)) .may_hold else if (srv.promote != null or srv.config.slide) .empty else diskOff(srv, origin, .slide));
     out.set(.promotion_diagnostics, if (srv.config.slide) .may_hold else diskOff(srv, origin, .slide));
     if (srv.notes) |s| if (s.snapshot_path) |path| {
         if (srv.promote == null and @import("notes_promote_logs.zig").dormantState(srv.io, path) == .may_hold) {

@@ -138,7 +138,7 @@ fn clean(p: *np.Promoter, a: Allocator, sources: []const []const u8, notes_held:
         out.failed = "promotion graph text could not be removed and saved; retry the same erase";
         return out;
     };
-    out.graph_clear = @import("notes_promote_graph.zig").clearScope(p);
+    out.graph_clear = true;
     scrub.finished(&p.state, sources) catch {
         out.failed = "promotion retirement could not be recorded; retry the same erase";
         return out;

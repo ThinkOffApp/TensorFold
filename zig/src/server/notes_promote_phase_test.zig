@@ -51,13 +51,16 @@ test "promotion phase: graph commit failure reports its place as may_hold until 
     c.r.srv.slide.deinit();
     c.r.srv.slide = .init(t.allocator, t.io, path);
     _ = try owned.add(&c.r.srv.slide, "My locker code is 7419.", "chat", c.key, 1);
+    _ = c.r.srv.slide.add("A manual document fact.", "document", 1);
     c.r.srv.slide.fault = .write;
     const failed = try c.erase();
     try t.expect(failed.value.get("retryable").?.bool);
     try t.expectEqualStrings("may_hold", failed.value.get("places").?.strField("promotion_graph").?);
+    try t.expectEqualStrings("may_hold", failed.value.get("places").?.strField("promotion_graph_unowned").?);
     const retried = try c.erase();
     try t.expect(!retried.value.get("retryable").?.bool);
     try t.expectEqualStrings("forgotten", retried.value.get("places").?.strField("promotion_graph").?);
+    try t.expectEqualStrings("may_hold", retried.value.get("places").?.strField("promotion_graph_unowned").?);
 }
 
 test "promotion phase: an erase fence rejects enrollment while the live note still exists" {
@@ -176,7 +179,8 @@ fn unownedCopy(kind: enum { talk, chat, document }) !void {
         c.r.srv.slide.placed(id, &.{.{ .layer = 5, .neuron = 40, .key = .reply }});
     }
     const reply = try c.erase();
-    try t.expectEqualStrings("may_hold", reply.value.get("places").?.strField("promotion_graph").?);
+    try t.expectEqualStrings("forgotten", reply.value.get("places").?.strField("promotion_graph").?);
+    try t.expectEqualStrings("may_hold", reply.value.get("places").?.strField("promotion_graph_unowned").?);
     try t.expect(!reply.value.get("retryable").?.bool);
     try t.expect(reply.value.get("cleanup_complete").?.bool);
     try t.expect(!reply.value.get("complete").?.bool);

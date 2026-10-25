@@ -225,12 +225,11 @@ fn legacyText(a: Allocator, note: []const u8, row: []const u8) !bool {
     return false;
 }
 
-/// Without provenance even a different wording can be a copy; do not claim unowned graph text is clear.
-pub fn clearScope(p: *np.Promoter) bool {
-    const g = &p.srv.slide;
+/// Without provenance even a different wording can be a copy; expose this scope separately from owned commits.
+pub fn hasUnowned(g: *graph.Graph) bool {
     g.mutex.lockUncancelable(g.io);
     defer g.mutex.unlock(g.io);
-    for (g.facts.items) |f| if (f.promotion_key.len == 0 and f.text.len > 0) return false;
-    for (g.talks.list.items) |talk| if (talk.promotion_keys.len == 0 and talk.turns.len > 0) return false;
-    return true;
+    for (g.facts.items) |f| if (f.promotion_key.len == 0 and f.text.len > 0) return true;
+    for (g.talks.list.items) |talk| if (talk.promotion_keys.len == 0 and talk.turns.len > 0) return true;
+    return false;
 }
