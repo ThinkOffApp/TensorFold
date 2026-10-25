@@ -6,7 +6,6 @@ const scrub = @import("notes/promote_erase.zig");
 const ops = @import("notes/operations.zig");
 const np = @import("notes_promote.zig");
 const Backend = @import("notes_promote_backend.zig").Backend;
-const night = @import("slide_night.zig");
 const Allocator = std.mem.Allocator;
 
 pub const Result = struct {
@@ -65,8 +64,7 @@ pub fn drain(p: *np.Promoter) bool {
     if (sources.len == 0 and !p.erasing.load(.acquire)) {
         if (p.state.open != null or p.rewind_pending) return false;
         if (p.publish_pending.load(.acquire) and !p.tryPublish()) return false;
-        night.acknowledged(p.srv);
-        return true;
+        return p.acknowledge();
     }
     return !clean(p, a, sources, false).pending;
 }
@@ -140,7 +138,7 @@ fn clean(p: *np.Promoter, a: Allocator, sources: []const []const u8, notes_held:
         out.failed = "promotion graph text could not be removed and saved; retry the same erase";
         return out;
     };
-    out.graph_clear = true;
+    out.graph_clear = @import("notes_promote_graph.zig").clearScope(p);
     scrub.finished(&p.state, sources) catch {
         out.failed = "promotion retirement could not be recorded; retry the same erase";
         return out;
@@ -164,6 +162,6 @@ fn clean(p: *np.Promoter, a: Allocator, sources: []const []const u8, notes_held:
         return out;
     }
     out.pending = false;
-    if (!p.state.rebuild_next and !p.rewind_pending) night.acknowledged(p.srv);
+    if (!p.state.rebuild_next and !p.rewind_pending) _ = p.acknowledgeHeld();
     return out;
 }

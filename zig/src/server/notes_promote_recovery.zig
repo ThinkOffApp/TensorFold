@@ -26,7 +26,7 @@ pub fn settle(p: *np.Promoter, a: Allocator, b: *Backend) !void {
     }
     try b.persist(&p.state);
     if (!p.tryPublish()) return error.PublishPending;
-    @import("slide_night.zig").acknowledged(p.srv);
+    if (!p.acknowledge()) return error.ErasePending;
 }
 
 /// A manual deletion freed these slots; retire and forget their stale addresses before admitting reuse.

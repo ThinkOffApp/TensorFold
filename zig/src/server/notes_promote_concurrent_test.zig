@@ -103,3 +103,69 @@ test "promotion concurrency: a Notes write finishes while model save blocks and 
 test "promotion concurrency: a new erase during model save remains pending and prevents premature publication" {
     try concurrent(true);
 }
+
+const FenceWork = struct {
+    p: *@import("notes_promote.zig").Promoter,
+    recovery: bool,
+    persisted: bool = false,
+    persist: bool = false,
+    fn run(w: *FenceWork) void {
+        if (w.recovery and !w.persist) return w.p.recover();
+        w.p.srv.teacher.learning.lockUncancelable(t.io);
+        defer w.p.srv.teacher.learning.unlock(t.io);
+        if (w.persist) {
+            var arena = std.heap.ArenaAllocator.init(t.allocator);
+            defer arena.deinit();
+            var b: @import("notes_promote_backend.zig").Backend = .{ .p = w.p, .arena = arena.allocator() };
+            b.persist(&w.p.state) catch return;
+            w.persisted = true;
+        } else w.persisted = w.p.drainPending();
+    }
+};
+
+fn acknowledgmentRace(recovery: bool, persist: bool) !void {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var c = try Case.init(a, .note);
+    defer c.deinit();
+    c.p.state.rebuild_next = recovery;
+    c.r.srv.promotion_pending.store(true, .release);
+    var gate: @import("notes_promote_ack.zig").Gate = .{ .pause_after = if (recovery and !persist) 1 else 0 };
+    c.p.ack_gate = &gate;
+    var work: FenceWork = .{ .p = c.p, .recovery = recovery, .persist = persist };
+    const thread = try std.Thread.spawn(.{}, FenceWork.run, .{&work});
+    const paused = quick(&gate.entered);
+    const reply = c.erase() catch |e| {
+        gate.release.set(t.io);
+        thread.join();
+        c.p.ack_gate = null;
+        return e;
+    };
+    gate.release.set(t.io);
+    thread.join();
+    c.p.ack_gate = null;
+    try t.expect(paused);
+    try t.expect(reply.value.get("promotion").?.get("pending").?.bool);
+    try t.expect(c.p.erasing.load(.acquire));
+    try t.expect(c.r.srv.promotion_pending.load(.acquire));
+    const refused = @import("slide_forget.zig").admit(c.r.srv, a);
+    if (refused == null) c.r.srv.teacher.learning.unlock(t.io);
+    try t.expect(refused != null);
+    try t.expectEqual(@as(usize, 0), c.learner.trained);
+    const retry = try c.erase();
+    try t.expect(!retry.value.get("promotion").?.get("pending").?.bool);
+    try c.controlIntact();
+}
+
+test "promotion concurrency: settle acknowledgment cannot release a concurrent DELETE fence" {
+    try acknowledgmentRace(true, false);
+}
+
+test "promotion concurrency: drain acknowledgment cannot release a concurrent DELETE fence" {
+    try acknowledgmentRace(false, false);
+}
+
+test "promotion concurrency: persist acknowledgment cannot release a concurrent DELETE fence" {
+    try acknowledgmentRace(true, true);
+}

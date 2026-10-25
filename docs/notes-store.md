@@ -145,6 +145,14 @@ fitting, including sentence splits and reversed forms. Erase retires their neuro
 and removes their text, questions, answers and chains from the persisted graph;
 `promotion_graph` reports that commit separately. An older interrupted lesson with
 no durable source identity remains pending rather than guessing ownership.
+Untagged rows with text and legacy conversations keep `promotion_graph: may_hold`,
+even when their wording differs: the server cannot prove they contain no copy.
+They are preserved rather than bound to a guessed owner. This permanent scope limit
+leaves `complete` false but does not keep erase spans or make cleanup retryable.
+Learning-fence release checks the erase flag under the Notes lock. That flag clears
+only after every journal intent's promotion cleanup has committed and been checked
+under the same lock. Other engine cleanup can still await a client retry; reusing a
+retired promotion slot is safe because its saved old address has already been removed.
 
 The shared Sliding Weights path also changes when `--notes` is off: graph saves use
 atomic replacement and sync, a graph commit must precede model-shard saving, and an

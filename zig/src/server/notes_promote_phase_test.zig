@@ -161,3 +161,44 @@ test "promotion recovery: a refused mark settles before the next full-night inte
     try t.expectEqual(@as(usize, 0), c.learner.zeroed);
     try c.controlIntact();
 }
+
+fn unownedCopy(kind: enum { talk, chat, document }) !void {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var c = try Case.initText(a, .note, text);
+    defer c.deinit();
+    var id: u32 = 0;
+    if (kind == .talk) {
+        c.r.srv.slide.keepTalk("legacy", &.{.{ "Tell me the code.", "My locker code is 7419." }});
+    } else {
+        id = c.r.srv.slide.add("My locker code is 7419.", if (kind == .document) "document" else "chat", 1);
+        c.r.srv.slide.placed(id, &.{.{ .layer = 5, .neuron = 40, .key = .reply }});
+    }
+    const reply = try c.erase();
+    try t.expectEqualStrings("may_hold", reply.value.get("places").?.strField("promotion_graph").?);
+    try t.expect(!reply.value.get("retryable").?.bool);
+    try t.expect(reply.value.get("cleanup_complete").?.bool);
+    try t.expect(!reply.value.get("complete").?.bool);
+    try t.expectEqual(@as(usize, 0), c.learner.zeroed);
+    if (kind == .talk) {
+        try t.expect((try c.r.srv.slide.talk(a, "legacy")) != null);
+    } else {
+        try t.expectEqualStrings("", c.r.srv.slide.find(id).?.promotion_key);
+        try t.expectEqual(@as(usize, 1), c.r.srv.slide.find(id).?.neurons.len);
+    }
+    try t.expect(std.mem.indexOf(u8, try c.r.srv.slide.render(a, null), "7419") != null);
+    try c.controlIntact();
+}
+
+test "promotion graph scope: untagged legacy conversations cannot be reported forgotten" {
+    try unownedCopy(.talk);
+}
+
+test "promotion graph scope: identical unowned neuron rows cannot be reported forgotten" {
+    try unownedCopy(.chat);
+}
+
+test "promotion graph scope: an unowned document sentence cannot be reported forgotten" {
+    try unownedCopy(.document);
+}

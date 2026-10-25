@@ -77,6 +77,11 @@ pub const Promoter = struct {
     erasing: std.atomic.Value(bool) = .init(false),
     publish_pending: std.atomic.Value(bool) = .init(false), // the in-weights list and report lag the state: refreshed at the next try
 
+    ack_gate: if (@import("builtin").is_test) ?*@import("notes_promote_ack.zig").Gate else void = if (@import("builtin").is_test) null else {},
+
+    pub const acknowledge = @import("notes_promote_ack.zig").acknowledge;
+    pub const acknowledgeHeld = @import("notes_promote_ack.zig").held;
+
     /// The promoter for `store`, its state read from SNAPSHOT.promote when there is one; the thread not started.
     pub fn init(gpa: Allocator, io: std.Io, srv: *Server, store: *Store, snapshot: []const u8, o: Options, problem: *[]const u8) !*Promoter {
         const p = try gpa.create(Promoter);
@@ -351,8 +356,10 @@ pub const Promoter = struct {
             }
             const committed = if (b.persist(&p.state)) |_| true else |_| false;
             const published = p.tryPublish();
-            const pending = !committed or !published or b.control_failed or p.rewind_pending or p.state.open != null or p.erasing.load(.acquire);
+            p.srv.notes_mutex.lockUncancelable(p.io);
+            const pending = !committed or !published or b.control_failed or p.state.open != null or @import("notes_promote_ack.zig").blockedHeld(p);
             p.srv.promotion_pending.store(pending, .release);
+            p.srv.notes_mutex.unlock(p.io);
             if (p.erasing.load(.acquire) and !p.rewind_pending) _ = p.drainPending();
             return;
         };

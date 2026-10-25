@@ -310,6 +310,6 @@ pub const Backend = struct {
         var arena: std.heap.ArenaAllocator = .init(b.p.gpa);
         defer arena.deinit();
         try pjson.writeFile(arena.allocator(), b.p.path, try pjson.encode(s, arena.allocator()));
-        if (!b.control_failed and !b.p.rewind_pending and !b.p.erasing.load(.acquire)) @import("slide_night.zig").acknowledged(b.srv());
+        if (!b.cleanup and !b.control_failed and !b.p.rewind_pending) _ = b.p.acknowledge();
     }
 };
