@@ -133,6 +133,7 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     q35.addImport("core", mods.core);
     q35.addImport("qwen35", mods.qwen35);
     q35.addImport("lanes", mods.lanes);
+    q35.addImport("hybrid_state", b.createModule(.{ .root_source_file = b.path("zig/src/fabric/hybrid_state.zig"), .target = target, .optimize = optimize }));
     const q35_install = b.addInstallArtifact(b.addExecutable(.{ .name = "tf-qwen35-cuda", .root_module = q35 }), .{});
     b.getInstallStep().dependOn(&q35_install.step);
     b.step("qwen35-cuda", "Build the Qwen CUDA forward and raw state receipt tool").dependOn(&q35_install.step);
