@@ -77,6 +77,17 @@ fn steps(a: std.mem.Allocator, r: *q.decode_round.Runner, n: usize, forced: ?[]c
     return .{ .toks = toks, .logits = all };
 }
 
+/// `ids` as prompt chunks of at most the frame's rows, the last one with logits if `last`.
+fn feed(r: *q.decode_round.Runner, ids: []const u32, last: bool) !void {
+    const cap = r.model.frame.capacity;
+    var at: usize = 0;
+    while (at < ids.len) {
+        const end = @min(ids.len, at + cap);
+        try (q.session.Session{ .runner = r }).promptChunk(ids[at..end], last and end == ids.len);
+        at = end;
+    }
+}
+
 /// The most KL a restored state may cost at any of the steps: zeroed or swapped states cost far more (see the receipt).
 const close_kl = 0.02;
 const n_steps = 32;
@@ -89,7 +100,7 @@ fn sized(r: *const q.decode_round.Runner, at: u32) !void {
 fn exportState(a: std.mem.Allocator, io: std.Io, r: *q.decode_round.Runner, ids: []const u32, at: u32, out: []const u8) !void {
     try sized(r, at);
     try r.reset(0);
-    try (q.session.Session{ .runner = r }).promptChunk(ids[0..at], false);
+    try feed(r, ids[0..at], false);
     const st = try q.snapshot.saveSlot(a, r, 0, null, at, null);
     defer q.snapshot.drop(a, st);
     const body = try read(a, r, st);
@@ -112,17 +123,16 @@ fn importState(a: std.mem.Allocator, io: std.Io, r: *q.decode_round.Runner, ids:
     const body = file[@sizeOf(hs.Header)..];
     if (body.len != header.total) return error.HybridStateLength;
     try sized(r, header.at);
-    const session = q.session.Session{ .runner = r };
     // the Mac's own pass over the whole prompt: what the restored state must lead to
     try r.reset(0);
-    try session.promptChunk(ids, true);
+    try feed(r, ids, true);
     const want = try steps(a, r, n_steps, null); // the Mac's own greedy reply, every step's logits
     // a blank state filled with the file's bytes, restored over a slot that held the whole prompt
     const st = try q.snapshot.blank(a, r, null, header.at);
     defer q.snapshot.drop(a, st);
     @memcpy(st.buf.contents()[0..body.len], body);
     try q.snapshot.restoreSlot(a, r, 0, null, st);
-    try session.promptChunk(ids[header.at..], true);
+    try feed(r, ids[header.at..], true);
     const got = try steps(a, r, n_steps, want.toks); // the same reply fed through the restored state
     var same = true;
     var worst: f32 = 0;
@@ -149,7 +159,7 @@ fn importState(a: std.mem.Allocator, io: std.Io, r: *q.decode_round.Runner, ids:
 /// The prompt and all but the last of the Mac's `n` greedy tokens, for the GB10's `tail` with k = n: the same n steps.
 fn greedyTo(a: std.mem.Allocator, io: std.Io, r: *q.decode_round.Runner, ids: []const u32, n: usize, out: []const u8) !void {
     try r.reset(0);
-    try (q.session.Session{ .runner = r }).promptChunk(ids, true);
+    try feed(r, ids, true);
     const got = try steps(a, r, n, null);
     var list: std.ArrayList(u32) = .empty;
     try list.appendSlice(a, ids);
@@ -166,7 +176,7 @@ fn floor(a: std.mem.Allocator, io: std.Io, r: *q.decode_round.Runner, ids: []con
     const vocab = r.model.config.vocab;
     if (raw.len != n * vocab * 2) return error.TailRowsDiffer;
     try r.reset(0);
-    try (q.session.Session{ .runner = r }).promptChunk(ids, true);
+    try feed(r, ids, true);
     const want = try steps(a, r, n, null);
     var d: f64 = 0;
     var sum: f64 = 0;
