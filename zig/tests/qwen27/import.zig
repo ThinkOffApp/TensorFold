@@ -322,11 +322,12 @@ fn multi(a: std.mem.Allocator, io: std.Io, r: *q.decode_round.Runner, prompts: [
         alone_toks[k] = try (q.session.Session{ .runner = r, .slot = @intCast(k) }).greedy();
     }
     const t1 = clock.now(io).toNanoseconds();
+    if (alone_only) std.debug.print("PHASE kind=prefill edge=end awake_ns={d}\nPHASE kind=decode edge=begin awake_ns={d}\n", .{ t1, t1 });
     const firsts = try a.dupe(u32, alone_toks);
     try rounds(a, r, alone_toks, gen, alone);
     const t2 = clock.now(io).toNanoseconds();
+    if (alone_only) std.debug.print("PHASE kind=decode edge=end awake_ns={d}\n", .{t2});
     if (alone_only) {
-        std.debug.print("PHASE kind=prefill edge=end awake_ns={d}\nPHASE kind=decode edge=begin awake_ns={d}\nPHASE kind=decode edge=end awake_ns={d}\n", .{ t1, t1, t2 });
         for (firsts, alone, 0..) |f, toks, k| { // each stream's first token, then its `gen` greedy tokens
             std.debug.print("TOKENS stream={d} ids={d}", .{ k, f });
             for (toks) |t| std.debug.print(",{d}", .{t});
