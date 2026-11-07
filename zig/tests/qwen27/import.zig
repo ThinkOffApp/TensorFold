@@ -201,11 +201,11 @@ pub fn main(init: std.process.Init) !void {
     if (std.mem.eql(u8, args[3], "export")) {
         const at = try std.fmt.parseInt(u32, args[4], 10);
         if (at == 0 or at >= ids.len) return error.MarkOutOfRange;
-        return exportState(init.gpa, init.io, &h.runner, ids, at, args[5]);
+        return exportState(a, init.io, &h.runner, ids, at, args[5]);
     }
-    if (std.mem.eql(u8, args[3], "greedy")) return greedyTo(init.gpa, init.io, &h.runner, ids, try std.fmt.parseInt(usize, args[4], 10), args[5]);
-    if (std.mem.eql(u8, args[3], "floor")) return floor(init.gpa, init.io, &h.runner, ids, args[4], try std.fmt.parseInt(usize, args[5], 10));
-    if (std.mem.eql(u8, args[3], "import")) return importState(init.gpa, init.io, &h.runner, ids, args[4], std.mem.eql(u8, args[5], "exact"));
+    if (std.mem.eql(u8, args[3], "greedy")) return greedyTo(a, init.io, &h.runner, ids, try std.fmt.parseInt(usize, args[4], 10), args[5]);
+    if (std.mem.eql(u8, args[3], "floor")) return floor(a, init.io, &h.runner, ids, args[4], try std.fmt.parseInt(usize, args[5], 10));
+    if (std.mem.eql(u8, args[3], "import")) return importState(a, init.io, &h.runner, ids, args[4], std.mem.eql(u8, args[5], "exact"));
     std.debug.print("{s}", .{help});
     return error.Usage;
 }
