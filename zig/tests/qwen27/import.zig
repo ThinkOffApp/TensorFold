@@ -63,8 +63,7 @@ fn kl(p: []const f32, qq: []const f32) f64 {
     return d;
 }
 
-/// `n` steps on from the slot's last logits: each step's logits kept, then its token fed back as a one-row chunk.
-/// With `forced` null each token is the step's argmax; else the step feeds `forced`'s token (teacher forcing).
+/// `n` steps from the slot's last logits, each kept; each feeds its argmax, or `forced`'s token (teacher forcing).
 fn steps(a: std.mem.Allocator, r: *q.decode_round.Runner, n: usize, forced: ?[]const u32) !struct { toks: []u32, logits: [][]f32 } {
     const toks = try a.alloc(u32, n);
     const all = try a.alloc([]f32, n);
