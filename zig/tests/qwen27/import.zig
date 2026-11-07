@@ -10,6 +10,7 @@ const help =
     \\tf-qwen27-import MODEL IDS.json import FILE exact|close: FILE restored, the rest prefilled, logits against fresh
     \\tf-qwen27-import MODEL IDS.json greedy N OUT.json: the prompt and this Mac's N-token greedy reply, for `tail`
     \\tf-qwen27-import MODEL IDS.json floor ROWS.bf16 N: this Mac's N steps against the GB10's `tail` rows
+    \\tf-qwen27-import MODEL IDS.json time FILE -: stage times, this Mac alone against FILE restored, 32 decode steps each
 ;
 
 fn read(a: std.mem.Allocator, r: *const q.decode_round.Runner, st: *q.snapshot.State) ![]u8 {
@@ -192,6 +193,61 @@ fn floor(a: std.mem.Allocator, io: std.Io, r: *q.decode_round.Runner, ids: []con
     std.debug.print("RESULT floor: GB10-only against Mac-only over {d} steps, KL max {e:.3} mean {e:.3} nats, top-1 {d} of {d}\n", .{ n, d, sum / @as(f64, @floatFromInt(n)), agree, n });
 }
 
+/// One stream's stage times: this Mac alone, then a restored state's restore and tail, each with 32 decode steps.
+fn timeRun(a: std.mem.Allocator, io: std.Io, r: *q.decode_round.Runner, ids: []const u32, path: []const u8) !void {
+    const clock = std.Io.Clock.awake;
+    const t_read = clock.now(io).toNanoseconds();
+    const file = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(16 << 30));
+    var header: hs.Header = undefined;
+    if (file.len < @sizeOf(hs.Header)) return error.NotAHybridState;
+    @memcpy(std.mem.asBytes(&header), file[0..@sizeOf(hs.Header)]);
+    try header.check(hs.qwen27, ids);
+    const body = file[@sizeOf(hs.Header)..];
+    if (body.len != header.total) return error.HybridStateLength;
+    try sized(r, header.at);
+    const read_ns = clock.now(io).toNanoseconds() - t_read;
+    const session = q.session.Session{ .runner = r };
+    try r.reset(0); // a warm-up prompt first, so neither timed pass pays the first launch
+    try feed(r, ids[0..@min(ids.len, 128)], true);
+    try r.reset(0);
+    const t0 = clock.now(io).toNanoseconds();
+    try feed(r, ids, true);
+    const t1 = clock.now(io).toNanoseconds();
+    var tok: u32 = try session.greedy();
+    const want_first = tok;
+    for (0..n_steps) |_| {
+        try session.step(tok);
+        tok = try session.greedy();
+    }
+    const t2 = clock.now(io).toNanoseconds();
+    const t3 = clock.now(io).toNanoseconds();
+    const st = try q.snapshot.blank(a, r, null, header.at);
+    defer q.snapshot.drop(a, st);
+    @memcpy(st.buf.contents()[0..body.len], body);
+    try q.snapshot.restoreSlot(a, r, 0, null, st);
+    const t4 = clock.now(io).toNanoseconds();
+    try feed(r, ids[header.at..], true);
+    const t5 = clock.now(io).toNanoseconds();
+    tok = try session.greedy();
+    const got_first = tok;
+    for (0..n_steps) |_| {
+        try session.step(tok);
+        tok = try session.greedy();
+    }
+    const t6 = clock.now(io).toNanoseconds();
+    const ms = struct {
+        fn of(ns: anytype) f64 {
+            return @as(f64, @floatFromInt(ns)) / 1e6;
+        }
+    }.of;
+    const rate = struct {
+        fn of(ns: anytype) f64 {
+            return @as(f64, @floatFromInt(n_steps)) / (@as(f64, @floatFromInt(ns)) / 1e9);
+        }
+    }.of;
+    std.debug.print("RESULT time: {d} tokens. Mac alone: prefill {d:.1} ms, decode {d:.2} tok/s. Restored: state read {d:.1} ms (not counted), restore {d:.1} ms, tail of {d} tokens {d:.1} ms, decode {d:.2} tok/s; first token {d} vs {d}\n", .{ ids.len, ms(t1 - t0), rate(t2 - t1), ms(read_ns), ms(t4 - t3), ids.len - header.at, ms(t5 - t4), rate(t6 - t5), got_first, want_first });
+}
+
 pub fn main(init: std.process.Init) !void {
     const a = init.arena.allocator();
     const args = try init.minimal.args.toSlice(a);
@@ -214,6 +270,7 @@ pub fn main(init: std.process.Init) !void {
         return exportState(a, init.io, &h.runner, ids, at, args[5]);
     }
     if (std.mem.eql(u8, args[3], "greedy")) return greedyTo(a, init.io, &h.runner, ids, try std.fmt.parseInt(usize, args[4], 10), args[5]);
+    if (std.mem.eql(u8, args[3], "time")) return timeRun(a, init.io, &h.runner, ids, args[4]);
     if (std.mem.eql(u8, args[3], "floor")) return floor(a, init.io, &h.runner, ids, args[4], try std.fmt.parseInt(usize, args[5], 10));
     if (std.mem.eql(u8, args[3], "import")) return importState(a, init.io, &h.runner, ids, args[4], std.mem.eql(u8, args[5], "exact"));
     std.debug.print("{s}", .{help});

@@ -57,8 +57,16 @@ pub fn run(init: std.process.Init, a: std.mem.Allocator, args: []const [:0]const
         e.g.convBytes() != hs.qwen27.conv_bytes or e.g.deltas() != hs.qwen27.linear) return error.HybridGeometryDiffers;
     var cache = try E.Cache.init(init.gpa, e, ids.len + 64);
     defer cache.deinit(init.gpa);
-    const t0 = std.Io.Clock.awake.now(init.io).toNanoseconds();
     var buf: [E.max_rows]u32 = undefined;
+    { // a warm-up prompt in its own cache, so the timed prefill doesn't pay the first launch
+        var warm = try E.Cache.init(init.gpa, e, E.max_rows + 64);
+        defer warm.deinit(init.gpa);
+        const k = @min(E.max_rows, ids.len);
+        @memcpy(buf[0..k], ids[0..k]);
+        try e.forward(&.{.{ .cache = &warm, .rows = k }}, buf[0..k], .last);
+        try e.stream.synchronize();
+    }
+    const t0 = std.Io.Clock.awake.now(init.io).toNanoseconds();
     var done: usize = 0;
     while (done < at) {
         const k = @min(E.max_rows, at - done);
