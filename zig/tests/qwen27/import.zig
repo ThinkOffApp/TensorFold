@@ -8,6 +8,8 @@ const hs = @import("fabric").hybrid_state;
 const help =
     \\tf-qwen27-import MODEL IDS.json export AT OUT: this Mac's state after AT tokens, in hybrid_state's order, to OUT
     \\tf-qwen27-import MODEL IDS.json import FILE exact|close: FILE restored, the rest prefilled, logits against fresh
+    \\tf-qwen27-import MODEL IDS.json greedy N OUT.json: the prompt and this Mac's N-token greedy reply, for `tail`
+    \\tf-qwen27-import MODEL IDS.json floor ROWS.bf16 N: this Mac's N steps against the GB10's `tail` rows
 ;
 
 fn read(a: std.mem.Allocator, r: *const q.decode_round.Runner, st: *q.snapshot.State) ![]u8 {
@@ -144,6 +146,42 @@ fn importState(a: std.mem.Allocator, io: std.Io, r: *q.decode_round.Runner, ids:
     std.debug.print("PASS import ({s})\n", .{if (exact) "exact" else "close: same first token, every step's KL within 0.02 nats"});
 }
 
+/// The prompt and all but the last of the Mac's `n` greedy tokens, for the GB10's `tail` with k = n: the same n steps.
+fn greedyTo(a: std.mem.Allocator, io: std.Io, r: *q.decode_round.Runner, ids: []const u32, n: usize, out: []const u8) !void {
+    try r.reset(0);
+    try (q.session.Session{ .runner = r }).promptChunk(ids, true);
+    const got = try steps(a, r, n, null);
+    var list: std.ArrayList(u32) = .empty;
+    try list.appendSlice(a, ids);
+    try list.appendSlice(a, got.toks[0 .. n - 1]); // `tail` with k = n then feeds ids' last token and n - 1 replies
+    var w: std.Io.Writer.Allocating = .init(a);
+    try std.json.Stringify.value(list.items, .{}, &w.writer);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = out, .data = w.written() });
+    std.debug.print("RESULT greedy: {d} prompt tokens and the Mac's {d}-token reply to {s}\n", .{ ids.len, n, out });
+}
+
+/// The backends' own gap: the Mac's steps against the GB10's bf16 rows for the same tokens, with no hand-off.
+fn floor(a: std.mem.Allocator, io: std.Io, r: *q.decode_round.Runner, ids: []const u32, path: []const u8, n: usize) !void {
+    const raw = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(4 << 30));
+    const vocab = r.model.config.vocab;
+    if (raw.len != n * vocab * 2) return error.TailRowsDiffer;
+    try r.reset(0);
+    try (q.session.Session{ .runner = r }).promptChunk(ids, true);
+    const want = try steps(a, r, n, null);
+    var d: f64 = 0;
+    var sum: f64 = 0;
+    var agree: usize = 0;
+    const row = try a.alloc(f32, vocab);
+    for (want.logits, want.toks, 0..) |x, t, i| {
+        for (row, 0..) |*y, j| y.* = @bitCast(@as(u32, std.mem.readInt(u16, raw[(i * vocab + j) * 2 ..][0..2], .little)) << 16);
+        const k = kl(x, row);
+        d = @max(d, k);
+        sum += k;
+        agree += @intFromBool(argmax(row) == t);
+    }
+    std.debug.print("RESULT floor: GB10-only against Mac-only over {d} steps, KL max {e:.3} mean {e:.3} nats, top-1 {d} of {d}\n", .{ n, d, sum / @as(f64, @floatFromInt(n)), agree, n });
+}
+
 pub fn main(init: std.process.Init) !void {
     const a = init.arena.allocator();
     const args = try init.minimal.args.toSlice(a);
@@ -165,6 +203,8 @@ pub fn main(init: std.process.Init) !void {
         if (at == 0 or at >= ids.len) return error.MarkOutOfRange;
         return exportState(init.gpa, init.io, &h.runner, ids, at, args[5]);
     }
+    if (std.mem.eql(u8, args[3], "greedy")) return greedyTo(init.gpa, init.io, &h.runner, ids, try std.fmt.parseInt(usize, args[4], 10), args[5]);
+    if (std.mem.eql(u8, args[3], "floor")) return floor(init.gpa, init.io, &h.runner, ids, args[4], try std.fmt.parseInt(usize, args[5], 10));
     if (std.mem.eql(u8, args[3], "import")) return importState(init.gpa, init.io, &h.runner, ids, args[4], std.mem.eql(u8, args[5], "exact"));
     std.debug.print("{s}", .{help});
     return error.Usage;

@@ -5,8 +5,42 @@ const q = @import("qwen35");
 const hs = @import("hybrid_state");
 const E = q.engine;
 
+/// `<model> tail <seq.json> <k> <out>`: the bf16 logits after each of seq's last k tokens, fed one at a time.
+fn tail(init: std.process.Init, a: std.mem.Allocator, args: []const [:0]const u8) !u8 {
+    const text = try std.Io.Dir.cwd().readFileAlloc(init.io, args[3], a, .limited(16 << 20));
+    const seq = (try std.json.parseFromSlice([]u32, a, text, .{})).value;
+    const k = try std.fmt.parseInt(usize, args[4], 10);
+    if (k == 0 or k >= seq.len) return error.MarkOutOfRange;
+    var driver = try cuda.Driver.open();
+    defer driver.close();
+    var ctx = try cuda.Context.init(&driver, 0);
+    defer ctx.deinit();
+    const e = try E.Engine.init(init.gpa, init.io, &ctx, args[1], false, null);
+    defer e.deinit();
+    var cache = try E.Cache.init(init.gpa, e, seq.len + 64);
+    defer cache.deinit(init.gpa);
+    const head = seq.len - k;
+    var buf: [E.max_rows]u32 = undefined;
+    var done: usize = 0;
+    while (done < head) {
+        const n = @min(E.max_rows, head - done);
+        @memcpy(buf[0..n], seq[done..][0..n]);
+        try e.forward(&.{.{ .cache = &cache, .rows = n }}, buf[0..n], .last);
+        done += n;
+    }
+    var out: std.ArrayList(u8) = .empty;
+    for (seq[head..]) |t| {
+        try e.forward(&.{.{ .cache = &cache, .rows = 1 }}, &.{t}, .logits);
+        try out.appendSlice(a, std.mem.sliceAsBytes(e.rowLogits(0)));
+    }
+    try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = args[5], .data = out.items });
+    std.debug.print("RESULT tail: {d} rows of bf16 logits after {d} tokens, to {s}\n", .{ k, head, args[5] });
+    return 0;
+}
+
 pub fn run(init: std.process.Init, a: std.mem.Allocator, args: []const [:0]const u8) !u8 {
     if (args.len != 6) return 2;
+    if (std.mem.eql(u8, args[2], "tail")) return tail(init, a, args);
     const text = try std.Io.Dir.cwd().readFileAlloc(init.io, args[3], a, .limited(16 << 20));
     const ids = (try std.json.parseFromSlice([]u32, a, text, .{})).value;
     const at = try std.fmt.parseInt(u32, args[4], 10);
