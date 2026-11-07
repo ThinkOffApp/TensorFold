@@ -11,6 +11,7 @@ const help =
     \\tf-qwen27-import MODEL IDS.json greedy N OUT.json: the prompt and this Mac's N-token greedy reply, for `tail`
     \\tf-qwen27-import MODEL IDS.json floor ROWS.bf16 N: this Mac's N steps against the GB10's `tail` rows
     \\tf-qwen27-import MODEL IDS.json time FILE -: stage times, this Mac alone against FILE restored, 32 decode steps each
+    \\tf-qwen27-import MODEL PROMPTS.json multi DIR GEN: N streams alone, then restored from DIR/s<k>.tfhs, GEN tokens each
 ;
 
 fn read(a: std.mem.Allocator, r: *const q.decode_round.Runner, st: *q.snapshot.State) ![]u8 {
@@ -80,11 +81,15 @@ fn steps(a: std.mem.Allocator, r: *q.decode_round.Runner, n: usize, forced: ?[]c
 
 /// `ids` as prompt chunks of at most the frame's rows, the last one with logits if `last`.
 fn feed(r: *q.decode_round.Runner, ids: []const u32, last: bool) !void {
+    return feedSlot(r, 0, ids, last);
+}
+
+fn feedSlot(r: *q.decode_round.Runner, slot: u32, ids: []const u32, last: bool) !void {
     const cap = r.model.frame.capacity;
     var at: usize = 0;
     while (at < ids.len) {
         const end = @min(ids.len, at + cap);
-        try (q.session.Session{ .runner = r }).promptChunk(ids[at..end], last and end == ids.len);
+        try (q.session.Session{ .runner = r, .slot = slot }).promptChunk(ids[at..end], last and end == ids.len);
         at = end;
     }
 }
@@ -248,6 +253,102 @@ fn timeRun(a: std.mem.Allocator, io: std.Io, r: *q.decode_round.Runner, ids: []c
     std.debug.print("RESULT time: {d} tokens. Mac alone: prefill {d:.1} ms, decode {d:.2} tok/s. Restored: state read {d:.1} ms (not counted), restore {d:.1} ms, tail of {d} tokens {d:.1} ms, decode {d:.2} tok/s; first token {d} vs {d}\n", .{ ids.len, ms(t1 - t0), rate(t2 - t1), ms(read_ns), ms(t4 - t3), ids.len - header.at, ms(t5 - t4), rate(t6 - t5), got_first, want_first });
 }
 
+/// `gen` one-row rounds shared by every slot from its pending token `toks[k]`: each slot's greedy tokens into `out`.
+fn rounds(a: std.mem.Allocator, r: *q.decode_round.Runner, toks: []u32, gen: usize, out: [][]u32) !void {
+    const vocab: u32 = @intCast(r.model.config.vocab);
+    var inputs: [q.attention_plan.max_streams]q.round_plan.Input = undefined;
+    var ids: [q.attention_plan.max_streams][1]u32 = undefined;
+    const row: [1]u32 = .{0};
+    var paths: [q.attention_plan.max_streams][]const u32 = undefined;
+    for (0..gen) |g| {
+        for (toks, 0..) |t, k| {
+            ids[k] = .{t};
+            inputs[k] = .{ .slot = @intCast(k), .start = r.offsets[k], .capacity = r.capacity, .ids = &ids[k] };
+            paths[k] = &row;
+        }
+        var round = try q.round_plan.Round.init(a, inputs[0..toks.len], @intCast(r.model.config.conv_kernel), r.slots, vocab);
+        defer round.deinit();
+        try r.verifyHead(&round, .all);
+        const logits_words = r.model.frame.get(.logits).buffer.slice(u16, (toks.len + 1) * vocab);
+        for (toks, 0..) |*t, k| {
+            const first = round.firsts[k];
+            t.* = try q.session.argmax(logits_words[first * vocab ..][0..vocab]);
+            out[k][g] = t.*;
+        }
+        try r.keep(&round, paths[0..toks.len]);
+    }
+}
+
+/// N streams to `gen` tokens: this Mac alone, then each restored from DIR/s<k>.tfhs with its tail; the same rounds.
+fn multi(a: std.mem.Allocator, io: std.Io, r: *q.decode_round.Runner, prompts: []const []const u32, dir: []const u8, gen: usize) !void {
+    const clock = std.Io.Clock.awake;
+    const n = prompts.len;
+    const bodies = try a.alloc([]const u8, n);
+    const cuts = try a.alloc(u32, n);
+    for (prompts, 0..) |p, k| {
+        const path = try std.fmt.allocPrint(a, "{s}/s{d}.tfhs", .{ dir, k });
+        const file = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(16 << 30));
+        if (file.len < @sizeOf(hs.Header)) return error.NotAHybridState;
+        var header: hs.Header = undefined;
+        @memcpy(std.mem.asBytes(&header), file[0..@sizeOf(hs.Header)]);
+        try header.check(hs.qwen27, p);
+        if (file.len - @sizeOf(hs.Header) != header.total) return error.HybridStateLength;
+        try sized(r, header.at);
+        bodies[k] = file[@sizeOf(hs.Header)..];
+        cuts[k] = header.at;
+    }
+    for (0..r.slots) |k| try r.reset(@intCast(k)); // a warm-up of both kinds of pass, so neither timed one pays it
+    try feedSlot(r, 0, prompts[0][0..@min(prompts[0].len, 128)], true);
+    var warm = [_]u32{try (q.session.Session{ .runner = r }).greedy()};
+    const warm_out = try a.alloc([]u32, 1);
+    warm_out[0] = try a.alloc(u32, 2);
+    try rounds(a, r, &warm, 2, warm_out);
+    const alone_toks = try a.alloc(u32, n);
+    const alone = try a.alloc([]u32, n);
+    const back_toks = try a.alloc(u32, n);
+    const back = try a.alloc([]u32, n);
+    for (alone, back) |*x, *y| {
+        x.* = try a.alloc(u32, gen);
+        y.* = try a.alloc(u32, gen);
+    }
+    for (0..r.slots) |k| try r.reset(@intCast(k));
+    const t0 = clock.now(io).toNanoseconds();
+    for (prompts, 0..) |p, k| {
+        try feedSlot(r, @intCast(k), p, true);
+        alone_toks[k] = try (q.session.Session{ .runner = r, .slot = @intCast(k) }).greedy();
+    }
+    const t1 = clock.now(io).toNanoseconds();
+    const firsts = try a.dupe(u32, alone_toks);
+    try rounds(a, r, alone_toks, gen, alone);
+    const t2 = clock.now(io).toNanoseconds();
+    for (0..r.slots) |k| try r.reset(@intCast(k));
+    const t3 = clock.now(io).toNanoseconds();
+    for (prompts, 0..) |p, k| {
+        const st = try q.snapshot.blank(a, r, null, cuts[k]);
+        defer q.snapshot.drop(a, st);
+        @memcpy(st.buf.contents()[0..bodies[k].len], bodies[k]);
+        try q.snapshot.restoreSlot(a, r, @intCast(k), null, st);
+        try feedSlot(r, @intCast(k), p[cuts[k]..], true);
+        back_toks[k] = try (q.session.Session{ .runner = r, .slot = @intCast(k) }).greedy();
+    }
+    const t4 = clock.now(io).toNanoseconds();
+    var same_first: usize = 0;
+    for (firsts, back_toks) |x, y| same_first += @intFromBool(x == y);
+    try rounds(a, r, back_toks, gen, back);
+    const t5 = clock.now(io).toNanoseconds();
+    var shared: usize = 0; // tokens equal to the Mac-alone reply before the first difference, over all streams
+    for (alone, back) |x, y| shared += std.mem.indexOfDiff(u32, x, y) orelse gen;
+    var tokens: usize = 0;
+    for (prompts) |p| tokens += p.len;
+    const s_of = struct {
+        fn of(ns: anytype) f64 {
+            return @as(f64, @floatFromInt(ns)) / 1e9;
+        }
+    }.of;
+    const total: f64 = @floatFromInt(n * gen);
+    std.debug.print("RESULT multi: {d} streams, {d} prompt tokens, {d} generated each. Mac alone: prefill {d:.3} s, decode {d:.3} s = {d:.2} tok/s. Restored: restore and tails {d:.3} s, decode {d:.3} s = {d:.2} tok/s. First tokens equal {d} of {d}; greedy equal {d} of {d} tokens\n", .{ n, tokens, gen, s_of(t1 - t0), s_of(t2 - t1), total / s_of(t2 - t1), s_of(t4 - t3), s_of(t5 - t4), total / s_of(t5 - t4), same_first, n, shared, n * gen });
+}
+
 pub fn main(init: std.process.Init) !void {
     const a = init.arena.allocator();
     const args = try init.minimal.args.toSlice(a);
@@ -255,7 +356,21 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("{s}", .{help});
         return error.Usage;
     }
-    const text = try std.Io.Dir.cwd().readFileAlloc(init.io, args[2], a, .limited(16 << 20));
+    const text = try std.Io.Dir.cwd().readFileAlloc(init.io, args[2], a, .limited(64 << 20));
+    if (std.mem.eql(u8, args[3], "multi")) { // PROMPTS.json is a list of prompts, one stream each
+        const prompts = (try std.json.parseFromSlice([][]u32, a, text, .{})).value;
+        if (prompts.len == 0 or prompts.len > q.attention_plan.max_streams) return error.BadStreams;
+        const gen = try std.fmt.parseInt(usize, args[5], 10);
+        var longest: usize = 0;
+        for (prompts) |p| longest = @max(longest, p.len);
+        const pool = mtl.objc.Pool.push();
+        defer pool.pop();
+        var why: []const u8 = "";
+        const h = try host.open(init.gpa, init.io, args[1], .{ .context = @intCast(longest + gen + 64), .streams = @intCast(prompts.len), .cache_gib = 0 }, a, &why);
+        defer host.close(h);
+        if (h.runner.slots < prompts.len) return error.SlotsDidNotFit;
+        return multi(a, init.io, &h.runner, prompts, args[4], gen);
+    }
     const ids = (try std.json.parseFromSlice([]u32, a, text, .{})).value;
     if (ids.len < 2) return error.PromptTooShort;
     const pool = mtl.objc.Pool.push();

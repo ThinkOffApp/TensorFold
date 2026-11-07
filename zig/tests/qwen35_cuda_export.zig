@@ -38,9 +38,71 @@ fn tail(init: std.process.Init, a: std.mem.Allocator, args: []const [:0]const u8
     return 0;
 }
 
+/// `<model> export-many <prompts.json> <tail> <dir>`: each prompt to its length less `tail`, in turn, to dir/s<k>.tfhs.
+fn many(init: std.process.Init, a: std.mem.Allocator, args: []const [:0]const u8) !u8 {
+    const text = try std.Io.Dir.cwd().readFileAlloc(init.io, args[3], a, .limited(64 << 20));
+    const prompts = (try std.json.parseFromSlice([][]u32, a, text, .{})).value;
+    const tail_n = try std.fmt.parseInt(u32, args[4], 10);
+    var driver = try cuda.Driver.open();
+    defer driver.close();
+    var ctx = try cuda.Context.init(&driver, 0);
+    defer ctx.deinit();
+    const e = try E.Engine.init(init.gpa, init.io, &ctx, args[1], false, null);
+    defer e.deinit();
+    var buf: [E.max_rows]u32 = undefined;
+    { // a warm-up prompt in its own cache, so the first timed prefill doesn't pay the first launch
+        var warm = try E.Cache.init(init.gpa, e, E.max_rows + 64);
+        defer warm.deinit(init.gpa);
+        const k = @min(E.max_rows, prompts[0].len);
+        @memcpy(buf[0..k], prompts[0][0..k]);
+        try e.forward(&.{.{ .cache = &warm, .rows = k }}, buf[0..k], .last);
+        try e.stream.synchronize();
+    }
+    const clock = std.Io.Clock.awake;
+    var prefill_ns: i96 = 0;
+    var save_ns: i96 = 0;
+    var bytes: u64 = 0;
+    for (prompts, 0..) |ids, i| {
+        if (tail_n == 0 or tail_n >= ids.len) return error.MarkOutOfRange;
+        const at: u32 = @intCast(ids.len - tail_n);
+        var cache = try E.Cache.init(init.gpa, e, ids.len + 64);
+        defer cache.deinit(init.gpa);
+        const t0 = clock.now(init.io).toNanoseconds();
+        var done: usize = 0;
+        while (done < at) {
+            const k = @min(E.max_rows, at - done);
+            @memcpy(buf[0..k], ids[done..][0..k]);
+            try e.forward(&.{.{ .cache = &cache, .rows = k }}, buf[0..k], .last);
+            done += k;
+        }
+        try e.stream.synchronize();
+        const t1 = clock.now(init.io).toNanoseconds();
+        const copy = try q.reuse.saveCache(e, &cache, at, &.{}, false);
+        defer q.reuse.dropCopy(e, copy);
+        var ranges: std.ArrayList(hs.Range) = .empty;
+        try hs.cudaRanges(hs.qwen27, at, 0, &ranges, a);
+        const body = try a.alloc(u8, @intCast(hs.qwen27.bytes(at)));
+        defer a.free(body);
+        try hs.gather(copy.host.bytes[0..copy.len], ranges.items, body);
+        const t2 = clock.now(init.io).toNanoseconds();
+        prefill_ns += t1 - t0;
+        save_ns += t2 - t1;
+        bytes += body.len;
+        const header = hs.Header.of(hs.qwen27, at, ids);
+        const path = try std.fmt.allocPrint(a, "{s}/s{d}.tfhs", .{ args[5], i });
+        var f = try std.Io.Dir.cwd().createFile(init.io, path, .{});
+        defer f.close(init.io);
+        try f.writeStreamingAll(init.io, std.mem.asBytes(&header));
+        try f.writeStreamingAll(init.io, body);
+    }
+    std.debug.print("RESULT export-many: {d} states, {d} bytes; prefill {d:.3} s, save and order {d:.3} s, one prompt after another\n", .{ prompts.len, bytes, @as(f64, @floatFromInt(prefill_ns)) / 1e9, @as(f64, @floatFromInt(save_ns)) / 1e9 });
+    return 0;
+}
+
 pub fn run(init: std.process.Init, a: std.mem.Allocator, args: []const [:0]const u8) !u8 {
     if (args.len != 6) return 2;
     if (std.mem.eql(u8, args[2], "tail")) return tail(init, a, args);
+    if (std.mem.eql(u8, args[2], "export-many")) return many(init, a, args);
     const text = try std.Io.Dir.cwd().readFileAlloc(init.io, args[3], a, .limited(16 << 20));
     const ids = (try std.json.parseFromSlice([]u32, a, text, .{})).value;
     const at = try std.fmt.parseInt(u32, args[4], 10);
