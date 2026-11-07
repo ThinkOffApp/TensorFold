@@ -316,6 +316,7 @@ fn multi(a: std.mem.Allocator, io: std.Io, r: *q.decode_round.Runner, prompts: [
     }
     for (0..r.slots) |k| try r.reset(@intCast(k));
     const t0 = clock.now(io).toNanoseconds();
+    if (alone_only) std.debug.print("PHASE kind=prefill edge=begin awake_ns={d}\n", .{t0});
     for (prompts, 0..) |p, k| {
         try feedSlot(r, @intCast(k), p, true);
         alone_toks[k] = try (q.session.Session{ .runner = r, .slot = @intCast(k) }).greedy();
@@ -325,6 +326,12 @@ fn multi(a: std.mem.Allocator, io: std.Io, r: *q.decode_round.Runner, prompts: [
     try rounds(a, r, alone_toks, gen, alone);
     const t2 = clock.now(io).toNanoseconds();
     if (alone_only) {
+        std.debug.print("PHASE kind=prefill edge=end awake_ns={d}\nPHASE kind=decode edge=begin awake_ns={d}\nPHASE kind=decode edge=end awake_ns={d}\n", .{ t1, t1, t2 });
+        for (firsts, alone, 0..) |f, toks, k| { // each stream's first token, then its `gen` greedy tokens
+            std.debug.print("TOKENS stream={d} ids={d}", .{ k, f });
+            for (toks) |t| std.debug.print(",{d}", .{t});
+            std.debug.print("\n", .{});
+        }
         var prompt_tokens: usize = 0;
         for (prompts) |p| prompt_tokens += p.len;
         const ps = @as(f64, @floatFromInt(t1 - t0)) / 1e9;
