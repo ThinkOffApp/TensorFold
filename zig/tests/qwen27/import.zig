@@ -12,6 +12,7 @@ const help =
     \\tf-qwen27-import MODEL IDS.json floor ROWS.bf16 N: this Mac's N steps against the GB10's `tail` rows
     \\tf-qwen27-import MODEL IDS.json time FILE -: stage times, this Mac alone against FILE restored, 32 decode steps each
     \\tf-qwen27-import MODEL PROMPTS.json multi DIR GEN: N streams alone, then restored from DIR/s<k>.tfhs, GEN tokens each
+    \\                (DIR "-": the Mac-alone half only, a production control for another method's prompts)
 ;
 
 fn read(a: std.mem.Allocator, r: *const q.decode_round.Runner, st: *q.snapshot.State) ![]u8 {
@@ -285,7 +286,9 @@ fn multi(a: std.mem.Allocator, io: std.Io, r: *q.decode_round.Runner, prompts: [
     const n = prompts.len;
     const bodies = try a.alloc([]const u8, n);
     const cuts = try a.alloc(u32, n);
+    const alone_only = std.mem.eql(u8, dir, "-"); // the production Mac-alone control only, no state files
     for (prompts, 0..) |p, k| {
+        if (alone_only) break;
         const path = try std.fmt.allocPrint(a, "{s}/s{d}.tfhs", .{ dir, k });
         const file = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(16 << 30));
         if (file.len < @sizeOf(hs.Header)) return error.NotAHybridState;
@@ -321,6 +324,14 @@ fn multi(a: std.mem.Allocator, io: std.Io, r: *q.decode_round.Runner, prompts: [
     const firsts = try a.dupe(u32, alone_toks);
     try rounds(a, r, alone_toks, gen, alone);
     const t2 = clock.now(io).toNanoseconds();
+    if (alone_only) {
+        var prompt_tokens: usize = 0;
+        for (prompts) |p| prompt_tokens += p.len;
+        const ps = @as(f64, @floatFromInt(t1 - t0)) / 1e9;
+        const ds = @as(f64, @floatFromInt(t2 - t1)) / 1e9;
+        std.debug.print("RESULT alone: {d} streams, {d} prompt tokens, {d} generated each. Mac alone: prefill {d:.3} s, decode {d:.3} s = {d:.2} tok/s\n", .{ n, prompt_tokens, gen, ps, ds, @as(f64, @floatFromInt(n * gen)) / ds });
+        return;
+    }
     for (0..r.slots) |k| try r.reset(@intCast(k));
     const t3 = clock.now(io).toNanoseconds();
     for (prompts, 0..) |p, k| {
