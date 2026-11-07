@@ -369,6 +369,10 @@ pub fn main(init: std.process.Init) !void {
         const h = try host.open(init.gpa, init.io, args[1], .{ .context = @intCast(longest + gen + 64), .streams = @intCast(prompts.len), .cache_gib = 0 }, a, &why);
         defer host.close(h);
         if (h.runner.slots < prompts.len) return error.SlotsDidNotFit;
+        for (0..prompts.len) |k| { // each slot's K/V rows, taken as the server takes them on first use, made resident
+            const added = try h.runner.ensure(@intCast(k));
+            if (h.back.grow) |g| g.added(g.ctx, added);
+        }
         return multi(a, init.io, &h.runner, prompts, args[4], gen);
     }
     const ids = (try std.json.parseFromSlice([]u32, a, text, .{})).value;
