@@ -63,6 +63,23 @@ fn kl(p: []const f32, qq: []const f32) f64 {
     return d;
 }
 
+/// `n` steps on from the slot's last logits: each step's logits kept, then its token fed back as a one-row chunk.
+/// With `forced` null each token is the step's argmax; else the step feeds `forced`'s token (teacher forcing).
+fn steps(a: std.mem.Allocator, r: *q.decode_round.Runner, n: usize, forced: ?[]const u32) !struct { toks: []u32, logits: [][]f32 } {
+    const toks = try a.alloc(u32, n);
+    const all = try a.alloc([]f32, n);
+    for (toks, all, 0..) |*t, *l, i| {
+        l.* = try logits(a, r);
+        t.* = if (forced) |f| f[i] else @intCast(argmax(l.*));
+        try (q.session.Session{ .runner = r }).promptChunk(&.{t.*}, true);
+    }
+    return .{ .toks = toks, .logits = all };
+}
+
+/// The most KL a restored state may cost at any of the steps: zeroed or swapped states cost far more (see the receipt).
+const close_kl = 0.02;
+const n_steps = 32;
+
 /// The state's bytes in this order must be exactly what this engine snapshots, or the geometry is not this model's.
 fn sized(r: *const q.decode_round.Runner, at: u32) !void {
     if (q.snapshot.slotBytes(r, null, at) != hs.qwen27.bytes(at)) return error.HybridGeometryDiffers;
@@ -98,26 +115,34 @@ fn importState(a: std.mem.Allocator, io: std.Io, r: *q.decode_round.Runner, ids:
     // the Mac's own pass over the whole prompt: what the restored state must lead to
     try r.reset(0);
     try session.promptChunk(ids, true);
-    const want = try logits(a, r);
-    defer a.free(want);
+    const want = try steps(a, r, n_steps, null); // the Mac's own greedy reply, every step's logits
     // a blank state filled with the file's bytes, restored over a slot that held the whole prompt
     const st = try q.snapshot.blank(a, r, null, header.at);
     defer q.snapshot.drop(a, st);
     @memcpy(st.buf.contents()[0..body.len], body);
     try q.snapshot.restoreSlot(a, r, 0, null, st);
     try session.promptChunk(ids[header.at..], true);
-    const got = try logits(a, r);
-    defer a.free(got);
+    const got = try steps(a, r, n_steps, want.toks); // the same reply fed through the restored state
+    var same = true;
     var worst: f32 = 0;
-    for (want, got) |x, y| worst = @max(worst, @abs(x - y));
-    const same = std.mem.eql(f32, want, got);
-    const tw = argmax(want);
-    const tg = argmax(got);
-    const d = kl(want, got);
-    std.debug.print("RESULT import: restored {d} tokens, prefilled {d}; logits {s}, worst |diff| {d:.4}, KL {e:.3} nats, first token {d} vs {d}\n", .{ header.at, ids.len - header.at, if (same) "bit-equal" else "differ", worst, d, tg, tw });
+    var d: f64 = 0; // the most KL at any step
+    var sum: f64 = 0;
+    var agree: usize = 0;
+    for (want.logits, got.logits, want.toks) |x, y, t| {
+        same = same and std.mem.eql(f32, x, y);
+        for (x, y) |u, v| worst = @max(worst, @abs(u - v));
+        const k = kl(x, y);
+        d = @max(d, k);
+        sum += k;
+        agree += @intFromBool(argmax(y) == t);
+    }
+    const tw = want.toks[0];
+    const tg = argmax(got.logits[0]);
+    std.debug.print("RESULT import: restored {d} tokens, prefilled {d}; over {d} teacher-forced steps logits {s}, worst |diff| {d:.4}, KL max {e:.3} mean {e:.3} nats, top-1 {d} of {d}; first token {d} vs {d}\n", .{ header.at, ids.len - header.at, n_steps, if (same) "bit-equal" else "differ", worst, d, sum / n_steps, agree, n_steps, tg, tw });
     if (exact and !same) return error.ImportNotExact;
     if (tw != tg) return error.ImportFirstTokenDiffers;
-    std.debug.print("PASS import ({s})\n", .{if (exact) "exact" else "close: same first token"});
+    if (d > close_kl) return error.ImportTooFar;
+    std.debug.print("PASS import ({s})\n", .{if (exact) "exact" else "close: same first token, every step's KL within 0.02 nats"});
 }
 
 pub fn main(init: std.process.Init) !void {
