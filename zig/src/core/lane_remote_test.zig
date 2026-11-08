@@ -537,3 +537,33 @@ test "remote prefix kept: a pull past a shorter kept state releases the lookup's
     for (store.entries.items) |e| try t.expectEqual(@as(u32, 0), e.borrowers); // else the shorter state is never evicted
     try t.expect(store.find(&six, &.{}, &.{}).?.remote); // the pass kept 5, marked remote
 }
+
+/// Slot 0's own resume point, as a backend standing `at` tokens into every prompt reports it.
+const Slot = struct {
+    at: u32,
+    fn peek(ctx: *anyopaque, _: []const u32, _: []const [2]u32) u32 {
+        const s: *Slot = @ptrCast(@alignCast(ctx));
+        return s.at;
+    }
+};
+
+test "remote prefix kept: slot 0's own state as far as a kept remote state wins over it, and the pass keeps exact states" {
+    var none: u8 = 0;
+    var store = pc.Store.init(t.allocator, .{ .ptr = &none, .vtable = &.{ .bytes = Kept.bytes, .save = Kept.save, .restore = Kept.restore, .drop = Kept.drop } }, .{ .min_prompt = 0 }, 1 << 20);
+    defer store.deinit();
+    store.keep_remote = true;
+    try t.expect(store.keep(&six, 4, null, &.{}, &.{}));
+    store.keep_remote = false;
+    var peer: Peer = .{ .at = 4 };
+    defer peer.kept.deinit(t.allocator);
+    var slot: Slot = .{ .at = 3 };
+    const peek: remote.ResumePeek = .{ .ctx = &slot, .at = Slot.peek };
+    const short = try runKeep(&peer, &.{ .prompt = &six, .max_tokens = 2, .history_len = 4 }, null, &store, .{ .keep = true, .peek = peek });
+    try t.expect(short.restoring and short.remote and short.at == 4); // slot 0 short of it: the remote state is restored
+    slot.at = 4;
+    const level = try runKeep(&peer, &.{ .prompt = &six, .max_tokens = 2, .history_len = 5 }, null, &store, .{ .keep = true, .peek = peek });
+    try t.expect(!level.restoring and !level.remote and level.marks == 1); // as far: slot 0's own exact state goes on
+    try t.expectEqual(@as(u32, 0), peer.fills);
+    for (store.entries.items) |e| try t.expectEqual(@as(u32, 0), e.borrowers); // the remote state was let go
+    try t.expect(!store.find(&six, &.{}, &.{}).?.remote); // and the mark past it is kept exact
+}
