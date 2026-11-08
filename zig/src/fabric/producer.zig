@@ -54,7 +54,9 @@ pub const Table = struct {
     pub fn add(t: *Table, handoff: [16]u8, request: []const u8, entry: Entry) !void {
         t.hold();
         defer t.lock.unlock();
-        try t.held.put(t.gpa, handoff, .{ .entry = entry, .request = request, .added = t.clock() });
+        const slot = try t.held.getOrPut(t.gpa, handoff);
+        if (slot.found_existing) return error.HandoffHeld; // the export it holds stays reachable by CLOSE and its TTL
+        slot.value_ptr.* = .{ .entry = entry, .request = request, .added = t.clock() };
     }
 
     /// An entry stays valid until the serving thread itself releases it (only it finishes and expires them).
@@ -258,6 +260,22 @@ fn checksumOption(gpa: Allocator, body: []const u8) !bool {
         .array => |a| a.items.len > 0,
         .object => |o| o.count() > 0,
     };
+}
+
+test "the table refuses a hand-off id it already holds, so the entry it holds is the one served" {
+    const clock = struct {
+        fn now() u64 {
+            return 0;
+        }
+    }.now;
+    var t: Table = .{ .gpa = std.testing.allocator, .ttl_ns = std.time.ns_per_s, .clock = clock };
+    defer t.deinit();
+    const id: [16]u8 = @splat(3);
+    try t.add(id, "first", .{ .failed = "first" });
+    try std.testing.expectError(error.HandoffHeld, t.add(id, "second", .{ .failed = "second" }));
+    try std.testing.expectEqualStrings("first", t.get(id).?.failed);
+    try t.finish(id);
+    try t.add(id, "third", .{ .failed = "third" }); // released: the id is free again
 }
 
 test "checksum options follow Python truthiness" {

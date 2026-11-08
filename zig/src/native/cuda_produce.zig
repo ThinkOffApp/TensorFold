@@ -55,15 +55,15 @@ pub const Produce = struct {
         defer done.deinit(p.gpa);
         var since: u64 = 0;
         while (!p.serving.stop.load(.acquire)) {
+            p.table.expire() catch {}; // exports age out and are freed while the link is down too
+            p.table.takeFinished(&done) catch {};
+            for (done.items) |name| reap(p, name);
+            done.clearRetainingCapacity();
             if (!p.attached(&since)) continue;
             // a new connection's HELLO zeroes the request word and its client counts from 1 again
             if (fabric.words.load(p.box.wordAt(fabric.layout.request_word)) == 0) p.serving.service.last = 0;
-            p.table.expire() catch {};
             if (p.serving.service.next(std.time.ns_per_ms) catch return) |req|
                 p.serving.responder.handle(req.seq, req.payload) catch |err| p.serving.responder.failed(req.seq, err) catch return;
-            p.table.takeFinished(&done) catch continue;
-            for (done.items) |name| reap(p, name);
-            done.clearRetainingCapacity();
         }
     }
 
@@ -151,7 +151,9 @@ pub const Produce = struct {
         {
             while (!p.lock.tryLock()) std.atomic.spinLoopHint();
             defer p.lock.unlock();
-            try p.held.put(p.gpa, h.id, held);
+            const slot = try p.held.getOrPut(p.gpa, h.id);
+            if (slot.found_existing) return error.HandoffHeld; // a reused id: the export already held stays
+            slot.value_ptr.* = held;
         }
         p.table.add(h.id, &held.name, .{ .ready = &held.exp }) catch |err| {
             while (!p.lock.tryLock()) std.atomic.spinLoopHint();
