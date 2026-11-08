@@ -171,6 +171,16 @@ test "remote prefill's default policy: 4096 prompt tokens at least, in 512-token
     try std.testing.expectEqual(@as(?u64, 4096), p.upto(4097, 0));
 }
 
+test "remote prefill pulls by default only 4096 tokens or more past the prefix the Mac resumes" {
+    if (std.c.getenv("TF_PREFILL_MIN") != null or std.c.getenv("TF_PREFILL_CHUNK") != null) return error.SkipZigTest;
+    var p: Pull = undefined;
+    p.closing = .init(false);
+    p.off = .init(false);
+    p.remote.policy = try policy();
+    try std.testing.expect(Pull.wants(&p, 5600, 1000)); // the prefix ends at 5120, 4120 past the cached 1000
+    try std.testing.expect(!Pull.wants(&p, 5600, 2000)); // 3120 past it: the Mac prefills it
+}
+
 test "remote prefill refuses a TF_PREFILL_AHEAD or TF_PREFILL_TIMEOUT_S that is not a whole number" {
     const env = @import("sys").env;
     for ([_][*:0]const u8{ "TF_PREFILL_AHEAD", "TF_PREFILL_TIMEOUT_S" }) |name| {
