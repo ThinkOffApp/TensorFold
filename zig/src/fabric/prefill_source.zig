@@ -64,7 +64,7 @@ pub const PrefillSource = struct {
     }
 };
 
-/// Asks a producer to prefill `tokens` under a handoff id: the prefix and one token past it (exported: all but that one).
+/// Asks a producer to prefill `tokens` under a handoff id: its prefix and one more token (all but it is exported).
 pub const Trigger = struct {
     ptr: *anyopaque,
     start_fn: *const fn (ptr: *anyopaque, handoff: [16]u8, tokens: []const u32) anyerror!void,
