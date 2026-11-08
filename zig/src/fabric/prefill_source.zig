@@ -64,7 +64,7 @@ pub const PrefillSource = struct {
     }
 };
 
-/// Asks a producer to prefill tokens under a handoff id (an in-band request kind once MCDMA's protocol has one).
+/// Asks a producer to prefill `tokens` under a handoff id: the prefix and one token past it (exported: all but that one).
 pub const Trigger = struct {
     ptr: *anyopaque,
     start_fn: *const fn (ptr: *anyopaque, handoff: [16]u8, tokens: []const u32) anyerror!void,
@@ -101,8 +101,9 @@ pub const Remote = struct {
         if (getentropy(&id, 8) != 0) return error.NoEntropy;
         std.mem.writeInt(u64, id[8..16], r.next_id, .little);
         r.next_id += 1;
+        if (o.upto >= prompt.len) return error.PrefixTooLong; // a token past the prefix goes too
         const tokens = prompt[0..@intCast(o.upto)];
-        try r.trigger.start_fn(r.trigger.ptr, id, tokens);
+        try r.trigger.start_fn(r.trigger.ptr, id, prompt[0..@intCast(o.upto + 1)]);
         var arena: std.heap.ArenaAllocator = .init(r.gpa);
         defer arena.deinit();
         const pass: decoder.Sink = .{ .ptr = sink.ptr, .put_fn = sink.put_fn };

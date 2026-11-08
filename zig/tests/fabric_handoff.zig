@@ -373,7 +373,8 @@ test "the remote prefill source fills whole chunks and commits them as remote, n
         }
     };
     const Trig = struct {
-        fn start(_: *anyopaque, _: [16]u8, _: []const u32) anyerror!void {
+        fn start(ptr: *anyopaque, _: [16]u8, tokens: []const u32) anyerror!void {
+            @as(*usize, @ptrCast(@alignCast(ptr))).* = tokens.len; // the prefix and one token past it
             return error.ProducerUnreachable;
         }
     };
@@ -382,7 +383,7 @@ test "the remote prefill source fills whole chunks and commits them as remote, n
     link.up();
     const mac = link.box(0);
     var client = try mailbox.Client.init(&mac, fabric.words.native, std.time.ns_per_s);
-    var t: u8 = 0;
+    var t: usize = 0;
     var remote: ps.Remote = .{ .gpa = gpa, .policy = .{ .enabled = true, .min_prefix = 64, .chunk = 32 }, .client = &client, .trigger = .{ .ptr = &t, .start_fn = Trig.start }, .model = "org/model" };
     const src = remote.source();
     var prompt: [100]u32 = undefined;
@@ -394,5 +395,6 @@ test "the remote prefill source fills whole chunks and commits them as remote, n
     const sink: ps.StateSink = .{ .ptr = &st, .put_fn = State.put, .commit_fn = State.commit, .abort_fn = State.abort };
     try std.testing.expectError(error.ProducerUnreachable, src.fill(&prompt, offer, sink));
     try std.testing.expect(st.aborted and st.committed == null);
+    try std.testing.expectEqual(@as(usize, 97), t);
     try std.testing.expectEqual(@as(?ps.Offer, null), src.offer(prompt[0..40], 0));
 }

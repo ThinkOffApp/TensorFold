@@ -17,7 +17,7 @@ const Trigger = struct {
 
     fn start(ptr: *anyopaque, handoff: [16]u8, tokens: []const u32) anyerror!void {
         const t: *Trigger = @ptrCast(@alignCast(ptr));
-        t.exp = .{ .handoff = handoff, .tokens = tokens, .first_token = 0, .tokens_per_row = host.remote.block, .layers = t.built.layers, .sources = t.built.sources };
+        t.exp = .{ .handoff = handoff, .tokens = tokens[0 .. tokens.len - 1], .first_token = 0, .tokens_per_row = host.remote.block, .layers = t.built.layers, .sources = t.built.sources };
         try t.table.add(handoff, "import-link", .{ .ready = &t.exp });
     }
 };
