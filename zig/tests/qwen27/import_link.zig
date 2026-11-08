@@ -55,7 +55,7 @@ pub fn pulled(a: std.mem.Allocator, io: std.Io, r: *const q.decode_round.Runner,
         .model = "Qwen3.8-27B",
         .protocol = fabric.wire.recurrent_version,
     } };
-    const got = (try pull.pull(ids)) orelse return error.NoOffer;
+    const got = (try pull.pull(ids, 0)) orelse return error.NoOffer;
     const st: *q.snapshot.State = @ptrCast(@alignCast(got.saved));
     errdefer q.snapshot.drop(a, st);
     if (got.at != at) return error.LinkPrefixMoved;

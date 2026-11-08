@@ -4,7 +4,6 @@ const lanes = @import("lanes");
 const Allocator = std.mem.Allocator;
 pub const profile = @import("profile");
 pub const tfvideo = @import("tfvideo.zig");
-pub const lane_remote = @import("lane_remote.zig"); // #1594 step 2b: prompt prefixes another machine fills
 pub const DraftSources = @import("draft_sources.zig").Sources;
 /// The server's name for one request, unique while the process lives.
 pub const Id = u64;
@@ -90,6 +89,7 @@ pub const Request = struct {
     images: []const Image = &.{},
     /// The prompt as the prompt cache matches it (each image's placeholders by its content); empty: ``prompt``.
     cache_key: []const u32 = &.{},
+    handoff: ?@import("lane_export.zig").Handoff = null, // kv_transfer_params.mcdma_handoff (#1594 step 2b)
 
     /// The prompt as the prompt cache matches it: an image request's placeholders stand for their images.
     pub fn cacheKey(r: *const Request) []const u32 {
@@ -312,7 +312,7 @@ pub const Open = struct {
     ssd_experts_gib: ?f64 = null,
     ple_on_ssd: bool = false,
     fsr_trace: ?[]const u8 = null,
-    remote_prefill: lane_remote.Flags = .{}, // --prefill-from and --mcdma-link (#1594 step 2b)
+    remote_prefill: @import("lane_remote.zig").Flags = .{}, // --prefill-from and --mcdma-link (#1594 step 2b)
     /// --learn: where shared prompt states are kept on disk for later sessions and servers (null: off).
     learn: ?[]const u8 = null,
     /// --learn-min-free-gib: filesystem space kept free before any learned-state write.

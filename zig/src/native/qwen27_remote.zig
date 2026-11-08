@@ -7,8 +7,8 @@ const fabric = tf.fabric;
 const ps = fabric.prefill_source;
 const hs = fabric.hybrid_state;
 const hx = fabric.hybrid_export;
-const Filled = api.lane_remote.Filled;
-const Flags = api.lane_remote.Flags;
+const Filled = api.LaneHost.Remote.Filled;
+const Flags = api.LaneHost.Remote.Flags;
 const trigger = @import("remote_trigger.zig");
 
 /// Tokens to an attention layer's page row in the hand-off; the GB10's export uses the same.
@@ -23,17 +23,20 @@ pub const Pull = struct {
     mutex: std.Io.Mutex = .init,
     pulls: u64 = 0,
     ns: u64 = 0, // wall time of every pull, the trigger's prefill included
+    running: std.atomic.Value(u32) = .init(0), // the lane host's fill threads under way
+    closing: std.atomic.Value(bool) = .init(false), // the server stops: waiting fills give up
 
-    pub fn source(p: *Pull) api.lane_remote.Source {
-        return .{ .ptr = p, .fill = fill, .drop = drop };
+    pub fn source(p: *Pull) api.LaneHost.Remote.Source {
+        return .{ .ptr = p, .wants = wants, .fill = fill, .drop = drop, .running = &p.running };
     }
 
-    /// A prefix of `prompt` on a page-row boundary, filled remotely and landed whole, or an error naming why not.
-    pub fn pull(p: *Pull, prompt: []const u32) !?Filled {
+    /// A prefix of `prompt` beyond `cached` on a page-row boundary, filled remotely and landed whole.
+    pub fn pull(p: *Pull, prompt: []const u32, cached: u64) !?Filled {
         p.mutex.lockUncancelable(p.io);
         defer p.mutex.unlock(p.io);
+        if (p.closing.load(.acquire)) return null;
         const src = p.remote.source();
-        const offer = src.offer(prompt, 0) orelse return null;
+        const offer = src.offer(prompt, cached) orelse return null;
         const at: u32 = std.math.cast(u32, offer.upto) orelse return error.PrefixTooLong;
         const plan: hx.Plan = .{ .g = hs.qwen27, .s = hx.qwen27, .at = at, .block = block };
         try plan.check();
@@ -49,9 +52,14 @@ pub const Pull = struct {
         return .{ .saved = st, .at = at };
     }
 
-    fn fill(ptr: *anyopaque, prompt: []const u32) anyerror!?Filled {
+    fn wants(ptr: *anyopaque, len: u64, cached: u64) bool {
         const p: *Pull = @ptrCast(@alignCast(ptr));
-        return p.pull(prompt);
+        return !p.closing.load(.acquire) and !p.remote.client.poisoned and p.remote.policy.upto(len, cached) != null;
+    }
+
+    fn fill(ptr: *anyopaque, prompt: []const u32, cached: u64) anyerror!?Filled {
+        const p: *Pull = @ptrCast(@alignCast(ptr));
+        return p.pull(prompt, cached);
     }
 
     fn drop(ptr: *anyopaque, saved: *anyopaque) void {
@@ -102,7 +110,10 @@ pub const Link = struct {
         return l;
     }
 
+    /// After the lane host stopped: fills still under way end first (one mid-pull finishes it).
     pub fn stop(l: *Link, gpa: std.mem.Allocator) void {
+        l.pull.closing.store(true, .release);
+        while (l.pull.running.load(.acquire) > 0) std.Io.sleep(l.pull.io, .fromMilliseconds(1), .awake) catch {};
         if (l.pull.pulls > 0) std.log.info("remote prefill: {d} prefixes pulled, {d:.1} ms each on average", .{ l.pull.pulls, @as(f64, @floatFromInt(l.pull.ns)) / @as(f64, @floatFromInt(l.pull.pulls)) / 1e6 });
         gpa.free(l.http.url);
         l.box.close();

@@ -4,6 +4,7 @@ const lanes = @import("lanes");
 const api = @import("engine_api.zig");
 const pc = @import("prompt_cache.zig");
 const remote = @import("lane_remote.zig");
+const exporting = @import("lane_export.zig");
 const t = std.testing;
 
 /// Another machine's prefill, in the fake backend's kept-state form: the prefix's own tokens.
@@ -12,9 +13,15 @@ const Peer = struct {
     fail: bool = false,
     fills: u32 = 0,
     drops: std.atomic.Value(u32) = .init(0),
+    running: std.atomic.Value(u32) = .init(0),
     kept: std.ArrayList(u32) = .empty,
 
-    fn fill(ptr: *anyopaque, prompt: []const u32) anyerror!?remote.Filled {
+    fn wants(ptr: *anyopaque, _: u64, cached: u64) bool {
+        const p: *Peer = @ptrCast(@alignCast(ptr));
+        return p.at > cached;
+    }
+
+    fn fill(ptr: *anyopaque, prompt: []const u32, _: u64) anyerror!?remote.Filled {
         const p: *Peer = @ptrCast(@alignCast(ptr));
         p.fills += 1;
         if (p.fail) return error.LinkDown;
@@ -38,6 +45,7 @@ const Seen = struct {
     marks: usize = 0,
     hooked: bool = false,
     prefilled: ?u32 = null,
+    tokens: usize = 0,
     done: std.atomic.Value(bool) = .init(false),
 
     fn chunk(ctx: *anyopaque, s: *lanes.Stream, n: usize) void {
@@ -50,13 +58,61 @@ const Seen = struct {
         const x: *Seen = @ptrCast(@alignCast(ctx));
         switch (ev.*) {
             .prefilled => |n| x.prefilled = n,
+            .tokens => |ts| x.tokens += ts.len,
             .finished => x.done.store(true, .release),
             else => {},
         }
     }
 };
 
+/// A producer's exporter over the fake backend's copies: what it was handed, or why not.
+const Exp = struct {
+    fake: *lanes.fake.Fake = undefined,
+    fail: bool = false,
+    calls: u32 = 0,
+    tokens: ?usize = null,
+    kept: ?usize = null,
+    why: ?[]const u8 = null,
+
+    fn save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!pc.Saved {
+        const e: *Exp = @ptrCast(@alignCast(ptr));
+        if (e.fail) return error.SaveRefused;
+        return e.fake.save(@ptrCast(@alignCast(owner.?)), at);
+    }
+    fn bytes(_: *anyopaque, _: u32) u64 {
+        return 0;
+    }
+    fn restore(_: *anyopaque, _: ?*anyopaque, _: pc.Saved) anyerror!void {}
+    fn drop(ptr: *anyopaque, saved: pc.Saved) void {
+        const e: *Exp = @ptrCast(@alignCast(ptr));
+        e.fake.drop(saved);
+    }
+    fn exported(ptr: *anyopaque, _: exporting.Handoff, tokens: []const u32, saved: pc.Saved) void {
+        const e: *Exp = @ptrCast(@alignCast(ptr));
+        e.calls += 1;
+        e.tokens = tokens.len;
+        e.kept = @as(*std.ArrayList(u32), @ptrCast(@alignCast(saved))).items.len;
+        e.fake.drop(saved);
+    }
+    fn failed(ptr: *anyopaque, _: exporting.Handoff, why: []const u8) void {
+        const e: *Exp = @ptrCast(@alignCast(ptr));
+        e.calls += 1;
+        e.why = why;
+    }
+    fn exporter(e: *Exp) exporting.Exporter {
+        return .{ .ptr = e, .snapshots = .{ .ptr = e, .vtable = &.{ .bytes = bytes, .save = save, .restore = restore, .drop = drop } }, .exported = exported, .failed = failed };
+    }
+};
+
 fn run(peer: *Peer, request: *const api.Request) !Seen {
+    return runAs(peer, request, null);
+}
+
+fn runAs(peer: *Peer, request: *const api.Request, exp: ?*Exp) !Seen {
+    return runWith(peer, request, exp, null);
+}
+
+fn runWith(peer: *Peer, request: *const api.Request, exp: ?*Exp, cache: ?*pc.Store) !Seen {
     var cfg = try lanes.Config.init(t.allocator, .{}, 1, 0);
     defer cfg.deinit(t.allocator);
     var seen: Seen = .{};
@@ -66,12 +122,17 @@ fn run(peer: *Peer, request: *const api.Request) !Seen {
     var core = lanes.Engine.init(t.allocator, &cfg, fake.backend(), clock.clock());
     defer core.deinit();
     var host = api.LaneHost.init(t.allocator, t.io, &core, .{ .lanes = 1 });
-    host.remote = .{ .ptr = peer, .fill = Peer.fill, .drop = Peer.drop };
+    host.remote = .{ .ptr = peer, .wants = Peer.wants, .fill = Peer.fill, .drop = Peer.drop, .running = &peer.running };
+    if (cache) |store| host.cache = store;
+    if (exp) |e| {
+        e.fake = &fake;
+        host.exporter = e.exporter();
+    }
     try host.start();
     defer host.stop();
     try host.engine().submit(1, request, .{ .ctx = &seen, .event = Seen.event });
     const until = std.Io.Clock.awake.now(t.io).toNanoseconds() + 5 * std.time.ns_per_s;
-    while (!seen.done.load(.acquire)) {
+    while (!seen.done.load(.acquire) or peer.running.load(.acquire) > 0) { // a fill's thread is done with the host
         if (std.Io.Clock.awake.now(t.io).toNanoseconds() > until) return error.RemoteFixtureTimeout;
         try std.Io.sleep(t.io, .fromMilliseconds(1), .awake);
     }
@@ -115,4 +176,78 @@ test "remote prefix: one covering the whole prompt is dropped unused, and a back
     defer quiet.kept.deinit(t.allocator);
     _ = try run(&quiet, &.{ .prompt = &six, .max_tokens = 0, .background = true });
     try t.expectEqual(@as(u32, 0), quiet.fills);
+}
+
+const id: exporting.Handoff = .{ .id = @splat(0x2b) };
+
+test "handoff: the producer's stream exports its state before the prompt's last token, once, and draws one token" {
+    var none: Peer = .{ .at = 0 };
+    var e: Exp = .{};
+    const seen = try runAs(&none, &.{ .prompt = &six, .max_tokens = 8, .handoff = id }, &e);
+    try t.expectEqual(@as(u32, 1), e.calls);
+    try t.expectEqual(@as(?usize, 5), e.tokens);
+    try t.expectEqual(@as(?usize, 5), e.kept);
+    try t.expectEqual(@as(usize, 1), seen.tokens);
+    try t.expectEqual(@as(u32, 0), none.fills);
+}
+
+test "handoff: a save that fails reaches the decoder's reason, and a server with no exporter refuses the request" {
+    var none: Peer = .{ .at = 0 };
+    var e: Exp = .{ .fail = true };
+    _ = try runAs(&none, &.{ .prompt = &six, .max_tokens = 1, .handoff = id }, &e);
+    try t.expectEqual(@as(u32, 1), e.calls);
+    try t.expectEqualStrings("SaveRefused", e.why.?);
+    try t.expectError(error.InvalidRequest, run(&none, &.{ .prompt = &six, .max_tokens = 1, .handoff = id }));
+}
+
+/// A family whose copies are the fake backend's kept form, made without a stream: the prompt's first `at` tokens.
+const Kept = struct {
+    fn bytes(_: *anyopaque, _: u32) u64 {
+        return 64;
+    }
+    fn save(_: *anyopaque, _: ?*anyopaque, at: u32) anyerror!pc.Saved {
+        const kept = try t.allocator.create(std.ArrayList(u32));
+        kept.* = .empty;
+        try kept.appendSlice(t.allocator, six[0..at]);
+        return kept;
+    }
+    fn restore(_: *anyopaque, _: ?*anyopaque, _: pc.Saved) anyerror!void {}
+    fn drop(_: *anyopaque, saved: pc.Saved) void {
+        const kept: *std.ArrayList(u32) = @ptrCast(@alignCast(saved));
+        kept.deinit(t.allocator);
+        t.allocator.destroy(kept);
+    }
+};
+
+test "remote prefix: a prefix the cache already holds starts no remote fill, and the cache's state is restored" {
+    var none: u8 = 0;
+    var store = pc.Store.init(t.allocator, .{ .ptr = &none, .vtable = &.{ .bytes = Kept.bytes, .save = Kept.save, .restore = Kept.restore, .drop = Kept.drop } }, .{ .min_prompt = 0 }, 1 << 20);
+    defer store.deinit();
+    try t.expect(store.keep(&six, 4, null, &.{}, &.{}));
+    var peer: Peer = .{ .at = 4 };
+    defer peer.kept.deinit(t.allocator);
+    const seen = try runWith(&peer, &.{ .prompt = &six, .max_tokens = 2 }, null, &store);
+    try t.expect(seen.restoring and !seen.remote);
+    try t.expectEqual(@as(u32, 4), seen.at);
+    try t.expectEqual(@as(?u32, 4), seen.prefilled);
+    try t.expectEqual(@as(u32, 0), peer.fills);
+}
+
+test "remote prefix: a request a closed host refuses starts no remote fill" {
+    var cfg = try lanes.Config.init(t.allocator, .{}, 1, 0);
+    defer cfg.deinit(t.allocator);
+    var fake: lanes.fake.Fake = .{ .gpa = t.allocator };
+    defer fake.deinit();
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(t.allocator, &cfg, fake.backend(), clock.clock());
+    defer core.deinit();
+    var host = api.LaneHost.init(t.allocator, t.io, &core, .{ .lanes = 1 });
+    var peer: Peer = .{ .at = 4 };
+    defer peer.kept.deinit(t.allocator);
+    host.remote = .{ .ptr = &peer, .wants = Peer.wants, .fill = Peer.fill, .drop = Peer.drop, .running = &peer.running };
+    try host.start();
+    host.stop();
+    var seen: Seen = .{};
+    try t.expectError(error.Closed, host.engine().submit(1, &.{ .prompt = &six, .max_tokens = 2 }, .{ .ctx = &seen, .event = Seen.event }));
+    try t.expectEqual(@as(u32, 0), peer.fills);
 }

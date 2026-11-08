@@ -32,7 +32,7 @@ pub const Options = struct {
     learn: ?disk.Learn = null, // --learn-conversations: kept states written behind to disk and read back
     vision: ?api.VisionOpen = null, // --vision: open loads the image tower, and requests may hold images
     images: ?*images.Vision = null, // the loaded tower attach serves (and the host then owns)
-    remote: api.lane_remote.Flags = .{}, // --prefill-from and --mcdma-link: the GB10 prefills long prompts (#1594 step 2b)
+    remote: api.LaneHost.Remote.Flags = .{}, // --prefill-from and --mcdma-link: the GB10 prefills long prompts (#1594 step 2b)
     remote_id: []const u8 = "", // the checkpoint's name both ends give the hand-off (its snapshot directory's)
 };
 

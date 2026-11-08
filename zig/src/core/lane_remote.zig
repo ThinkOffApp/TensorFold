@@ -5,14 +5,19 @@ const pc = @import("prompt_cache.zig");
 const lanes = @import("lanes");
 const LaneHost = @import("lane_host.zig").LaneHost;
 const Job = @import("lane_job.zig").Job;
+const Request = api.Request;
 
 /// A family's remote prefill (fabric/prefill_source.zig behind it): opt-in, and outside the exactness contract.
 pub const Source = struct {
     ptr: *anyopaque,
-    /// Fill a prefix of `prompt` into new storage on the caller's thread; null leaves the whole prompt to this engine.
-    fill: *const fn (ptr: *anyopaque, prompt: []const u32) anyerror!?Filled,
+    /// Whether a prompt of `len` tokens, `cached` of them in the engine's own cache, gets a remote prefix.
+    wants: *const fn (ptr: *anyopaque, len: u64, cached: u64) bool,
+    /// Fill a prefix of `prompt` beyond `cached` into new storage, blocking; null leaves the prompt to this engine.
+    fill: *const fn (ptr: *anyopaque, prompt: []const u32, cached: u64) anyerror!?Filled,
     /// Free the storage `fill` returned.
     drop: *const fn (ptr: *anyopaque, saved: pc.Saved) void,
+    /// Fills under way, the last thing each one's thread touches: the family waits for 0 before it goes.
+    running: *std.atomic.Value(u32),
 };
 
 /// The family's state after `at` prompt tokens, computed by another machine: never kept, never the engine's own.
@@ -28,37 +33,88 @@ pub const Flags = struct {
     }
 };
 
-/// Whether a request may take a remote prefix: text a stream decodes, with nothing that needs the engine's own rows.
+/// A queued job's fill on its own thread: running, landed, or left by a job that ended first (the thread drops it).
+pub const Ticket = struct {
+    state: std.atomic.Value(u8) = .init(running),
+    filled: ?Filled = null,
+    prompt: []u32, // the thread's own copy: the request may go before the fill does
+    cached: u64,
+    host: *LaneHost,
+    source: Source,
+
+    const running: u8 = 0;
+    const landed: u8 = 1;
+    const left: u8 = 2;
+};
+
+/// Whether a request may take a remote prefix: decoded text, no rows of the engine's own needed, and not a handoff.
 fn eligible(r: *const Request) bool {
-    return !r.promptOnly() and !r.background and r.images.len == 0 and r.prompt_logprobs == null and !r.untaught and r.embedding == null;
+    return !r.promptOnly() and !r.background and r.images.len == 0 and r.prompt_logprobs == null and !r.untaught and
+        r.embedding == null and r.handoff == null;
 }
 
-const Request = api.Request;
-
-/// A request's remote prefix, filled before its job is queued; a failed fill leaves the prompt to this engine.
-pub fn take(h: *const LaneHost, r: *const Request) ?Filled {
-    const source = h.remote orelse return null;
-    if (!eligible(r)) return null;
-    const got = source.fill(source.ptr, r.prompt) catch |err| {
-        std.log.warn("remote prefill failed ({s}); the prompt is prefilled here", .{@errorName(err)});
-        return null;
-    };
-    const f = got orelse return null;
-    if (f.at == 0 or f.at >= r.prompt.len) { // at least one prompt row stays here: its logits draw the first token
-        source.drop(source.ptr, f.saved);
-        return null;
+/// Fills start for queued requests whose remote prefix beats the cache's (the engine thread, the lock held).
+pub fn queue(h: *LaneHost) void {
+    const source = h.remote orelse return;
+    for (h.queued.items) |job| {
+        if (job.ticket != null or job.remote_looked) continue;
+        job.remote_looked = true;
+        const r = job.request;
+        if (!eligible(r)) continue;
+        const cached: u64 = if (h.cache) |store| if (store.find(job.cacheKey(), r.chunks, h.spans(r))) |e| e.at else 0 else 0;
+        if (!source.wants(source.ptr, r.prompt.len, cached)) continue;
+        const t = h.gpa.create(Ticket) catch continue;
+        t.* = .{ .prompt = h.gpa.dupe(u32, r.prompt) catch {
+            h.gpa.destroy(t);
+            continue;
+        }, .cached = cached, .host = h, .source = source };
+        _ = source.running.fetchAdd(1, .acq_rel);
+        const thread = std.Thread.spawn(.{}, fill, .{t}) catch {
+            _ = source.running.fetchSub(1, .acq_rel);
+            free(t);
+            continue;
+        };
+        thread.detach();
+        job.ticket = t;
     }
-    return f;
 }
 
-/// Frees a prefix no job took.
-pub fn release(h: *const LaneHost, f: ?Filled) void {
-    const got = f orelse return;
-    if (h.remote) |source| source.drop(source.ptr, got.saved);
+fn fill(t: *Ticket) void {
+    const source = t.source;
+    const h = t.host;
+    const got = source.fill(source.ptr, t.prompt, t.cached) catch |err| blk: {
+        std.log.warn("remote prefill failed ({s}); the prompt is prefilled here", .{@errorName(err)});
+        break :blk null;
+    };
+    t.filled = if (got) |f| if (f.at > t.cached and f.at < t.prompt.len) f else drop: { // a row stays: the first token
+        source.drop(source.ptr, f.saved);
+        break :drop null;
+    } else null;
+    if (t.state.cmpxchgStrong(Ticket.running, Ticket.landed, .acq_rel, .acquire) != null) free(t); // its job ended
+    h.wake.signal(h.io);
+    _ = source.running.fetchSub(1, .acq_rel);
 }
 
-/// The stream restores the remote prefix unless the cache holds at least as much; a cache entry it beats is released.
+fn free(t: *Ticket) void {
+    if (t.filled) |f| t.source.drop(t.source.ptr, f.saved);
+    t.host.gpa.free(t.prompt);
+    t.host.gpa.destroy(t);
+}
+
+/// Whether queued `job` waits for its fill (admission passes it over meanwhile).
+pub fn held(job: *const Job) bool {
+    const t = job.ticket orelse return false;
+    return t.state.load(.acquire) == Ticket.running;
+}
+
+/// The stream restores a landed remote prefix unless the cache holds at least as much; an entry it beats is released.
 pub fn use(h: *LaneHost, job: *Job, reuse: *lanes.stream.Reuse) void {
+    const t = job.ticket orelse return;
+    if (t.state.load(.acquire) != Ticket.landed) return;
+    job.ticket = null;
+    job.remote = t.filled;
+    t.filled = null;
+    free(t);
     const f = job.remote orelse return;
     if (reuse.saved != null and reuse.at >= f.at) return drop(job);
     if (job.entry) |e| if (h.cache) |store| store.release(e);
@@ -66,8 +122,12 @@ pub fn use(h: *LaneHost, job: *Job, reuse: *lanes.stream.Reuse) void {
     reuse.* = .{ .saved = f.saved, .at = f.at, .remote = true }; // no marks and no hook: nothing after it is kept
 }
 
-/// The prefix is restored (or never will be): its storage goes.
+/// The prefix is restored (or never will be): its storage goes, and a fill still running is left to its thread.
 pub fn drop(job: *Job) void {
+    if (job.ticket) |t| {
+        job.ticket = null;
+        if (t.state.cmpxchgStrong(Ticket.running, Ticket.left, .acq_rel, .acquire) != null) free(t); // it had landed
+    }
     const f = job.remote orelse return;
     job.remote = null;
     if (job.started and job.stream.reuse.saved == f.saved) job.stream.reuse.saved = null;

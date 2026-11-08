@@ -64,6 +64,7 @@ pub const LaneHost = struct {
     cache_status: ?api.Status.PromptCache = null, // published under mutex; HTTP threads never read the store
     cache: ?*pc.Store = null, // kept prompt states (engine thread only); the backend restores and saves them
     remote: ?remote.Source = null, // #1594 step 2b: prompt prefixes another machine fills (opt-in)
+    exporter: ?@import("lane_export.zig").Exporter = null, // #1594 step 2b: a handoff request's prompt state, for another machine
     recall: ?*lanes.recall_store.Store = null, // Recall's record: drafts from earlier requests (lane_host_recall.zig)
     decoded_rows: bool = false, // the backend prefills Request.decode_spans with decoded rows' arithmetic, cache or not
     health: ?api.HealthSource = null,
@@ -102,6 +103,9 @@ pub const LaneHost = struct {
 
     pub const Job = @import("lane_job.zig").Job;
     pub const Load = load;
+
+    pub const Remote = remote; // #1594 step 2b: lane_remote.zig, and the producer side in lane_export.zig
+    pub const Export = @import("lane_export.zig");
 
     pub fn init(gpa: Allocator, io: std.Io, core: *lanes.Engine, info_: Info) LaneHost {
         var shown = info_.ofLanes();
@@ -200,20 +204,15 @@ pub const LaneHost = struct {
 
     fn submitFn(ctx: *anyopaque, id: Id, request: *const Request, sink: Sink) api.SubmitError!void {
         const h = self(ctx);
-        if (@import("lane_prompt_only.zig").refuses(h, request)) return error.InvalidRequest;
-        const filled = remote.take(h, request); // before the job is visible: the pull runs on this request's thread
-        const job = h.gpa.create(Job) catch {
-            remote.release(h, filled);
-            return error.Busy;
-        };
-        job.* = .{ .host = h, .id = id, .request = request, .sink = sink, .submitted = std.Io.Clock.awake.now(h.io).toNanoseconds(), .remote = filled };
+        if (@import("lane_prompt_only.zig").refuses(h, request) or !@import("lane_export.zig").exportable(h, request)) return error.InvalidRequest;
+        const job = h.gpa.create(Job) catch return error.Busy;
+        job.* = .{ .host = h, .id = id, .request = request, .sink = sink, .submitted = std.Io.Clock.awake.now(h.io).toNanoseconds() };
         // written before the lock: a trace line never holds the host's mutex (a refused request's line stays alone)
         if (h.trace) |t| t.line(.{ .t0_ns = job.submitted, .t1_ns = job.submitted, .kind = .submit, .id = id, .rows_to = request.prompt.len });
         h.mutex.lockUncancelable(h.io);
         defer h.unlock();
         const unavailable = h.closing or (if (h.health) |source| !source.read(source.ctx) else false);
         if (unavailable or h.stale or pressure.refuses(h)) {
-            remote.drop(job);
             h.gpa.destroy(job);
             return if (unavailable) error.Closed else if (h.stale) error.Stale else error.MemoryPressure;
         }
@@ -221,7 +220,6 @@ pub const LaneHost = struct {
         var at = h.queued.items.len;
         while (!request.background and at > 0 and h.queued.items[at - 1].request.background) at -= 1;
         h.queued.insert(h.gpa, at, job) catch {
-            remote.drop(job);
             h.gpa.destroy(job);
             return error.Busy;
         };
