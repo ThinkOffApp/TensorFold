@@ -43,8 +43,8 @@ fn below(h: *const LaneHost, job: *Job, reuse: *lanes.stream.Reuse) void {
     reuse.at = 0;
     const store = h.cache orelse return;
     const r = job.request;
-    if (job.entry) |at_cut| store.release(at_cut);
-    job.entry = lifetime.borrow(store, resumable(r), r.chunks, h.spans(r));
+    if (job.entry) |at_cut| store.release(at_cut); // first: a disk read may take its room, and the pass keeps it again
+    job.entry = lifetime.borrow(store, resumable(r), r.bornLen(), r.chunks, h.spans(r));
     const e = job.entry orelse return;
     reuse.saved = e.saved;
     reuse.at = e.at;

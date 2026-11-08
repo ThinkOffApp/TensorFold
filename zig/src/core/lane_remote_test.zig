@@ -353,3 +353,62 @@ test "handoff: the same handoff again on an unplanned store resumes at the longe
     try t.expect(again.why == null);
     try unborrowed(&store);
 }
+
+/// Kept's copies as one row a token, on the disk of a store that keeps them there (--learn-conversations).
+const OnDisk = struct {
+    fn bytesOf(saved: pc.Saved) []u8 {
+        return std.mem.sliceAsBytes(@as(*std.ArrayList(u32), @ptrCast(@alignCast(saved))).items);
+    }
+    fn parts(_: *anyopaque, at: u32, out: *std.ArrayList(pc.rows.image.Part), a: std.mem.Allocator) anyerror!void {
+        try out.append(a, .{ .bytes = @as(u64, at) * 4, .row = 4 });
+    }
+    fn gather(_: *anyopaque, saved: pc.Saved, ranges: []const pc.rows.image.Range, out: []u8) anyerror!void {
+        var o: usize = 0;
+        for (ranges) |r| {
+            @memcpy(out[o..][0..@intCast(r.len)], bytesOf(saved)[@intCast(r.off)..][0..@intCast(r.len)]);
+            o += @intCast(r.len);
+        }
+    }
+    fn blank(_: *anyopaque, at: u32) anyerror!pc.Saved {
+        const kept = try t.allocator.create(std.ArrayList(u32));
+        errdefer t.allocator.destroy(kept);
+        kept.* = .empty;
+        try kept.appendNTimes(t.allocator, 0, at);
+        return kept;
+    }
+    fn scatter(_: *anyopaque, saved: pc.Saved, ranges: []const pc.rows.image.Range, in: []const u8) anyerror!void {
+        var o: usize = 0;
+        for (ranges) |r| {
+            @memcpy(bytesOf(saved)[@intCast(r.off)..][0..@intCast(r.len)], in[o..][0..@intCast(r.len)]);
+            o += @intCast(r.len);
+        }
+    }
+    const vtable: pc.Snapshots.VTable = .{ .bytes = Kept.bytes, .save = Kept.save, .restore = Kept.restore, .drop = Kept.drop, .rows = &.{ .parts = parts, .gather = gather, .blank = blank, .scatter = scatter } };
+};
+
+test "handoff: the same handoff on a restarted producer reads the grid row before its cut back from disk and resumes there" {
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(t.io, ".", t.allocator);
+    defer t.allocator.free(root);
+    var none: u8 = 0;
+    const family: pc.Snapshots = .{ .ptr = &none, .vtable = &OnDisk.vtable };
+    const seven = six ++ [_]u32{17}; // its cut, 6, is on the grid
+    var peer: Peer = .{ .at = 0 };
+    for (0..2) |turn| { // the second server starts with nothing in RAM
+        const disk = try pc.rows.Rows.open(t.allocator, family, .{ .root = root, .identity = 5, .cap = 1 << 30, .floor = 0, .daily = 1 << 30, .planned = true, .grid = 3 });
+        defer disk.deinit();
+        var store = pc.Store.init(t.allocator, family, .{ .min_prompt = 0, .planned = true, .grid = 3 }, 1 << 20);
+        defer store.deinit();
+        store.disk = disk;
+        var e: Exp = .{};
+        const seen = try runWith(&peer, &.{ .prompt = &seven, .max_tokens = 1, .handoff = id }, &e, &store);
+        try t.expectEqual(@as(?usize, 6), e.tokens);
+        try t.expect(e.why == null);
+        if (turn == 0) continue; // its host's stop wrote the grid row, 3, and the cut, 6
+        try t.expect(seen.restoring);
+        try t.expectEqual(@as(u32, 3), seen.at); // the lookup read back the cut, which restores nothing to export
+        try t.expectEqual(@as(u64, 2), disk.counts.reads);
+        try unborrowed(&store);
+    }
+}

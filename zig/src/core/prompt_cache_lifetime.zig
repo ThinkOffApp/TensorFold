@@ -26,9 +26,10 @@ pub fn release(s: *pc.Store, e: *pc.Entry) void {
     collect(s);
 }
 
-/// The longest kept state `prompt` resumes, borrowed as a lookup's is: resumed or release reports it (null: none).
-pub fn borrow(s: *pc.Store, prompt: []const u32, starts: []const u32, spans: []const modes.Span) ?*pc.Entry {
-    const e = s.find(prompt, starts, spans) orelse return null;
+/// The longest state `prompt` resumes, in RAM or on disk as a lookup's, borrowed: resumed or release reports it.
+pub fn borrow(s: *pc.Store, prompt: []const u32, born: u32, starts: []const u32, spans: []const modes.Span) ?*pc.Entry {
+    const ram = s.find(prompt, starts, spans);
+    const e = pc.rows.read.recall(s, prompt, born, starts, spans, s.recall(prompt, born, starts, spans, ram)) orelse return null;
     e.borrowers += 1;
     return e;
 }

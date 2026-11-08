@@ -58,14 +58,14 @@ test "a borrow takes the longest state its prompt resumes and holds it through i
     defer s.deinit();
     _ = f.pass(&s, &prompt, try s.begin(arena.allocator(), &prompt, 4, &.{}, &.{}, null, &.{}));
     _ = f.pass(&s, &prompt, try s.begin(arena.allocator(), &prompt, 8, &.{}, &.{}, null, &.{}));
-    const entry = lifetime.borrow(&s, prompt[0..8], &.{}, &.{}).?; // the state at 8 leaves no row of these 8 tokens
+    const entry = lifetime.borrow(&s, prompt[0..8], prompt.len, &.{}, &.{}).?; // the state at 8 leaves no row of these 8 tokens
     try std.testing.expectEqual(@as(u32, 4), entry.at);
     s.expired(entry.saved);
     s.collectExpired();
     try std.testing.expectEqual(@as(usize, 2), f.live);
     s.release(entry);
     try std.testing.expectEqual(@as(usize, 1), f.live);
-    try std.testing.expect(lifetime.borrow(&s, prompt[0..4], &.{}, &.{}) == null);
+    try std.testing.expect(lifetime.borrow(&s, prompt[0..4], prompt.len, &.{}, &.{}) == null);
 }
 
 test "clear and forget invalidate borrowed entries without freeing them" {
