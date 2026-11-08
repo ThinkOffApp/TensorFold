@@ -31,7 +31,6 @@ pub const Stop = struct { ctx: *anyopaque, check: *const fn (ctx: *anyopaque, em
 
 pub const CallGate = @import("engine_request_controls.zig").CallGate;
 pub const Structure = @import("engine_request_controls.zig").Structure;
-
 pub const grammar = lanes.grammar;
 
 /// A reply to decode. The request and every slice in it stay valid until its ``finished`` event.
@@ -393,7 +392,6 @@ pub const MemorySource = struct {
 
 pub const HealthSource = @import("engine_status.zig").HealthSource;
 pub const Status = @import("engine_status.zig").Status;
-
 pub const SubmitError = error{ Closed, Busy, InvalidSpans, Stale, InvalidRequest, MemoryPressure }; // Stale: put-back has not reached the device
 
 /// What a request refused under critical memory pressure says (a 503).
