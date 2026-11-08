@@ -73,6 +73,7 @@ pub fn pulledRemote(a: std.mem.Allocator, io: std.Io, r: *const q.decode_round.R
     const id = try host.remote.checkpointId(a, io, dir);
     const l = try host.remote.Link.start(a, io, r, .{ .url = url, .link = link_name }, id);
     defer l.stop(a);
+    l.pull.remote.policy.min_prefix = 0; // a check of the hand-off, not of routing: any prompt pulls at its cut
     const got = (try l.pull.pull(ids, 0)) orelse return error.NoRemoteOffer;
     std.debug.print("RESULT remote: {d} tokens' state pulled over {s} in {d:.1} ms, the GB10's prefill included\n", .{ got.at, link_name, @as(f64, @floatFromInt(l.pull.ns)) / 1e6 });
     return .{ .st = @ptrCast(@alignCast(got.saved)), .at = got.at };
