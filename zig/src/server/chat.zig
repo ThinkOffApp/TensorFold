@@ -189,6 +189,9 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
         .images = rendered.images,
         .cache_key = rendered.cache_key,
     };
+    var handoff_why: []const u8 = ""; // kv_transfer_params.mcdma_handoff: the state is exported, one token drawn
+    request.handoff = @import("handoff_param.zig").parse(f, &handoff_why) catch return cx.refuse(handoff_why);
+    if (request.handoff != null) request.max_tokens = @min(request.max_tokens, 1);
     try srv.checkFeatures(cx, f, input.tools.len > 0, reasoning, rendered.ids, input.tools, &request);
     server_mod.nameStructure(input.format, &request);
     errdefer srv.release(false, request);

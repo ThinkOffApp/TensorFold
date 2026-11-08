@@ -377,6 +377,7 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     h.owns_model = false;
     h.draft = null;
     h.cache = null;
+    h.link = null; // gpa.create leaves fields undefined: a default never applies here
     h.resident = null;
     h.disk_stage = null;
     h.vision = o.images; // closed with the host; a failed attach leaves it to the caller
