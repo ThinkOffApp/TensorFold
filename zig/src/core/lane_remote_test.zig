@@ -294,3 +294,20 @@ test "handoff: the producer's cache keeps the exported cut, and the chat's next 
     try t.expectEqual(@as(?usize, 5), next.tokens);
     try t.expect(next.why == null);
 }
+
+test "handoff: a gridded store keeps its grid state before the cut, not the cut, and the next turn resumes on the grid" {
+    var none: u8 = 0;
+    var store = pc.Store.init(t.allocator, .{ .ptr = &none, .vtable = &.{ .bytes = Kept.bytes, .save = Kept.save, .restore = Kept.restore, .drop = Kept.drop } }, .{ .min_prompt = 0, .planned = true, .grid = 3 }, 1 << 20);
+    defer store.deinit();
+    var peer: Peer = .{ .at = 0 };
+    var first: Exp = .{};
+    const one = try runWith(&peer, &.{ .prompt = six[0..5], .max_tokens = 1, .handoff = id }, &first, &store);
+    try t.expectEqual(@as(?usize, 4), first.tokens); // exported at the cut
+    try t.expectEqual(@as(usize, 2), one.marks); // the grid's 3, then the cut's 4
+    try t.expectEqual(@as(u64, 1), store.counts.kept); // 4 is off the grid: no state the store could never resume
+    var next: Exp = .{};
+    const seen = try runWith(&peer, &.{ .prompt = &six, .max_tokens = 1, .handoff = id }, &next, &store);
+    try t.expect(seen.restoring);
+    try t.expectEqual(@as(u32, 3), seen.at);
+    try t.expectEqual(@as(?usize, 5), next.tokens);
+}
