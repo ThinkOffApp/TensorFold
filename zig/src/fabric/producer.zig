@@ -40,6 +40,11 @@ pub const Table = struct {
     clock: *const fn () u64,
     held: std.AutoArrayHashMapUnmanaged([16]u8, Held) = .empty,
     finished: std.ArrayList([]const u8) = .empty,
+    lock: std.atomic.Mutex = .unlocked, // a server's engine thread adds; its serving thread reads and releases
+
+    fn hold(t: *Table) void {
+        while (!t.lock.tryLock()) std.atomic.spinLoopHint();
+    }
 
     pub fn deinit(t: *Table) void {
         t.held.deinit(t.gpa);
@@ -47,31 +52,46 @@ pub const Table = struct {
     }
 
     pub fn add(t: *Table, handoff: [16]u8, request: []const u8, entry: Entry) !void {
+        t.hold();
+        defer t.lock.unlock();
         try t.held.put(t.gpa, handoff, .{ .entry = entry, .request = request, .added = t.clock() });
     }
 
-    pub fn get(t: *const Table, handoff: [16]u8) ?Entry {
+    /// An entry stays valid until the serving thread itself releases it (only it finishes and expires them).
+    pub fn get(t: *Table, handoff: [16]u8) ?Entry {
+        t.hold();
+        defer t.lock.unlock();
         return if (t.held.get(handoff)) |h| h.entry else null;
     }
 
     /// Release a handoff; its request is reported finished so its pages can be freed.
     pub fn finish(t: *Table, handoff: [16]u8) !void {
+        t.hold();
+        defer t.lock.unlock();
+        try t.finishHeld(handoff);
+    }
+
+    fn finishHeld(t: *Table, handoff: [16]u8) !void {
         const h = t.held.fetchOrderedRemove(handoff) orelse return;
         try t.finished.append(t.gpa, h.value.request);
     }
 
     pub fn expire(t: *Table) !void {
+        t.hold();
+        defer t.lock.unlock();
         const now = t.clock();
         var i: usize = 0;
         while (i < t.held.count()) {
             if (now - t.held.values()[i].added > t.ttl_ns) {
-                try t.finish(t.held.keys()[i]);
+                try t.finishHeld(t.held.keys()[i]);
             } else i += 1;
         }
     }
 
     /// Requests released since the last call (the caller frees their pages).
     pub fn takeFinished(t: *Table, out: *std.ArrayList([]const u8)) !void {
+        t.hold();
+        defer t.lock.unlock();
         try out.appendSlice(t.gpa, t.finished.items);
         t.finished.clearRetainingCapacity();
     }

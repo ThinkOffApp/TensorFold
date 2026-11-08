@@ -15,12 +15,16 @@ pub const Shapes = struct {
 
 pub const qwen27: Shapes = .{ .rec = .{ 48, 128, 128 }, .conv = .{ 3, 10240 }, .head_dim = 256, .interval = 4 };
 
+/// Recurrent parts per linear layer (neutral, Metal's) or all recurrences, then all tails (a CUDA copy's); rows alike.
+pub const Order = enum { neutral, cuda };
+
 /// One state's export: the geometry, its shapes, `at` prompt tokens and `block` tokens to an attention page row.
 pub const Plan = struct {
     g: hs.Geometry,
     s: Shapes,
     at: u32,
     block: u32,
+    order: Order = .neutral, // the image `build` reads; a landing writes the neutral order
 
     /// Refuses a length off the page rows, an interleave the layer counts do not fit, or shapes off the sizes.
     pub fn check(p: Plan) !void {
@@ -56,6 +60,14 @@ pub const Plan = struct {
         return @as(u64, n) * (p.g.rec_bytes + p.g.conv_bytes);
     }
 
+    /// Where linear layer n's recurrence (part 0) or tail (part 1) sits in an image of this plan's order.
+    fn partOff(p: Plan, n: u32, part: u1) u64 {
+        return switch (p.order) {
+            .neutral => p.linearOff(n) + if (part == 0) 0 else p.g.rec_bytes,
+            .cuda => if (part == 0) @as(u64, n) * p.g.rec_bytes else @as(u64, p.g.linear) * p.g.rec_bytes + @as(u64, n) * p.g.conv_bytes,
+        };
+    }
+
     fn attentionBytes(p: Plan) u64 {
         return 2 * @as(u64, p.g.kv_heads) * p.at * p.g.row_bytes;
     }
@@ -74,7 +86,7 @@ const page_dims = [_]manifest.Dim{ .kv, .head, .block, .token, .head_dim };
 /// The export's layers in model order, and each one's source in `image`; slices live in the caller's allocator.
 pub const Built = struct { layers: []manifest.Layer, sources: []frames.Source };
 
-/// Layers and sources over `image`, a state in the neutral order (Geometry.bytes(at) long); nothing is copied.
+/// Layers and sources over `image`, a state in the plan's order (Geometry.bytes(at) long); nothing is copied.
 pub fn build(a: Allocator, p: Plan, image: []const u8) !Built {
     try p.check();
     if (image.len != p.g.bytes(p.at)) return error.HybridStateLength;
@@ -94,10 +106,9 @@ pub fn build(a: Allocator, p: Plan, image: []const u8) !Built {
         const index: u32 = @intCast(i);
         const w = p.which(index).?;
         if (!w.attention) {
-            const off: usize = @intCast(p.linearOff(w.n));
             const pieces = try a.alloc([]const u8, 2);
-            pieces[0] = image[off..][0..@intCast(p.g.rec_bytes)];
-            pieces[1] = image[off + @as(usize, @intCast(p.g.rec_bytes)) ..][0..@intCast(p.g.conv_bytes)];
+            pieces[0] = image[@intCast(p.partOff(w.n, 0))..][0..@intCast(p.g.rec_bytes)];
+            pieces[1] = image[@intCast(p.partOff(w.n, 1))..][0..@intCast(p.g.conv_bytes)];
             l.* = .{ .index = index, .kind = .recurrent, .shape = &.{}, .dims = &.{}, .dtype = .float32, .parts = kept_parts };
             s.* = .{ .bytes = &.{}, .shape = &.{}, .block_dim = 0, .elem = 1, .rows = &.{}, .parts = pieces };
         } else {
@@ -116,16 +127,17 @@ pub const Landing = struct {
     image: []u8,
     landed: u64 = 0,
 
-    /// Lands rows [row_start, row_start + rows) of `layer` where `build` read them, after checking the layer is ours.
+    /// Lands rows [row_start, row_start + rows) of `layer` in the neutral order, after checking the layer is ours.
     pub fn put(d: *Landing, layer: *const manifest.Layer, row_start: u64, rows: u64, bytes: []const u8) !void {
-        const p = d.plan;
+        var p = d.plan;
+        p.order = .neutral;
         const w = p.which(layer.index) orelse return error.HybridLayer;
         if (!w.attention) {
             if (layer.kind != .recurrent or !ourParts(p, layer.parts)) return error.HybridLayer;
             if (rows != 1 or row_start > 1) return error.HybridFrame;
             const len = if (row_start == 0) p.g.rec_bytes else p.g.conv_bytes;
             if (bytes.len != len) return error.HybridFrame;
-            const off = p.linearOff(w.n) + if (row_start == 0) 0 else p.g.rec_bytes;
+            const off = p.partOff(w.n, @intCast(row_start));
             @memcpy(d.image[@intCast(off)..][0..bytes.len], bytes);
         } else {
             const shape = p.pageShape();
@@ -249,4 +261,36 @@ test "a frame for another layer kind, shape or size is refused before it lands" 
     try landing.put(&built.layers[3], 2, 2, &page);
     try std.testing.expect(!landing.whole());
     try std.testing.expect(std.mem.allEqual(u8, got[0..@intCast(tiny.g.fixed())], 0));
+}
+
+test "a CUDA copy's order exports the same frames as the neutral order, and lands as the neutral image" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const neutral = try a.alloc(u8, @intCast(tiny.g.bytes(tiny.at)));
+    for (neutral, 0..) |*b, i| b.* = @truncate(i *% 37 +% 5);
+    var ranges: std.ArrayList(hs.Range) = .empty;
+    try hs.cudaRanges(tiny.g, tiny.at, 0, &ranges, a); // where each neutral piece sits in a CUDA copy
+    const cuda = try a.alloc(u8, neutral.len);
+    var from: usize = 0;
+    for (ranges.items) |r| {
+        @memcpy(cuda[@intCast(r.off)..][0..@intCast(r.len)], neutral[from..][0..@intCast(r.len)]);
+        from += @intCast(r.len);
+    }
+    var cp = tiny;
+    cp.order = .cuda;
+    const built = try build(a, cp, cuda);
+    const got = try a.alloc(u8, neutral.len);
+    @memset(got, 0);
+    var landing: Landing = .{ .plan = cp, .image = got };
+    var buf: [256]u8 = undefined;
+    for (built.layers, built.sources) |*l, src| {
+        var row: u64 = 0;
+        while (row < l.rows()) : (row += 1) {
+            const n = try src.gather(row, 1, &buf);
+            try landing.put(l, row, 1, buf[0..@intCast(n)]);
+        }
+    }
+    try std.testing.expect(landing.whole());
+    try std.testing.expectEqualSlices(u8, neutral, got);
 }
