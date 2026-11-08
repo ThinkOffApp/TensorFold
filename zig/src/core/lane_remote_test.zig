@@ -49,6 +49,7 @@ pub const Seen = struct {
     prefilled: ?u32 = null,
     tokens: usize = 0,
     remote_prefix: ?u32 = null, // the finished stats' count, which the server reports as exact_mode "remote_prefix"
+    pulled_prefix: ?u32 = null, // of it, pulled for this reply; the rest is the server's kept_remote_cache_tokens
     store: ?*const pc.Store = null, // the run's cache, its borrowers counted at the first chunk
     borrowed: u32 = 0, // its states still borrowed at the first chunk: a lookup let go before the pass is not
     refuse: bool = false, // the first chunk refuses a pulled copy, as qwen27_slots.opening can: the pass starts at 0
@@ -73,6 +74,7 @@ pub const Seen = struct {
             .tokens => |ts| x.tokens += ts.len,
             .finished => |f| {
                 x.remote_prefix = f.stats.remote_prefix;
+                x.pulled_prefix = f.stats.pulled_prefix;
                 x.done.store(true, .release);
             },
             else => {},
@@ -164,7 +166,7 @@ pub fn runKeep(peer: *Peer, request: *const api.Request, exp: ?*Exp, cache: ?*pc
 }
 
 pub const six = [_]u32{ 11, 12, 13, 14, 15, 16 };
-const eight = six ++ [_]u32{ 17, 18 }; // a chat's next turn: six, then more
+pub const eight = six ++ [_]u32{ 17, 18 }; // a chat's next turn: six, then more
 
 test "remote prefix: the stream restores it with nothing kept after it, counts none of it cached, and it is dropped once" {
     var peer: Peer = .{ .at = 4 };

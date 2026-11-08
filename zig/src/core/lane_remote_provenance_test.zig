@@ -11,6 +11,7 @@ const runWith = fixture.runWith;
 const runKeep = fixture.runKeep;
 const unborrowed = fixture.unborrowed;
 const six = fixture.six;
+const eight = fixture.eight;
 const id = fixture.id;
 const t = std.testing;
 
@@ -79,5 +80,32 @@ test "remote prefix kept: a kept remote state that slot 0's own state reaches is
     try t.expect(!level.restoring and !level.remote); // slot 0's own exact state goes on
     try t.expectEqual(@as(u32, 0), level.borrowed); // and the remote state is not held while the pass runs
     try t.expectEqual(@as(u32, 0), peer.fills);
+    try unborrowed(&store);
+}
+
+test "remote prefix: a reply on a fresh pull reports all of its remote prefix pulled, none of it a kept remote copy" {
+    var peer: Peer = .{ .at = 4 };
+    defer peer.kept.deinit(t.allocator);
+    const seen = try runWith(&peer, &.{ .prompt = &six, .max_tokens = 2 }, null, null);
+    try t.expect(seen.restoring and seen.remote and seen.at == 4);
+    try t.expectEqual(@as(?u32, 4), seen.remote_prefix);
+    try t.expectEqual(@as(?u32, 4), seen.pulled_prefix);
+    try t.expectEqual(@as(u32, 0), seen.remote_prefix.? - seen.pulled_prefix.?); // kept_remote_cache_tokens: none
+}
+
+test "remote prefix kept (TF_PREFILL_KEEP): a reply on a kept remote state reports none of it pulled, all of it kept" {
+    var store = cache();
+    defer store.deinit();
+    var peer: Peer = .{ .at = 4 };
+    defer peer.kept.deinit(t.allocator);
+    const first = try runKeep(&peer, &.{ .prompt = &six, .max_tokens = 2, .history_len = 5 }, null, &store, .{ .keep = true });
+    try t.expectEqual(@as(?u32, 4), first.remote_prefix); // pulled over the link for this reply; its mark 5 kept remote
+    try t.expectEqual(@as(?u32, 4), first.pulled_prefix);
+    const next = try runKeep(&peer, &.{ .prompt = &eight, .max_tokens = 2, .history_len = 7 }, null, &store, .{ .keep = true });
+    try t.expect(next.restoring and next.remote and next.at == 5);
+    try t.expectEqual(@as(u32, 1), peer.fills); // nothing pulled for this reply
+    try t.expectEqual(@as(?u32, 5), next.remote_prefix);
+    try t.expectEqual(@as(?u32, 0), next.pulled_prefix);
+    try t.expectEqual(@as(u32, 5), next.remote_prefix.? - next.pulled_prefix.?); // kept_remote_cache_tokens: all five
     try unborrowed(&store);
 }
