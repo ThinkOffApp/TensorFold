@@ -10,7 +10,7 @@ const rmTree = @import("prompt_imprint_test.zig").rmTree;
 const t = std.testing;
 
 /// Another machine's prefill, in the fake backend's kept-state form: the prefix's own tokens.
-const Peer = struct {
+pub const Peer = struct {
     at: u32,
     fail: bool = false,
     fills: u32 = 0,
@@ -40,7 +40,7 @@ const Peer = struct {
 };
 
 /// What the backend saw at the pass's first chunk, and what the request heard.
-const Seen = struct {
+pub const Seen = struct {
     restoring: bool = false,
     at: u32 = 0,
     remote: bool = false,
@@ -118,7 +118,7 @@ fn runAs(peer: *Peer, request: *const api.Request, exp: ?*Exp) !Seen {
     return runWith(peer, request, exp, null);
 }
 
-fn runWith(peer: *Peer, request: *const api.Request, exp: ?*Exp, cache: ?*pc.Store) !Seen {
+pub fn runWith(peer: *Peer, request: *const api.Request, exp: ?*Exp, cache: ?*pc.Store) !Seen {
     return runKeep(peer, request, exp, cache, .{});
 }
 
@@ -154,7 +154,7 @@ fn runKeep(peer: *Peer, request: *const api.Request, exp: ?*Exp, cache: ?*pc.Sto
     return seen;
 }
 
-const six = [_]u32{ 11, 12, 13, 14, 15, 16 };
+pub const six = [_]u32{ 11, 12, 13, 14, 15, 16 };
 const eight = six ++ [_]u32{ 17, 18 }; // a chat's next turn: six, then more
 
 test "remote prefix: the stream restores it with nothing kept after it, counts none of it cached, and it is dropped once" {
@@ -194,7 +194,7 @@ test "remote prefix: one covering the whole prompt is dropped unused, and a back
     try t.expectEqual(@as(u32, 0), quiet.fills);
 }
 
-const id: exporting.Handoff = .{ .id = @splat(0x2b) };
+pub const id: exporting.Handoff = .{ .id = @splat(0x2b) };
 
 test "handoff: the producer's stream exports its state before the prompt's last token, once, and draws one token" {
     var none: Peer = .{ .at = 0 };
@@ -217,18 +217,18 @@ test "handoff: a save that fails reaches the decoder's reason, and a server with
 }
 
 /// A family whose copies are the fake backend's kept form, made without a stream: the prompt's first `at` tokens.
-const Kept = struct {
-    fn bytes(_: *anyopaque, _: u32) u64 {
+pub const Kept = struct {
+    pub fn bytes(_: *anyopaque, _: u32) u64 {
         return 64;
     }
-    fn save(_: *anyopaque, _: ?*anyopaque, at: u32) anyerror!pc.Saved {
+    pub fn save(_: *anyopaque, _: ?*anyopaque, at: u32) anyerror!pc.Saved {
         const kept = try t.allocator.create(std.ArrayList(u32));
         kept.* = .empty;
         try kept.appendSlice(t.allocator, eight[0..at]);
         return kept;
     }
-    fn restore(_: *anyopaque, _: ?*anyopaque, _: pc.Saved) anyerror!void {}
-    fn drop(_: *anyopaque, saved: pc.Saved) void {
+    pub fn restore(_: *anyopaque, _: ?*anyopaque, _: pc.Saved) anyerror!void {}
+    pub fn drop(_: *anyopaque, saved: pc.Saved) void {
         const kept: *std.ArrayList(u32) = @ptrCast(@alignCast(saved));
         kept.deinit(t.allocator);
         t.allocator.destroy(kept);
@@ -347,7 +347,7 @@ test "handoff: a gridded store keeps its grid state before the cut, not the cut,
 }
 
 /// Every lookup the passes made was reported: no kept state is still borrowed.
-fn unborrowed(store: *const pc.Store) !void {
+pub fn unborrowed(store: *const pc.Store) !void {
     for (store.entries.items) |e| try t.expectEqual(@as(u32, 0), e.borrowers);
 }
 
