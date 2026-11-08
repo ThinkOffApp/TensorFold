@@ -37,6 +37,7 @@ const Box = struct {
     mutex: std.Io.Mutex = .init,
     tokens: std.ArrayList(u32) = .empty,
     cached: ?u32 = null,
+    remote: ?u32 = null, // the finished stats' remote_prefix: tokens resumed from a state built on a pulled prefix
     done: ?Reason = null,
     fn event(ctx: *anyopaque, _: Id, e: *const Event) void {
         const b: *Box = @ptrCast(@alignCast(ctx));
@@ -45,7 +46,10 @@ const Box = struct {
         switch (e.*) {
             .prefilled => |c| b.cached = c,
             .tokens => |t| b.tokens.appendSlice(gpa, t) catch {},
-            .finished => |f| b.done = f.reason,
+            .finished => |f| {
+                b.remote = f.stats.remote_prefix;
+                b.done = f.reason;
+            },
             else => {},
         }
     }
@@ -107,6 +111,7 @@ const Run = struct {
     boxes: [8]Box = @splat(.{}),
     reasons: [8]Reason = undefined,
     cached: [8]?u32 = @splat(null),
+    remote: [8]?u32 = @splat(null),
     waits: u64 = 0,
     timeouts: u64 = 0,
     queued_after: usize = 0,
@@ -182,6 +187,7 @@ fn fanout(su: Setup, out: *Run) !void {
     for (0..su.requests) |i| {
         out.reasons[i] = out.boxes[i].wait();
         out.cached[i] = out.boxes[i].cached;
+        out.remote[i] = out.boxes[i].remote;
     }
     host.lock();
     out.queued_after = host.queued.items.len;
@@ -219,6 +225,7 @@ test "prefix wait: with TF_PREFILL_KEEP a fill resumed from a kept remote state 
     for (0..5) |i| try std.testing.expectEqual(Reason.length, r.reasons[i]);
     // the first resumes the remote state and keeps the cut, remote too; three wait for it rather than fill beside it
     try std.testing.expectEqualSlices(?u32, &.{ 512, cut, cut, cut, 0 }, r.cached[0..5]);
+    try std.testing.expectEqualSlices(?u32, &.{ 512, cut, cut, cut, 0 }, r.remote[0..5]); // remote, never exact
     try std.testing.expectEqual(@as(u64, 3), r.waits);
 }
 
