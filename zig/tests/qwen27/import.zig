@@ -9,6 +9,7 @@ const help =
     \\tf-qwen27-import MODEL IDS.json export AT OUT: this Mac's state after AT tokens, in hybrid_state's order, to OUT
     \\tf-qwen27-import MODEL IDS.json import FILE exact|close: FILE restored, the rest prefilled, logits against fresh
     \\tf-qwen27-import MODEL IDS.json link FILE exact|close: as import, FILE served and pulled over the fake MKVH link
+    \\tf-qwen27-import MODEL IDS.json remote URL,LINK exact|close: as import, the GB10 server's export pulled over LINK
     \\tf-qwen27-import MODEL IDS.json greedy N OUT.json: the prompt and this Mac's N-token greedy reply, for `tail`
     \\tf-qwen27-import MODEL IDS.json floor ROWS.bf16 N: this Mac's N steps against the GB10's `tail` rows
     \\tf-qwen27-import MODEL IDS.json time FILE -: stage times, this Mac alone against FILE restored, 32 decode steps each
@@ -142,12 +143,17 @@ fn importState(a: std.mem.Allocator, io: std.Io, r: *q.decode_round.Runner, ids:
     try q.snapshot.restoreSlot(a, r, 0, null, st);
     try feed(r, ids[header.at..], true);
     const got = try steps(a, r, n_steps, want.toks); // the same reply fed through the restored state
+    return verdict(want.logits, got.logits, want.toks, header.at, ids.len - header.at, exact);
+}
+
+/// Every step's logits through the restored state against the Mac's own: bit-equal (exact) or within close_kl.
+fn verdict(want: []const []f32, got: []const []f32, toks: []const u32, at: u32, prefilled: usize, exact: bool) !void {
     var same = true;
     var worst: f32 = 0;
     var d: f64 = 0; // the most KL at any step
     var sum: f64 = 0;
     var agree: usize = 0;
-    for (want.logits, got.logits, want.toks) |x, y, t| {
+    for (want, got, toks) |x, y, t| {
         same = same and std.mem.eql(f32, x, y);
         for (x, y) |u, v| worst = @max(worst, @abs(u - v));
         const k = kl(x, y);
@@ -155,13 +161,28 @@ fn importState(a: std.mem.Allocator, io: std.Io, r: *q.decode_round.Runner, ids:
         sum += k;
         agree += @intFromBool(argmax(y) == t);
     }
-    const tw = want.toks[0];
-    const tg = argmax(got.logits[0]);
-    std.debug.print("RESULT import: restored {d} tokens, prefilled {d}; over {d} teacher-forced steps logits {s}, worst |diff| {d:.4}, KL max {e:.3} mean {e:.3} nats, top-1 {d} of {d}; first token {d} vs {d}\n", .{ header.at, ids.len - header.at, n_steps, if (same) "bit-equal" else "differ", worst, d, sum / n_steps, agree, n_steps, tg, tw });
+    const tw = toks[0];
+    const tg = argmax(got[0]);
+    std.debug.print("RESULT import: restored {d} tokens, prefilled {d}; over {d} teacher-forced steps logits {s}, worst |diff| {d:.4}, KL max {e:.3} mean {e:.3} nats, top-1 {d} of {d}; first token {d} vs {d}\n", .{ at, prefilled, n_steps, if (same) "bit-equal" else "differ", worst, d, sum / n_steps, agree, n_steps, tg, tw });
     if (exact and !same) return error.ImportNotExact;
     if (tw != tg) return error.ImportFirstTokenDiffers;
     if (d > close_kl) return error.ImportTooFar;
     std.debug.print("PASS import ({s})\n", .{if (exact) "exact" else "close: same first token, every step's KL within 0.02 nats"});
+}
+
+/// The real link: the GB10 server exports `ids` at the policy's cut, pulled over LINK and checked as `import` checks.
+fn remoteState(a: std.mem.Allocator, io: std.Io, r: *q.decode_round.Runner, ids: []const u32, target: []const u8, dir: []const u8, exact: bool) !void {
+    const comma = std.mem.indexOfScalar(u8, target, ',') orelse return error.Usage;
+    try r.reset(0);
+    try feed(r, ids, true);
+    const want = try steps(a, r, n_steps, null); // the Mac's own greedy reply, every step's logits
+    const p = try @import("import_link.zig").pulledRemote(a, io, r, ids, target[0..comma], target[comma + 1 ..], dir);
+    defer q.snapshot.drop(a, p.st);
+    try sized(r, p.at);
+    try q.snapshot.restoreSlot(a, r, 0, null, p.st);
+    try feed(r, ids[p.at..], true);
+    const got = try steps(a, r, n_steps, want.toks);
+    return verdict(want.logits, got.logits, want.toks, p.at, ids.len - p.at, exact);
 }
 
 /// The prompt and all but the last of the Mac's `n` greedy tokens, for the GB10's `tail` with k = n: the same n steps.
@@ -413,6 +434,7 @@ pub fn main(init: std.process.Init) !void {
     if (std.mem.eql(u8, args[3], "floor")) return floor(a, init.io, &h.runner, ids, args[4], try std.fmt.parseInt(usize, args[5], 10));
     if (std.mem.eql(u8, args[3], "import")) return importState(a, init.io, &h.runner, ids, args[4], std.mem.eql(u8, args[5], "exact"), false);
     if (std.mem.eql(u8, args[3], "link")) return importState(a, init.io, &h.runner, ids, args[4], std.mem.eql(u8, args[5], "exact"), true);
+    if (std.mem.eql(u8, args[3], "remote")) return remoteState(a, init.io, &h.runner, ids, args[4], args[1], std.mem.eql(u8, args[5], "exact"));
     std.debug.print("{s}", .{help});
     return error.Usage;
 }

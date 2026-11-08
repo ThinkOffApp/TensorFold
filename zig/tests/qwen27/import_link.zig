@@ -64,3 +64,16 @@ pub fn pulled(a: std.mem.Allocator, io: std.Io, r: *const q.decode_round.Runner,
     if (!same) return error.LinkBytesDiffer;
     return st;
 }
+
+/// A state pulled over the real link, and the prompt length it covers.
+pub const Pulled = struct { st: *q.snapshot.State, at: u32 };
+
+/// The real link: the GB10's `serve --mcdma-produce` exports `ids` at the policy's cut, pulled as the server pulls.
+pub fn pulledRemote(a: std.mem.Allocator, io: std.Io, r: *const q.decode_round.Runner, ids: []const u32, url: []const u8, link_name: []const u8, dir: []const u8) !Pulled {
+    const id = try host.remote.checkpointId(a, io, dir);
+    const l = try host.remote.Link.start(a, io, r, .{ .url = url, .link = link_name }, id);
+    defer l.stop(a);
+    const got = (try l.pull.pull(ids, 0)) orelse return error.NoRemoteOffer;
+    std.debug.print("RESULT remote: {d} tokens' state pulled over {s} in {d:.1} ms, the GB10's prefill included\n", .{ got.at, link_name, @as(f64, @floatFromInt(l.pull.ns)) / 1e6 });
+    return .{ .st = @ptrCast(@alignCast(got.saved)), .at = got.at };
+}
