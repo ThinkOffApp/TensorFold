@@ -68,7 +68,7 @@ fn named(h: *LaneHost, name: Name) bool {
     return false;
 }
 
-/// The words a queued request's read ahead is keyed on: the disk state its admission reads, not one it lets go.
+/// The key a queued request's read-ahead uses: the disk state its admission reads first, as `open` looks it up.
 fn readKey(h: *LaneHost, store: *pc.Store, q: *const api.Request) []const u32 {
     const key = q.cacheKey(); // `lane_stream.open` looks a handoff up whole, so its cut on disk is read there first
     if (q.handoff == null) return key;
