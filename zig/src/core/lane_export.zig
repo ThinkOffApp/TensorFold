@@ -3,6 +3,7 @@ const std = @import("std");
 const lanes = @import("lanes");
 const api = @import("engine_api.zig");
 const pc = @import("prompt_cache.zig");
+const lifetime = @import("prompt_cache_lifetime.zig");
 const LaneHost = @import("lane_host.zig").LaneHost;
 const Job = @import("lane_job.zig").Job;
 const Request = api.Request;
@@ -30,17 +31,37 @@ pub fn exportable(h: *const LaneHost, r: *const Request) bool {
 pub fn exporting(h: *const LaneHost, job: *Job, reuse: *lanes.stream.Reuse) bool {
     if (job.request.handoff == null or h.exporter == null) return false;
     job.cut = .{@intCast(job.request.prompt.len - 1)};
-    if (reuse.at >= job.cut[0]) reuse.* = .{}; // a restore at the cut leaves no chunk ending there, so no export
+    if (reuse.at >= job.cut[0]) below(h, job, reuse); // a restore at the cut leaves no chunk ending there, so no export
     reuse.marks = handoffMarks(h, job, reuse.marks, reuse.at);
     reuse.hook = .{ .ptr = job, .at = exportAt };
     return true;
 }
 
-/// The store's marks past the restore and before the cut, and a planned store's last grid row there; then the cut.
+/// The lookup's state at the cut gives way to the longest one kept before it, borrowed in its place (none: from 0).
+fn below(h: *const LaneHost, job: *Job, reuse: *lanes.stream.Reuse) void {
+    reuse.saved = null;
+    reuse.at = 0;
+    const store = h.cache orelse return;
+    const r = job.request;
+    if (job.entry) |at_cut| store.release(at_cut);
+    job.entry = lifetime.borrow(store, resumable(r), r.chunks, h.spans(r));
+    const e = job.entry orelse return;
+    reuse.saved = e.saved;
+    reuse.at = e.at;
+}
+
+/// The words a request's kept state is looked up in: a handoff's before its cut, where a restore would export nothing.
+pub fn resumable(r: *const Request) []const u32 {
+    const key = r.cacheKey();
+    return if (r.handoff == null) key else key[0..@min(key.len, r.prompt.len -| 1)];
+}
+
+/// The store's marks past the restore and before the cut, and a planned store's last grid row before it; then the cut.
 fn handoffMarks(h: *const LaneHost, job: *Job, planned: []const u32, from: u32) []const u32 {
     const cut = job.cut[0];
     const grid: u32 = if (h.cache) |store| (if (store.rules.planned) store.rules.grid else 0) else 0;
-    const row: u32 = if (grid > 0) cut - cut % grid else 0; // a chat's next turn resumes here (the cut is off the grid)
+    // strictly before the cut: a repeat of this handoff resumes here (as does a next turn when the cut is off the grid)
+    const row: u32 = if (grid > 0) (cut - 1) - (cut - 1) % grid else 0;
     var list: std.ArrayList(u32) = .empty;
     defer list.deinit(h.gpa);
     for (planned) |m| if (m > from and m < cut) list.append(h.gpa, m) catch return &job.cut;

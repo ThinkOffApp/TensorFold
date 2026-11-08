@@ -311,3 +311,45 @@ test "handoff: a gridded store keeps its grid state before the cut, not the cut,
     try t.expectEqual(@as(u32, 3), seen.at);
     try t.expectEqual(@as(?usize, 5), next.tokens);
 }
+
+/// Every lookup the passes made was reported: no kept state is still borrowed.
+fn unborrowed(store: *const pc.Store) !void {
+    for (store.entries.items) |e| try t.expectEqual(@as(u32, 0), e.borrowers);
+}
+
+test "handoff: the same handoff again on a gridded store resumes at the grid row before its cut and exports at the cut" {
+    var none: u8 = 0;
+    var store = pc.Store.init(t.allocator, .{ .ptr = &none, .vtable = &.{ .bytes = Kept.bytes, .save = Kept.save, .restore = Kept.restore, .drop = Kept.drop } }, .{ .min_prompt = 0, .planned = true, .grid = 3 }, 1 << 20);
+    defer store.deinit();
+    const seven = six ++ [_]u32{17}; // its cut, 6, is on the grid
+    var peer: Peer = .{ .at = 0 };
+    var first: Exp = .{};
+    _ = try runWith(&peer, &.{ .prompt = &seven, .max_tokens = 1, .handoff = id }, &first, &store);
+    try t.expectEqual(@as(u64, 2), store.counts.kept); // the cut, and the grid row before it
+    var again: Exp = .{};
+    const seen = try runWith(&peer, &.{ .prompt = &seven, .max_tokens = 1, .handoff = id }, &again, &store);
+    try t.expect(seen.restoring);
+    try t.expectEqual(@as(u32, 3), seen.at); // the kept cut restores nothing to export, and 0 would prefill it all
+    try t.expectEqual(@as(?usize, 6), again.tokens);
+    try t.expect(again.why == null);
+    try unborrowed(&store);
+}
+
+test "handoff: the same handoff again on an unplanned store resumes at the longest state kept before its cut" {
+    var none: u8 = 0;
+    var store = pc.Store.init(t.allocator, .{ .ptr = &none, .vtable = &.{ .bytes = Kept.bytes, .save = Kept.save, .restore = Kept.restore, .drop = Kept.drop } }, .{ .min_prompt = 0 }, 1 << 20);
+    defer store.deinit();
+    try t.expect(store.keep(&six, 2, null, &.{}, &.{}));
+    const request: api.Request = .{ .prompt = &six, .max_tokens = 1, .history_len = 3, .handoff = id };
+    var peer: Peer = .{ .at = 0 };
+    var first: Exp = .{};
+    _ = try runWith(&peer, &request, &first, &store);
+    try t.expectEqual(@as(u64, 3), store.counts.kept); // 2, then the history's 3 and the cut, 5
+    var again: Exp = .{};
+    const seen = try runWith(&peer, &request, &again, &store);
+    try t.expect(seen.restoring);
+    try t.expectEqual(@as(u32, 3), seen.at); // not the cut, not 2 and not 0
+    try t.expectEqual(@as(?usize, 5), again.tokens);
+    try t.expect(again.why == null);
+    try unborrowed(&store);
+}

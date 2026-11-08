@@ -1,5 +1,6 @@
 //! Cache invalidation is immediate; storage and peer drops wait for a host boundary and the last restore borrower.
 const pc = @import("prompt_cache.zig");
+const modes = @import("cache_modes.zig");
 
 /// Called inside backend operations: no destruction, allocation, or peer command is allowed here.
 pub fn expired(s: *pc.Store, saved: pc.Saved) void {
@@ -23,4 +24,11 @@ pub fn collect(s: *pc.Store) void {
 pub fn release(s: *pc.Store, e: *pc.Entry) void {
     if (e.borrowers > 0) e.borrowers -= 1;
     collect(s);
+}
+
+/// The longest kept state `prompt` resumes, borrowed as a lookup's is: resumed or release reports it (null: none).
+pub fn borrow(s: *pc.Store, prompt: []const u32, starts: []const u32, spans: []const modes.Span) ?*pc.Entry {
+    const e = s.find(prompt, starts, spans) orelse return null;
+    e.borrowers += 1;
+    return e;
 }
