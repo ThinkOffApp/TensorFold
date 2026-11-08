@@ -24,6 +24,7 @@ pub const sendrecv = @import("sendrecv.zig");
 pub const sendrecv_fake = @import("sendrecv_fake.zig");
 pub const prefill_source = @import("prefill_source.zig");
 pub const hybrid_state = @import("hybrid_state.zig");
+pub const hybrid_export = @import("hybrid_export.zig");
 pub const fake = @import("fake.zig");
 pub const link_fake = @import("link_fake.zig");
 
