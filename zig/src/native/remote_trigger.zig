@@ -8,16 +8,56 @@ pub const Http = struct {
     io: std.Io,
     url: []const u8,
     model: []const u8,
-    timeout_s: u32 = 120, // a long prompt's prefill on the GB10 comes first
+    closing: ?*const std.atomic.Value(bool) = null, // the server stops: an exchange under way is cut off
 
     pub fn trigger(h: *Http) fabric.prefill_source.Trigger {
         return .{ .ptr = h, .start_fn = start };
     }
 
+    /// The exchange, bounded by `deadline` (the GB10 prefills the tokens first), or until closing.
     fn start(ptr: *anyopaque, handoff: [16]u8, tokens: []const u32) anyerror!void {
         const h: *Http = @ptrCast(@alignCast(ptr));
         const body = try request(h.gpa, h.model, handoff, tokens);
         defer h.gpa.free(body);
+        var x: Exchange = .{ .h = h, .body = body };
+        const deadline = fabric.words.nowNs() + seconds(tokens.len) * std.time.ns_per_s;
+        var future = h.io.concurrent(Exchange.run, .{&x}) catch return error.TriggerUnavailable;
+        while (!x.done.load(.acquire)) {
+            const closing = if (h.closing) |c| c.load(.acquire) else false;
+            if (closing or fabric.words.nowNs() >= deadline) {
+                future.cancel(h.io);
+                return if (closing) error.TriggerClosed else error.TriggerTimedOut;
+            }
+            h.io.sleep(.fromMilliseconds(1), .awake) catch {
+                future.cancel(h.io);
+                return error.TriggerTimedOut;
+            };
+        }
+        future.await(h.io);
+        return x.result;
+    }
+};
+
+/// TF_PREFILL_TIMEOUT_S, else 60 s and a second per 400 tokens: a GB10 prefilling at 1,000 tok/s at 64k, slower beyond.
+fn seconds(tokens: usize) u64 {
+    if (std.c.getenv("TF_PREFILL_TIMEOUT_S")) |v| return std.fmt.parseInt(u64, std.mem.span(v), 10) catch 60 + tokens / 400;
+    return 60 + tokens / 400;
+}
+
+/// One HTTP exchange on its own task, so `start` can give up on it.
+const Exchange = struct {
+    h: *Http,
+    body: []u8,
+    done: std.atomic.Value(bool) = .init(false),
+    result: anyerror!void = {},
+
+    fn run(x: *Exchange) void {
+        defer x.done.store(true, .release);
+        x.result = x.exchange();
+    }
+
+    fn exchange(x: *Exchange) !void {
+        const h = x.h;
         var client: std.http.Client = .{ .allocator = h.gpa, .io = h.io };
         defer client.deinit();
         const uri = try std.Uri.parse(h.url);
@@ -28,7 +68,7 @@ pub const Http = struct {
             .headers = .{ .accept_encoding = .{ .override = "identity" }, .content_type = .{ .override = "application/json" } },
         });
         defer req.deinit();
-        try req.sendBodyComplete(body);
+        try req.sendBodyComplete(x.body);
         var resp = try req.receiveHead(&.{});
         if (resp.head.status.class() != .success) {
             std.log.warn("remote prefill: the GB10 answered HTTP {d}", .{@backingInt(resp.head.status)});

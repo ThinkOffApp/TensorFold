@@ -25,6 +25,8 @@ pub const Pull = struct {
     ns: u64 = 0, // wall time of every pull, the trigger's prefill included
     running: std.atomic.Value(u32) = .init(0), // the lane host's fill threads under way
     closing: std.atomic.Value(bool) = .init(false), // the server stops: waiting fills give up
+    off: std.atomic.Value(bool) = .init(false), // a mismatch no retry mends (checkpoint, protocol): remote prefill stops
+    linked: bool = true, // the link answered last time (logged when it goes and when it comes back)
 
     pub fn source(p: *Pull) api.LaneHost.Remote.Source {
         return .{ .ptr = p, .wants = wants, .fill = fill, .drop = drop, .running = &p.running };
@@ -34,7 +36,15 @@ pub const Pull = struct {
     pub fn pull(p: *Pull, prompt: []const u32, cached: u64) !?Filled {
         p.mutex.lockUncancelable(p.io);
         defer p.mutex.unlock(p.io);
-        if (p.closing.load(.acquire)) return null;
+        if (p.closing.load(.acquire) or p.off.load(.acquire)) return null;
+        p.remote.client.renew() catch |err| { // the link is down or still owes a reply: nothing asks the GB10
+            if (p.linked) std.log.warn("remote prefill: the link is not usable ({s}); prompts are prefilled here", .{@errorName(err)});
+            p.linked = false;
+            return null;
+        };
+        if (!p.linked) std.log.info("remote prefill: the link is back", .{});
+        p.linked = true;
+        p.remote.reason.len = 0;
         const src = p.remote.source();
         const offer = src.offer(prompt, cached) orelse return null;
         const at: u32 = std.math.cast(u32, offer.upto) orelse return error.PrefixTooLong;
@@ -45,7 +55,14 @@ pub const Pull = struct {
         const st = try q.snapshot.blank(p.gpa, p.runner, null, at);
         errdefer q.snapshot.drop(p.gpa, st);
         var landing: hx.Landing = .{ .plan = plan, .image = st.buf.contents()[0..@intCast(hs.qwen27.bytes(at))] };
-        try src.fill(prompt, offer, .{ .ptr = &landing, .put_fn = hx.Landing.putAny, .commit_fn = committed, .abort_fn = aborted });
+        src.fill(prompt, offer, .{ .ptr = &landing, .put_fn = hx.Landing.putAny, .commit_fn = committed, .abort_fn = aborted }) catch |err| {
+            if (err == error.Refused and p.remote.reason.len > 0) std.log.warn("remote prefill: the GB10 refused ({s})", .{p.remote.reason.text()});
+            if (err == error.Mismatch or err == error.Protocol) {
+                p.off.store(true, .release);
+                std.log.warn("remote prefill off for this server: the GB10's export does not match ({s})", .{@errorName(err)});
+            }
+            return err;
+        };
         if (!landing.whole()) return error.PartialState;
         p.pulls += 1;
         p.ns += fabric.words.nowNs() - t0;
@@ -54,7 +71,9 @@ pub const Pull = struct {
 
     fn wants(ptr: *anyopaque, len: u64, cached: u64) bool {
         const p: *Pull = @ptrCast(@alignCast(ptr));
-        return !p.closing.load(.acquire) and !p.remote.client.poisoned and p.remote.policy.upto(len, cached) != null;
+        if (p.closing.load(.acquire) or p.off.load(.acquire)) return false;
+        const n = p.remote.policy.upto(len, cached) orelse return false;
+        return n - cached >= p.remote.policy.min_prefix; // a few hundred tokens past a cached or resumable prefix: local
     }
 
     fn fill(ptr: *anyopaque, prompt: []const u32, cached: u64) anyerror!?Filled {
@@ -105,7 +124,7 @@ pub const Link = struct {
         errdefer l.box.close();
         l.client = try fabric.mailbox.Client.init(&l.box, fabric.words.native, 30 * std.time.ns_per_s);
         const base = std.mem.trimEnd(u8, f.url.?, "/");
-        l.http = .{ .gpa = gpa, .io = io, .url = try std.fmt.allocPrint(gpa, "{s}/v1/completions", .{base}), .model = "" };
+        l.http = .{ .gpa = gpa, .io = io, .url = try std.fmt.allocPrint(gpa, "{s}/v1/completions", .{base}), .model = "", .closing = &l.pull.closing };
         l.pull = .{ .gpa = gpa, .io = io, .runner = runner, .remote = .{ .gpa = gpa, .policy = rules, .client = &l.client, .trigger = l.http.trigger(), .model = model, .protocol = fabric.wire.recurrent_version } };
         return l;
     }

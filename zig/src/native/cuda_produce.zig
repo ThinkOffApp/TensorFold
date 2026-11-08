@@ -1,5 +1,6 @@
 //! #1594 step 2b on the GB10: serve --mcdma-produce LINK exports handoff requests' Qwen3.8-27B states over MKVH.
 const std = @import("std");
+const builtin = @import("builtin");
 const api = @import("engine_api");
 const fabric = @import("fabric");
 const lanes = @import("lanes");
@@ -36,6 +37,7 @@ pub const Produce = struct {
 
     /// Stops serving and frees every export still held (after the lane host stopped: no export comes in).
     pub fn stop(p: *Produce) void {
+        if (comptime builtin.os.tag != .linux) return; // `open` makes none off Linux
         p.serving.stop.store(true, .release);
         p.thread.join();
         var it = p.held.valueIterator();
@@ -90,10 +92,12 @@ pub const Produce = struct {
         while (!p.lock.tryLock()) std.atomic.spinLoopHint();
         const got = p.held.fetchRemove(id);
         p.lock.unlock();
+        _ = p.serving.responder.checksums.remove(id); // CLOSE removes it; an expired export's would stay
         if (got) |kv| release(p, kv.value);
     }
 
     fn release(p: *Produce, h: *Held) void {
+        if (h.exp.frames.len > 0) p.gpa.free(h.exp.frames); // the responder planned them with this allocator at OPEN
         reuse.dropCopy(p.target.e, h.copy);
         h.arena.deinit();
         p.gpa.destroy(h);
@@ -149,7 +153,12 @@ pub const Produce = struct {
             defer p.lock.unlock();
             try p.held.put(p.gpa, h.id, held);
         }
-        try p.table.add(h.id, &held.name, .{ .ready = &held.exp });
+        p.table.add(h.id, &held.name, .{ .ready = &held.exp }) catch |err| {
+            while (!p.lock.tryLock()) std.atomic.spinLoopHint();
+            _ = p.held.remove(h.id); // the caller frees the copy; the arena and Held go with the errdefers
+            p.lock.unlock();
+            return err;
+        };
     }
 
     fn failed(ptr: *anyopaque, h: Handoff, why: []const u8) void {
@@ -161,8 +170,8 @@ pub const Produce = struct {
 
 /// The producer for Qwen3.8-27B on CUDA, its geometry and cache format checked first; null with `problem` otherwise.
 pub fn open(comptime F: type, gpa: std.mem.Allocator, loaded: anytype, link: []const u8, model: []const u8, problem: *[]const u8) !?*Produce {
-    if (comptime F != qwen35.native) {
-        problem.* = "--mcdma-produce exports Qwen3.8-27B (qwen3_5) states only (#1594 step 2b)";
+    if (comptime F != qwen35.native or builtin.os.tag != .linux) {
+        problem.* = if (F != qwen35.native) "--mcdma-produce exports Qwen3.8-27B (qwen3_5) states only (#1594 step 2b)" else "--mcdma-produce runs on Linux, beside mcdma-rpcd's listen daemon";
         return null;
     }
     const t: *reuse.Target = loaded.target;

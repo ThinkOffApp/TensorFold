@@ -45,6 +45,7 @@ pub fn waits(h: *LaneHost, job: *Job) bool {
     var best: Waiting = .{};
     for (h.filling.items) |l| { // admitted fills never wait, so the oldest always runs
         if (!l.started or l.prefilled != null or l.request.background or !keyed(l.request)) continue;
+        if (l.stream.reuse.remote or l.request.handoff != null) continue; // its marks are never kept (#1594 step 2b)
         for (l.marks) |at| {
             if (at <= l.reached or at < least or at <= best.at) continue;
             if (store.wouldServe(r.cacheKey(), r.chunks, spans, l.request.cacheKey(), h.spans(l.request), at))

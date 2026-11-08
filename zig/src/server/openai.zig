@@ -320,7 +320,8 @@ const Run = struct {
 
     /// ``response_extras``: exact_mode, the matched stop, the runtime and the draft counters.
     fn extras(r: *Run, o: *json.Object, reply: *const chat.Reply) Allocator.Error!void {
-        try o.put(r.a, "exact_mode", .{ .string = "exact" });
+        const remote = reply.runtime == .object and reply.runtime.get("remote_prefix") != null; // a GB10's prefill (#1594)
+        try o.put(r.a, "exact_mode", .{ .string = if (remote) "remote_prefix" else "exact" });
         if (reply.stop_sequence) |s| try o.put(r.a, "stop_sequence", .{ .string = s });
         if (r.srv.config.spark_stats) try @import("spark_wire.zig").add(r.a, reply);
         try o.put(r.a, "tensorfold", reply.runtime);

@@ -128,7 +128,7 @@ pub const flags = [_]Flag{
     .{ .name = "--fsr-route-trace", .native = builtin.os.tag == .macos },
     .{ .name = "--prefill-from", .native = builtin.os.tag == .macos },
     .{ .name = "--mcdma-link", .native = builtin.os.tag == .macos },
-    .{ .name = "--mcdma-produce", .native = cuda_build },
+    .{ .name = "--mcdma-produce", .native = served("--mcdma-produce") },
     .{ .name = "--no-update-check", .kind = .store_true, .native = true },
     .{ .name = "--backend", .choices = &.{ "auto", "mlx", "cuda", "rocm" }, .native = true, .native_values = backend_values },
     .{ .name = "--tp", .choices = &.{ "1", "2", "4", "8" }, .native = served("--tp") },

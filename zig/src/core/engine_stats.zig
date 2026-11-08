@@ -19,4 +19,6 @@ pub const Stats = struct {
     queued_seconds: f64 = 0,
     /// The drafter's own counters as a JSON object, or empty.
     telemetry_json: []const u8 = "",
+    /// Prompt tokens another machine prefilled (#1594 step 2b): the reply is outside the exactness contract.
+    remote_prefix: u32 = 0,
 };

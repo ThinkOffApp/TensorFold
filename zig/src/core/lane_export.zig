@@ -29,6 +29,7 @@ pub fn exportable(h: *const LaneHost, r: *const Request) bool {
 pub fn exporting(h: *const LaneHost, job: *Job, reuse: *lanes.stream.Reuse) bool {
     if (job.request.handoff == null or h.exporter == null) return false;
     job.cut = .{@intCast(job.request.prompt.len - 1)};
+    if (reuse.at >= job.cut[0]) reuse.* = .{}; // a restore at the cut leaves no chunk ending there, so no export
     reuse.marks = &job.cut;
     reuse.hook = .{ .ptr = job, .at = exportAt };
     return true;

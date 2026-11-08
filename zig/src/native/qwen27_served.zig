@@ -84,6 +84,7 @@ pub const Host = struct {
 
     /// A finished reply's state stands where a prompt pass of prompt and reply would: keep it for the next turn.
     fn keepReply(ptr: *anyopaque, s: *lanes.Stream, slot: u32) void {
+        if (s.reuse.remote) return; // built on another machine's prefix: never kept as the engine's own (#1594 step 2b)
         const h = of(ptr);
         if (h.cache) |*store| keepEnd(store, h.gpa, s, h.runner.offsets[slot]);
     }
@@ -436,11 +437,12 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     errdefer if (h.cache) |*store| if (store.disk) |r| r.deinit();
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
     if (o.remote.on()) h.link = remote.Link.start(h.gpa, io, &h.runner, o.remote, o.remote_id) catch |err| {
-        why.* = try std.fmt.allocPrint(a, "--mcdma-link {s}: the link could not open ({s}); is mcdma-rpcd's connect daemon serving it?", .{ o.remote.link.?, @errorName(err) });
+        why.* = if (err == error.BadPrefillMin or err == error.BadPrefillChunk) "TF_PREFILL_MIN and TF_PREFILL_CHUNK take token counts, the chunk a multiple of 16" else try std.fmt.allocPrint(a, "--mcdma-link {s}: the link could not open ({s}); is mcdma-rpcd's connect daemon serving it?", .{ o.remote.link.?, @errorName(err) });
         return err;
     };
     errdefer if (h.link) |l| l.stop(h.gpa);
     if (h.link) |l| h.host.remote = l.pull.source();
+    if (h.link != null) h.host.resume_peek = .{ .ctx = h.back, .at = slot_state.resumeAt };
     if (h.trace) |*t| t.enabled = true; // serving rounds count from here: measure() timed whole, unsplit buffers
     try h.host.start();
     std.log.info("{f}", .{StartupLine{ .streams = slots, .context = capacity, .draft_slots = if (h.draft != null) h.back.draft_slots else 0, .images = o.images != null }});

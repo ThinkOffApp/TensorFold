@@ -141,8 +141,14 @@ pub const Client = struct {
         return .{ .box = box, .words = ws, .seq = @max(old, done), .generation = gen, .timeout_ns = timeout_ns };
     }
 
-    fn alive(c: *const Client) bool {
+    pub fn alive(c: *const Client) bool {
         return words.load(c.box.wordAt(layout.link_up)) == 1 and words.load(c.box.wordAt(layout.generation)) == c.generation;
+    }
+
+    /// A client for the link as it is: a new generation starts afresh; one that still owes a reply stays failed.
+    pub fn renew(c: *Client) Error!void {
+        if (c.alive() and !c.poisoned) return;
+        c.* = try Client.init(c.box, c.words, c.timeout_ns);
     }
 
     /// Stage `payload`, publish its word and wait for the done word; the reply is valid until the next call.

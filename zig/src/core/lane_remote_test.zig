@@ -251,3 +251,29 @@ test "remote prefix: a request a closed host refuses starts no remote fill" {
     try t.expectError(error.Closed, host.engine().submit(1, &.{ .prompt = &six, .max_tokens = 2 }, .{ .ctx = &seen, .event = Seen.event }));
     try t.expectEqual(@as(u32, 0), peer.fills);
 }
+
+test "remote prefix: with a prompt cache on, a remote stream keeps no state of its own" {
+    var none: u8 = 0;
+    var store = pc.Store.init(t.allocator, .{ .ptr = &none, .vtable = &.{ .bytes = Kept.bytes, .save = Kept.save, .restore = Kept.restore, .drop = Kept.drop } }, .{ .min_prompt = 0 }, 1 << 20);
+    defer store.deinit();
+    var peer: Peer = .{ .at = 4 };
+    defer peer.kept.deinit(t.allocator);
+    const seen = try runWith(&peer, &.{ .prompt = &six, .max_tokens = 2 }, null, &store);
+    try t.expect(seen.restoring and seen.remote);
+    try t.expect(!seen.hooked); // without lane_remote.wins/use the lookup would have set Job.kept here
+    try t.expectEqual(@as(usize, 0), seen.marks);
+    try t.expectEqual(@as(u64, 0), store.counts.kept);
+}
+
+test "handoff: a kept state exactly at the cut is not restored, so the pass still cuts there and exports" {
+    var none: u8 = 0;
+    var store = pc.Store.init(t.allocator, .{ .ptr = &none, .vtable = &.{ .bytes = Kept.bytes, .save = Kept.save, .restore = Kept.restore, .drop = Kept.drop } }, .{ .min_prompt = 0 }, 1 << 20);
+    defer store.deinit();
+    try t.expect(store.keep(&six, 5, null, &.{}, &.{}));
+    var peer: Peer = .{ .at = 0 };
+    var e: Exp = .{};
+    _ = try runWith(&peer, &.{ .prompt = &six, .max_tokens = 1, .handoff = id }, &e, &store);
+    try t.expectEqual(@as(u32, 1), e.calls);
+    try t.expectEqual(@as(?usize, 5), e.tokens);
+    try t.expect(e.why == null);
+}
