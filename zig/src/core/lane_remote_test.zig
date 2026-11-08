@@ -447,7 +447,7 @@ test "handoff: the same handoff on a restarted producer reads the grid row befor
     }
 }
 
-test "remote prefix kept (TF_PREFILL_KEEP): its pass keeps remote states, and the next turn resumes one with no fill" {
+test "remote prefix kept (TF_PREFILL_KEEP): its pass keeps remote states; the next turn resumes one, counted cached, reported remote, and keeps remote states" {
     var none: u8 = 0;
     var store = pc.Store.init(t.allocator, .{ .ptr = &none, .vtable = &.{ .bytes = Kept.bytes, .save = Kept.save, .restore = Kept.restore, .drop = Kept.drop } }, .{ .min_prompt = 0 }, 1 << 20);
     defer store.deinit();
@@ -458,12 +458,21 @@ test "remote prefix kept (TF_PREFILL_KEEP): its pass keeps remote states, and th
     try t.expect(first.restoring and first.remote and first.hooked);
     try t.expectEqual(@as(u32, 4), first.at);
     try t.expectEqual(@as(u32, 1), peer.fills);
+    try t.expectEqual(@as(?u32, 0), first.prefilled); // a fresh pull is not the cache's
+    try t.expectEqual(@as(u32, 1), peer.drops.load(.acquire)); // its storage went once, at the first mark
     try t.expectEqual(@as(u64, 1), store.counts.kept);
     try t.expect(store.entries.items[0].remote and store.entries.items[0].at == 5); // kept past the prefix, marked remote
-    const next = try runKeep(&peer, &.{ .prompt = &six, .max_tokens = 2, .history_len = 5 }, null, &store, .{ .keep = true });
+    // the chat's next turn: its history ends at 7, past the kept state it resumes
+    const next = try runKeep(&peer, &.{ .prompt = &eight, .max_tokens = 2, .history_len = 7 }, null, &store, .{ .keep = true });
     try t.expect(next.restoring and next.remote); // a kept remote state: restored here, still remote
     try t.expectEqual(@as(u32, 5), next.at);
     try t.expectEqual(@as(u32, 1), peer.fills); // the cache's state beat a new fill
+    try t.expectEqual(@as(?u32, 5), next.prefilled); // kept here, so counted as cached
+    try t.expectEqual(@as(?u32, 5), next.remote_prefix); // and still reported as a remote prefix, never as exact
+    try t.expectEqual(@as(u32, 1), peer.drops.load(.acquire));
+    try t.expectEqual(@as(u64, 2), store.counts.kept);
+    const later = store.find(&eight, &.{}, &.{}).?;
+    try t.expect(later.at == 7 and later.remote); // nothing pulled this turn, yet what it keeps stands on a remote state
 }
 
 test "kept remote states: an exact keep hides the remote copy, and a remote keep rides an exact one" {
@@ -509,4 +518,22 @@ test "remote prefix kept: a warm pass resuming a kept remote state keeps its end
     try t.expect(next.restoring and next.remote and next.at == 6);
     try t.expectEqual(@as(?u32, 6), next.remote_prefix); // reported as a remote prefix, never as exact
     try t.expectEqual(@as(u32, 0), peer.fills);
+}
+
+test "remote prefix kept: a pull past a shorter kept state releases the lookup's borrow, and keeps only marks past the pull" {
+    var none: u8 = 0;
+    var store = pc.Store.init(t.allocator, .{ .ptr = &none, .vtable = &.{ .bytes = Kept.bytes, .save = Kept.save, .restore = Kept.restore, .drop = Kept.drop } }, .{ .min_prompt = 0 }, 1 << 20);
+    defer store.deinit();
+    try t.expect(store.keep(&six, 2, null, &.{}, &.{})); // shorter than the pull: the lookup borrows it, the pull beats it
+    var peer: Peer = .{ .at = 4 };
+    defer peer.kept.deinit(t.allocator);
+    // a history ending where the pull does: the pass never stands there, so no mark is left to keep
+    const at_pull = try runKeep(&peer, &.{ .prompt = &six, .max_tokens = 2, .history_len = 4 }, null, &store, .{ .keep = true });
+    try t.expect(at_pull.restoring and at_pull.remote and at_pull.hooked and at_pull.marks == 0);
+    try t.expectEqual(@as(u64, 1), store.counts.kept);
+    const beyond = try runKeep(&peer, &.{ .prompt = &six, .max_tokens = 2, .history_len = 5 }, null, &store, .{ .keep = true });
+    try t.expect(beyond.restoring and beyond.remote and beyond.at == 4 and beyond.marks == 1);
+    try t.expectEqual(@as(u32, 2), peer.fills);
+    for (store.entries.items) |e| try t.expectEqual(@as(u32, 0), e.borrowers); // else the shorter state is never evicted
+    try t.expect(store.find(&six, &.{}, &.{}).?.remote); // the pass kept 5, marked remote
 }
