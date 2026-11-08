@@ -4,7 +4,10 @@ const wire = @import("wire.zig");
 const Allocator = std.mem.Allocator;
 
 /// What a dimension of a layer's page array holds.
-pub const Dim = enum { block, token, head, head_dim, kv, kv_head_dim, latent, value, key, tap, channel };
+pub const Dim = enum { block, token, head, head_dim, kv, kv_head_dim, latent };
+
+/// Protocol 2: what a dimension of a recurrent part holds. Its own set, so a page layer's dims stay protocol 1's.
+pub const PartDim = enum { head, value, key, tap, channel };
 
 pub const Dtype = enum {
     bfloat16,
@@ -22,7 +25,7 @@ pub const Kind = enum { attention, mla, recurrent };
 pub const Part = struct {
     name: []const u8,
     shape: []const u64,
-    dims: []const Dim,
+    dims: []const PartDim,
     dtype: Dtype,
 
     pub fn bytes(p: Part) u64 {
@@ -256,14 +259,15 @@ fn parseRecurrent(arena: Allocator, o: std.json.ObjectMap) Error!Layer {
         const dims_v = po.get("dims") orelse return error.BadManifest;
         if (shape_v != .array or dims_v != .array or shape_v.array.items.len != dims_v.array.items.len or shape_v.array.items.len == 0) return error.BadManifest;
         const shape = try arena.alloc(u64, shape_v.array.items.len);
-        const dims = try arena.alloc(Dim, dims_v.array.items.len);
+        const dims = try arena.alloc(PartDim, dims_v.array.items.len);
         for (shape_v.array.items, dims_v.array.items, shape, dims) |sv, dv, *x, *d| {
             if (sv != .integer or sv.integer <= 0 or dv != .string) return error.BadManifest;
             x.* = @intCast(sv.integer);
-            d.* = std.meta.stringToEnum(Dim, dv.string) orelse return error.BadManifest;
-            if (d.* == .block) return error.BadManifest;
+            d.* = std.meta.stringToEnum(PartDim, dv.string) orelse return error.BadManifest;
         }
         p.* = .{ .name = try str(po, "name"), .shape = shape, .dims = dims, .dtype = std.meta.stringToEnum(Dtype, try str(po, "dtype")) orelse return error.BadManifest };
+        var n: u64 = p.dtype.size(); // a peer names these sizes: refuse one whose bytes a u64 cannot hold
+        for (shape) |x| n = std.math.mul(u64, n, x) catch return error.BadManifest;
     }
     return .{ .index = @intCast(index), .kind = .recurrent, .shape = &.{}, .dims = &.{}, .dtype = .float32, .parts = parts };
 }
@@ -354,6 +358,27 @@ test "a recurrent layer is refused under protocol 1, without parts, or with a bl
     const blocked = "{\"index\": 0, \"kind\": \"recurrent\", \"parts\": [{\"name\": \"s\", \"shape\": [2], \"dims\": [\"block\"], \"dtype\": \"float32\"}]}";
     try std.testing.expectError(error.BadManifest, parseUpTo(a, "{\"protocol\": 2, " ++ head ++ blocked ++ "], \"frames\": 1}", 2));
     try std.testing.expectError(error.BadManifest, parseUpTo(a, "{\"protocol\": 3, " ++ head ++ good ++ "], \"frames\": 1}", 2));
+}
+
+test "a recurrent part whose byte size overflows is refused, not computed" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const text = "{\"protocol\": 2, \"handoff\": \"00000000000000000000000000000000\", \"model\": \"m\", \"prompt_tokens\": 1, \"first_token\": 0, \"token_sha256\": \"" ++ zeros64 ++ "\", \"block_size\": 1, \"tp_rank\": 0, \"tp_size\": 1, \"layers\": [{\"index\": 0, \"kind\": \"recurrent\", \"parts\": [{\"name\": \"r\", \"shape\": [9223372036854775807, 2], \"dims\": [\"head\", \"value\"], \"dtype\": \"float32\"}]}], \"frames\": 1}";
+    try std.testing.expectError(error.BadManifest, parseUpTo(arena.allocator(), text, 2));
+}
+
+test "a page layer keeps protocol 1's dimension names: a part's names are refused there, under either protocol" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const head = "\"handoff\": \"00000000000000000000000000000000\", \"model\": \"m\", \"prompt_tokens\": 1, \"first_token\": 0, \"token_sha256\": \"" ++ zeros64 ++ "\", \"block_size\": 1, \"tp_rank\": 0, \"tp_size\": 1, \"layers\": [";
+    inline for (.{ "value", "key", "tap", "channel" }) |name| {
+        const layer = "{\"index\": 0, \"kind\": \"attention\", \"shape\": [1, 4], \"dims\": [\"block\", \"" ++ name ++ "\"], \"dtype\": \"bfloat16\", \"heads\": 1, \"total_heads\": 1, \"head_size\": 4}";
+        try std.testing.expectError(error.BadManifest, parse(a, "{\"protocol\": 1, " ++ head ++ layer ++ "], \"frames\": 1}"));
+        try std.testing.expectError(error.BadManifest, parseUpTo(a, "{\"protocol\": 2, " ++ head ++ layer ++ "], \"frames\": 1}", 2));
+    }
+    const part_block = "{\"index\": 0, \"kind\": \"recurrent\", \"parts\": [{\"name\": \"s\", \"shape\": [2], \"dims\": [\"token\"], \"dtype\": \"float32\"}]}";
+    try std.testing.expectError(error.BadManifest, parseUpTo(a, "{\"protocol\": 2, " ++ head ++ part_block ++ "], \"frames\": 1}", 2));
 }
 
 test "manifests that break the schema are refused" {
