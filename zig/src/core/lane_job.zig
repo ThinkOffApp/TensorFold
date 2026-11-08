@@ -64,6 +64,11 @@ pub const Job = struct {
         const job: *Job = @ptrCast(@alignCast(ptr));
         job.reached = @max(job.reached, at); // a request waiting for this cut goes on, whether the store keeps it or not
         job.reported(); // before a keep can evict the entry the pass restored
+        job.keep(s, at);
+    }
+
+    /// Every keep of a job's stream: `s`'s state at `at`, kept as remote when it stands on a remote prefix.
+    pub fn keep(job: *Job, s: *lanes.Stream, at: u32) void {
         const store = job.host.cache orelse return;
         store.keep_remote = s.reuse.remote; // a state built on another machine's prefix is kept as remote
         defer store.keep_remote = false;

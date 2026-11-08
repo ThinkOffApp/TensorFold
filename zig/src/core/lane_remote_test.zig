@@ -1,10 +1,12 @@
 //! #1594 step 2b on the real lane host and a fake backend: a remote prefix is restored, never counted, dropped once.
 const std = @import("std");
+const platform = @import("sys");
 const lanes = @import("lanes");
 const api = @import("engine_api.zig");
 const pc = @import("prompt_cache.zig");
 const remote = @import("lane_remote.zig");
 const exporting = @import("lane_export.zig");
+const rmTree = @import("prompt_imprint_test.zig").rmTree;
 const t = std.testing;
 
 /// Another machine's prefill, in the fake backend's kept-state form: the prefix's own tokens.
@@ -46,6 +48,7 @@ const Seen = struct {
     hooked: bool = false,
     prefilled: ?u32 = null,
     tokens: usize = 0,
+    remote_prefix: ?u32 = null, // the finished stats' count, which the server reports as exact_mode "remote_prefix"
     done: std.atomic.Value(bool) = .init(false),
 
     fn chunk(ctx: *anyopaque, s: *lanes.Stream, n: usize) void {
@@ -59,7 +62,10 @@ const Seen = struct {
         switch (ev.*) {
             .prefilled => |n| x.prefilled = n,
             .tokens => |ts| x.tokens += ts.len,
-            .finished => x.done.store(true, .release),
+            .finished => |f| {
+                x.remote_prefix = f.stats.remote_prefix;
+                x.done.store(true, .release);
+            },
             else => {},
         }
     }
@@ -113,10 +119,13 @@ fn runAs(peer: *Peer, request: *const api.Request, exp: ?*Exp) !Seen {
 }
 
 fn runWith(peer: *Peer, request: *const api.Request, exp: ?*Exp, cache: ?*pc.Store) !Seen {
-    return runKeep(peer, request, exp, cache, false);
+    return runKeep(peer, request, exp, cache, .{});
 }
 
-fn runKeep(peer: *Peer, request: *const api.Request, exp: ?*Exp, cache: ?*pc.Store, keep: bool) !Seen {
+/// A run's host beyond the remote source: TF_PREFILL_KEEP, the server's warm passes, slot 0's own resume point.
+const Host = struct { keep: bool = false, warm: bool = false, peek: ?remote.ResumePeek = null };
+
+fn runKeep(peer: *Peer, request: *const api.Request, exp: ?*Exp, cache: ?*pc.Store, o: Host) !Seen {
     var cfg = try lanes.Config.init(t.allocator, .{}, 1, 0);
     defer cfg.deinit(t.allocator);
     var seen: Seen = .{};
@@ -125,10 +134,11 @@ fn runKeep(peer: *Peer, request: *const api.Request, exp: ?*Exp, cache: ?*pc.Sto
     var clock: lanes.fake.FixedClock = .{};
     var core = lanes.Engine.init(t.allocator, &cfg, fake.backend(), clock.clock());
     defer core.deinit();
-    var host = api.LaneHost.init(t.allocator, t.io, &core, .{ .lanes = 1 });
+    var host = api.LaneHost.init(t.allocator, t.io, &core, .{ .lanes = 1, .warm_turns = o.warm });
     host.remote = .{ .ptr = peer, .wants = Peer.wants, .fill = Peer.fill, .drop = Peer.drop, .running = &peer.running };
     if (cache) |store| host.cache = store;
-    host.keep_remote = keep;
+    host.keep_remote = o.keep;
+    host.resume_peek = o.peek;
     if (exp) |e| {
         e.fake = &fake;
         host.exporter = e.exporter();
@@ -145,6 +155,7 @@ fn runKeep(peer: *Peer, request: *const api.Request, exp: ?*Exp, cache: ?*pc.Sto
 }
 
 const six = [_]u32{ 11, 12, 13, 14, 15, 16 };
+const eight = six ++ [_]u32{ 17, 18 }; // a chat's next turn: six, then more
 
 test "remote prefix: the stream restores it with nothing kept after it, counts none of it cached, and it is dropped once" {
     var peer: Peer = .{ .at = 4 };
@@ -213,7 +224,7 @@ const Kept = struct {
     fn save(_: *anyopaque, _: ?*anyopaque, at: u32) anyerror!pc.Saved {
         const kept = try t.allocator.create(std.ArrayList(u32));
         kept.* = .empty;
-        try kept.appendSlice(t.allocator, six[0..at]);
+        try kept.appendSlice(t.allocator, eight[0..at]);
         return kept;
     }
     fn restore(_: *anyopaque, _: ?*anyopaque, _: pc.Saved) anyerror!void {}
@@ -221,6 +232,24 @@ const Kept = struct {
         const kept: *std.ArrayList(u32) = @ptrCast(@alignCast(saved));
         kept.deinit(t.allocator);
         t.allocator.destroy(kept);
+    }
+    /// The rows store's image of a copy: a word a token, written whole.
+    fn parts(_: *anyopaque, at: u32, out: *std.ArrayList(pc.rows.image.Part), a: std.mem.Allocator) anyerror!void {
+        try out.append(a, .{ .bytes = @as(u64, at) * 4, .row = 4 });
+    }
+    fn gather(_: *anyopaque, saved: pc.Saved, ranges: []const pc.rows.image.Range, out: []u8) anyerror!void {
+        const words = std.mem.sliceAsBytes(@as(*std.ArrayList(u32), @ptrCast(@alignCast(saved))).items);
+        var o: usize = 0;
+        for (ranges) |r| {
+            @memcpy(out[o..][0..@intCast(r.len)], words[@intCast(r.off)..][0..@intCast(r.len)]);
+            o += @intCast(r.len);
+        }
+    }
+    fn blank(_: *anyopaque, _: u32) anyerror!pc.Saved {
+        return error.NeverReadBack; // these tests only ever check what reaches the disk
+    }
+    fn scatter(_: *anyopaque, _: pc.Saved, _: []const pc.rows.image.Range, _: []const u8) anyerror!void {
+        return error.NeverReadBack;
     }
 };
 
@@ -425,13 +454,13 @@ test "remote prefix kept (TF_PREFILL_KEEP): its pass keeps remote states, and th
     var peer: Peer = .{ .at = 4 };
     defer peer.kept.deinit(t.allocator);
     // a chat's history ends at 5: the store marks it, past the 4 pulled tokens
-    const first = try runKeep(&peer, &.{ .prompt = &six, .max_tokens = 2, .history_len = 5 }, null, &store, true);
+    const first = try runKeep(&peer, &.{ .prompt = &six, .max_tokens = 2, .history_len = 5 }, null, &store, .{ .keep = true });
     try t.expect(first.restoring and first.remote and first.hooked);
     try t.expectEqual(@as(u32, 4), first.at);
     try t.expectEqual(@as(u32, 1), peer.fills);
     try t.expectEqual(@as(u64, 1), store.counts.kept);
     try t.expect(store.entries.items[0].remote and store.entries.items[0].at == 5); // kept past the prefix, marked remote
-    const next = try runKeep(&peer, &.{ .prompt = &six, .max_tokens = 2, .history_len = 5 }, null, &store, true);
+    const next = try runKeep(&peer, &.{ .prompt = &six, .max_tokens = 2, .history_len = 5 }, null, &store, .{ .keep = true });
     try t.expect(next.restoring and next.remote); // a kept remote state: restored here, still remote
     try t.expectEqual(@as(u32, 5), next.at);
     try t.expectEqual(@as(u32, 1), peer.fills); // the cache's state beat a new fill
@@ -452,4 +481,32 @@ test "kept remote states: an exact keep hides the remote copy, and a remote keep
     try t.expect(store.keep(&six, 4, null, &.{}, &.{})); // the exact copy serves a remote keep: nothing new
     store.keep_remote = false;
     try t.expectEqual(@as(u64, 2), store.counts.kept);
+}
+
+test "remote prefix kept: a warm pass resuming a kept remote state keeps its end remote and off disk, and the next turn is remote" {
+    var buf: [64]u8 = undefined;
+    const root = try std.fmt.bufPrint(&buf, "/tmp/tf-remote-warm-{d}", .{platform.c.getpid()});
+    defer rmTree(root);
+    var none: u8 = 0;
+    const family: pc.Snapshots = .{ .ptr = &none, .vtable = &.{ .bytes = Kept.bytes, .save = Kept.save, .restore = Kept.restore, .drop = Kept.drop, .rows = &.{ .parts = Kept.parts, .gather = Kept.gather, .blank = Kept.blank, .scatter = Kept.scatter } } };
+    const disk = try pc.rows.Rows.open(t.allocator, family, .{ .root = root, .identity = 2, .cap = 1 << 30, .floor = 0, .daily = 1 << 30 });
+    defer disk.deinit();
+    var store = pc.Store.init(t.allocator, family, .{ .min_prompt = 0 }, 1 << 20);
+    defer store.deinit();
+    store.disk = disk;
+    store.keep_remote = true;
+    try t.expect(store.keep(&six, 4, null, &.{}, &.{})); // a pulled turn's history state
+    store.keep_remote = false;
+    var peer: Peer = .{ .at = 4 };
+    defer peer.kept.deinit(t.allocator);
+    // the server's warm pass after a reply: background, no tokens, its history the whole prompt
+    const warm = try runKeep(&peer, &.{ .prompt = &six, .max_tokens = 0, .background = true, .history_len = 6 }, null, &store, .{ .keep = true, .warm = true });
+    try t.expect(warm.restoring and warm.remote and warm.at == 4);
+    const end = store.find(&eight, &.{}, &.{}).?;
+    try t.expect(end.at == 6 and end.remote); // the end it kept stands on the remote state: remote too
+    try t.expectEqual(@as(usize, 0), disk.states.items.len); // nothing written, though the host's stop writes what waits
+    const next = try runKeep(&peer, &.{ .prompt = &eight, .max_tokens = 2, .history_len = 7 }, null, &store, .{ .keep = true, .warm = true });
+    try t.expect(next.restoring and next.remote and next.at == 6);
+    try t.expectEqual(@as(?u32, 6), next.remote_prefix); // reported as a remote prefix, never as exact
+    try t.expectEqual(@as(u32, 0), peer.fills);
 }
