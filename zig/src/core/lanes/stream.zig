@@ -86,6 +86,7 @@ pub const Reuse = struct {
     at: u32 = 0,
     marks: []const u32 = &.{}, // ascending: the pass cuts a chunk at each and calls `hook` there
     hook: ?MarkHook = null,
+    remote: bool = false, // `saved` came from another machine (#1594 step 2b): nothing after it is the engine's own
 };
 
 /// Called between prompt chunks, the pass standing at `at` (the GPU done with the chunk that ends there).

@@ -43,6 +43,7 @@ pub const Job = struct {
     prefix: @import("lane_host_prefix.zig").Waiting = .{}, // its wait for another fill's cut, while queued
     fetch: @import("lane_host_fetch.zig").Ticket = .{}, // its disk state read ahead, while queued
     lease: @import("kv_ledger.zig").Lease = .{}, // its caches' bytes in the host's ledger, from admission to its end
+    remote: ?@import("lane_remote.zig").Filled = null, // a prefix another machine filled, until it is restored
 
     /// Record first admission once, including a family planner and a background pass that later yields.
     pub fn noteAdmission(job: *Job) void {
@@ -64,6 +65,7 @@ pub const Job = struct {
 
     /// Report a restored prefix or its failed copy; an untouched prefix remains kept.
     pub fn reported(job: *Job) void {
+        @import("lane_remote.zig").drop(job);
         const e = job.entry orelse return;
         job.entry = null;
         const store = job.host.cache orelse return;
