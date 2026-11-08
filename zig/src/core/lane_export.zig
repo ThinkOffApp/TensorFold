@@ -25,7 +25,7 @@ pub fn exportable(h: *const LaneHost, r: *const Request) bool {
     return h.exporter != null and r.prompt.len >= 2 and r.images.len == 0 and !r.promptOnly();
 }
 
-/// A handoff stream cuts once, before the prompt's last token (whose row stays pending), and exports there; no cache.
+/// A handoff stream cuts once, before the prompt's last token (whose row stays pending); it exports and keeps there.
 pub fn exporting(h: *const LaneHost, job: *Job, reuse: *lanes.stream.Reuse) bool {
     if (job.request.handoff == null or h.exporter == null) return false;
     job.cut = .{@intCast(job.request.prompt.len - 1)};
@@ -43,6 +43,7 @@ fn exportAt(ptr: *anyopaque, s: *lanes.Stream, at: u32) void {
     job.exported = true;
     const saved = x.snapshots.vtable.save(x.snapshots.ptr, s, at) catch |err| return x.failed(x.ptr, h, @errorName(err));
     x.exported(x.ptr, h, job.request.prompt[0..at], saved);
+    Job.kept(ptr, s, at); // the producer's own cache keeps the cut as well, so the chat's next turn resumes here
 }
 
 /// A handoff whose pass ended (or never ran) without its state: the decoder hears so rather than waiting it out.

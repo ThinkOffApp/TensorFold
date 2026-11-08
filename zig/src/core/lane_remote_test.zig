@@ -277,3 +277,20 @@ test "handoff: a kept state exactly at the cut is not restored, so the pass stil
     try t.expectEqual(@as(?usize, 5), e.tokens);
     try t.expect(e.why == null);
 }
+
+test "handoff: the producer's cache keeps the exported cut, and the chat's next turn resumes there" {
+    var none: u8 = 0;
+    var store = pc.Store.init(t.allocator, .{ .ptr = &none, .vtable = &.{ .bytes = Kept.bytes, .save = Kept.save, .restore = Kept.restore, .drop = Kept.drop } }, .{ .min_prompt = 0 }, 1 << 20);
+    defer store.deinit();
+    var peer: Peer = .{ .at = 0 };
+    var first: Exp = .{};
+    _ = try runWith(&peer, &.{ .prompt = six[0..5], .max_tokens = 1, .handoff = id }, &first, &store);
+    try t.expectEqual(@as(?usize, 4), first.tokens);
+    try t.expectEqual(@as(u64, 1), store.counts.kept);
+    var next: Exp = .{};
+    const seen = try runWith(&peer, &.{ .prompt = &six, .max_tokens = 1, .handoff = id }, &next, &store);
+    try t.expect(seen.restoring and !seen.remote);
+    try t.expectEqual(@as(u32, 4), seen.at); // the first turn's cut, so only the new tokens are prefilled
+    try t.expectEqual(@as(?usize, 5), next.tokens);
+    try t.expect(next.why == null);
+}
