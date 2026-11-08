@@ -123,7 +123,7 @@ fn frames(client: *mailbox.Client, handoff: [16]u8, m: manifest.Manifest, expect
             if (l.index == h.layer) break j;
         } else return error.Protocol;
         const layer = &m.layers[at];
-        if (h.row_start != next[at] or h.rows == 0 or h.row_start + h.rows > layer.rows()) return error.Protocol;
+        if (!rowsFit(h.row_start, h.rows, layer.rows()) or h.row_start != next[at]) return error.Protocol;
         if (h.nbytes != layer.frameBytes(h.row_start, h.rows) orelse return error.Protocol) return error.Protocol;
         const payload = wire.body(reply, h);
         if (expect.checksum and (h.flags & wire.checked == 0 or wire.crc32(payload) != h.crc)) return error.Corrupt;
@@ -133,6 +133,17 @@ fn frames(client: *mailbox.Client, handoff: [16]u8, m: manifest.Manifest, expect
     }
     for (m.layers, 0..) |l, j| if (next[j] != l.rows()) return error.Protocol;
     return .{ .manifest = m, .frames = m.frames, .bytes = bytes };
+}
+
+/// Rows [start, start + count) inside a layer of `total`, without the sum wrapping for a peer's huge values.
+fn rowsFit(start: u64, count: u64, total: u64) bool {
+    return count > 0 and count <= total and start <= total - count;
+}
+
+test "a frame's rows fit its layer only when their end does, however large a peer's values" {
+    try std.testing.expect(rowsFit(0, 3, 3) and rowsFit(2, 1, 3));
+    try std.testing.expect(!rowsFit(3, 1, 3) and !rowsFit(0, 0, 3) and !rowsFit(0, 4, 3));
+    try std.testing.expect(!rowsFit(std.math.maxInt(u64), 1, 3) and !rowsFit(1, std.math.maxInt(u64), 3));
 }
 
 fn close(client: *mailbox.Client, handoff: [16]u8) Error!void {

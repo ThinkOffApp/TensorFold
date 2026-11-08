@@ -71,7 +71,7 @@ pub const Layer = struct {
 
     /// A DATA frame's bytes for rows [row_start, row_start + count): whole page rows, or one recurrent part.
     pub fn frameBytes(l: Layer, row_start: u64, count: u64) ?u64 {
-        if (l.kind != .recurrent) return count * l.rowBytes();
+        if (l.kind != .recurrent) return std.math.mul(u64, count, l.rowBytes()) catch null;
         if (count != 1 or row_start >= l.parts.len) return null;
         return l.parts[@intCast(row_start)].bytes();
     }
@@ -244,6 +244,9 @@ fn parseLayer(arena: Allocator, v: std.json.Value) Error!Layer {
         l.total_heads = try int(o, "total_heads");
         l.head_size = try int(o, "head_size");
     }
+    // a peer names these sizes: refuse a layer whose row, or whole page array, a u64 cannot hold in bytes
+    var n: u64 = l.dtype.size();
+    for (shape) |x| n = std.math.mul(u64, n, x) catch return error.BadManifest;
     return l;
 }
 
@@ -358,6 +361,19 @@ test "a recurrent layer is refused under protocol 1, without parts, or with a bl
     const blocked = "{\"index\": 0, \"kind\": \"recurrent\", \"parts\": [{\"name\": \"s\", \"shape\": [2], \"dims\": [\"block\"], \"dtype\": \"float32\"}]}";
     try std.testing.expectError(error.BadManifest, parseUpTo(a, "{\"protocol\": 2, " ++ head ++ blocked ++ "], \"frames\": 1}", 2));
     try std.testing.expectError(error.BadManifest, parseUpTo(a, "{\"protocol\": 3, " ++ head ++ good ++ "], \"frames\": 1}", 2));
+}
+
+test "a page layer whose row or array byte size overflows is refused, and no frame size wraps" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const head = "{\"protocol\": 1, \"handoff\": \"00000000000000000000000000000000\", \"model\": \"m\", \"prompt_tokens\": 1, \"first_token\": 0, \"token_sha256\": \"" ++ zeros64 ++ "\", \"block_size\": 1, \"tp_rank\": 0, \"tp_size\": 1, \"layers\": [";
+    const row = "{\"index\": 0, \"kind\": \"attention\", \"shape\": [1, 9223372036854775807, 2], \"dims\": [\"block\", \"head\", \"head_dim\"], \"dtype\": \"float32\", \"heads\": 1, \"total_heads\": 1, \"head_size\": 1}";
+    try std.testing.expectError(error.BadManifest, parse(arena.allocator(), head ++ row ++ "], \"frames\": 1}"));
+    const blocks = "{\"index\": 0, \"kind\": \"attention\", \"shape\": [9223372036854775807, 4], \"dims\": [\"block\", \"head_dim\"], \"dtype\": \"bfloat16\", \"heads\": 1, \"total_heads\": 1, \"head_size\": 4}";
+    try std.testing.expectError(error.BadManifest, parse(arena.allocator(), head ++ blocks ++ "], \"frames\": 1}"));
+    const l: Layer = .{ .index = 0, .kind = .attention, .shape = &.{ 4, 1024 }, .dims = &.{ .block, .head_dim }, .dtype = .bfloat16 };
+    try std.testing.expectEqual(@as(?u64, null), l.frameBytes(0, std.math.maxInt(u64)));
+    try std.testing.expectEqual(@as(?u64, 4096), l.frameBytes(0, 2));
 }
 
 test "a recurrent part whose byte size overflows is refused, not computed" {
