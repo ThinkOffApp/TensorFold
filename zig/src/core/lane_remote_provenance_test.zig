@@ -1,11 +1,14 @@
 //! #1594 step 2b on the real lane host, continued: which copy a stream stands on, what it lets go, what its reply says.
 const std = @import("std");
 const pc = @import("prompt_cache.zig");
+const remote = @import("lane_remote.zig");
 const fixture = @import("lane_remote_test.zig");
 const Peer = fixture.Peer;
 const Exp = fixture.Exp;
 const Kept = fixture.Kept;
+const Slot = fixture.Slot;
 const runWith = fixture.runWith;
+const runKeep = fixture.runKeep;
 const unborrowed = fixture.unborrowed;
 const six = fixture.six;
 const id = fixture.id;
@@ -42,5 +45,39 @@ test "handoff: a repeat whose lookup finds its exact cut resumes below it on a r
     try t.expectEqual(@as(?u32, 3), seen.remote_prefix); // so its reply is outside the exactness contract
     try t.expectEqual(@as(?Found, .{ .at = 5, .remote = false }), found(&store, &six)); // and served the pass's keep
     try t.expectEqual(@as(u64, 2), store.counts.kept);
+    try unborrowed(&store);
+}
+
+test "remote prefix kept: a refused pull leaves the shorter kept state it beat, let go before the pass and never refused" {
+    var store = cache();
+    defer store.deinit();
+    try t.expect(store.keep(&six, 2, null, &.{}, &.{})); // shorter than the pull: the lookup borrows it, the pull wins
+    var peer: Peer = .{ .at = 4 };
+    defer peer.kept.deinit(t.allocator);
+    const seen = try runKeep(&peer, &.{ .prompt = &six, .max_tokens = 2, .history_len = 5 }, null, &store, .{ .keep = true, .refuse = true });
+    try t.expect(seen.restoring and seen.remote and seen.at == 4); // the pull's copy, which the first chunk refused
+    try t.expectEqual(@as(u32, 0), seen.borrowed); // the state it beat was let go before the pass began
+    try t.expectEqual(@as(?u32, 0), seen.remote_prefix); // refused: the whole prompt was prefilled here
+    try t.expectEqual(@as(u64, 0), store.counts.failed); // the refusal is the pull's, never the kept state's
+    try t.expectEqual(@as(?Found, .{ .at = 2, .remote = false }), found(&store, six[0..3])); // still kept, still exact
+    try t.expectEqual(@as(?Found, .{ .at = 5, .remote = false }), found(&store, &six)); // the pass ran from token 0
+    try t.expectEqual(@as(u32, 1), peer.drops.load(.acquire));
+    try unborrowed(&store);
+}
+
+test "remote prefix kept: a kept remote state that slot 0's own state reaches is let go before the pass runs" {
+    var store = cache();
+    defer store.deinit();
+    store.keep_remote = true;
+    try t.expect(store.keep(&six, 4, null, &.{}, &.{}));
+    store.keep_remote = false;
+    var peer: Peer = .{ .at = 4 };
+    defer peer.kept.deinit(t.allocator);
+    var slot: Slot = .{ .at = 4 };
+    const peek: remote.ResumePeek = .{ .ctx = &slot, .at = Slot.peek };
+    const level = try runKeep(&peer, &.{ .prompt = &six, .max_tokens = 2, .history_len = 5 }, null, &store, .{ .keep = true, .peek = peek });
+    try t.expect(!level.restoring and !level.remote); // slot 0's own exact state goes on
+    try t.expectEqual(@as(u32, 0), level.borrowed); // and the remote state is not held while the pass runs
+    try t.expectEqual(@as(u32, 0), peer.fills);
     try unborrowed(&store);
 }

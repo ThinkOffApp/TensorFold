@@ -49,12 +49,21 @@ pub const Seen = struct {
     prefilled: ?u32 = null,
     tokens: usize = 0,
     remote_prefix: ?u32 = null, // the finished stats' count, which the server reports as exact_mode "remote_prefix"
+    store: ?*const pc.Store = null, // the run's cache, its borrowers counted at the first chunk
+    borrowed: u32 = 0, // its states still borrowed at the first chunk: a lookup let go before the pass is not
+    refuse: bool = false, // the first chunk refuses a pulled copy, as qwen27_slots.opening can: the pass starts at 0
     done: std.atomic.Value(bool) = .init(false),
 
     fn chunk(ctx: *anyopaque, s: *lanes.Stream, n: usize) void {
         if (n != 0) return;
         const x: *Seen = @ptrCast(@alignCast(ctx));
-        x.* = .{ .restoring = s.reuse.saved != null, .at = s.reuse.at, .remote = s.reuse.remote, .marks = s.reuse.marks.len, .hooked = s.reuse.hook != null };
+        const kept: []const *pc.Entry = if (x.store) |st| st.entries.items else &.{};
+        var borrowed: u32 = 0;
+        for (kept) |e| borrowed += e.borrowers;
+        x.* = .{ .restoring = s.reuse.saved != null, .at = s.reuse.at, .remote = s.reuse.remote, .marks = s.reuse.marks.len, .hooked = s.reuse.hook != null, .store = x.store, .borrowed = borrowed, .refuse = x.refuse };
+        if (!x.refuse or !s.reuse.pulled) return;
+        s.reuse_failed = true; // the pass prefills from token 0 with reuse.remote still set, as on the Mac
+        s.reuse.saved = null;
     }
 
     fn event(ctx: *anyopaque, _: api.Id, ev: *const api.Event) void {
@@ -123,12 +132,12 @@ pub fn runWith(peer: *Peer, request: *const api.Request, exp: ?*Exp, cache: ?*pc
 }
 
 /// A run's host beyond the remote source: TF_PREFILL_KEEP, the server's warm passes, slot 0's own resume point.
-const Host = struct { keep: bool = false, warm: bool = false, peek: ?remote.ResumePeek = null };
+pub const Host = struct { keep: bool = false, warm: bool = false, peek: ?remote.ResumePeek = null, refuse: bool = false };
 
-fn runKeep(peer: *Peer, request: *const api.Request, exp: ?*Exp, cache: ?*pc.Store, o: Host) !Seen {
+pub fn runKeep(peer: *Peer, request: *const api.Request, exp: ?*Exp, cache: ?*pc.Store, o: Host) !Seen {
     var cfg = try lanes.Config.init(t.allocator, .{}, 1, 0);
     defer cfg.deinit(t.allocator);
-    var seen: Seen = .{};
+    var seen: Seen = .{ .store = cache, .refuse = o.refuse };
     var fake: lanes.fake.Fake = .{ .gpa = t.allocator, .prefill_hook = Seen.chunk, .prefill_hook_ctx = &seen };
     defer fake.deinit();
     var clock: lanes.fake.FixedClock = .{};
@@ -539,9 +548,9 @@ test "remote prefix kept: a pull past a shorter kept state releases the lookup's
 }
 
 /// Slot 0's own resume point, as a backend standing `at` tokens into every prompt reports it.
-const Slot = struct {
+pub const Slot = struct {
     at: u32,
-    fn peek(ctx: *anyopaque, _: []const u32, _: []const [2]u32) u32 {
+    pub fn peek(ctx: *anyopaque, _: []const u32, _: []const [2]u32) u32 {
         const s: *Slot = @ptrCast(@alignCast(ctx));
         return s.at;
     }
