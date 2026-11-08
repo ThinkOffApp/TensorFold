@@ -14,6 +14,7 @@ const slot_state = @import("qwen27_slots.zig");
 const Resident = @import("resident.zig").Resident;
 const lb = @import("qwen27_lanes.zig");
 pub const lanes_backend = lb;
+pub const remote = @import("qwen27_remote.zig"); // #1594 step 2b: prompt prefixes the GB10 prefills
 const disk = @import("qwen27_disk.zig");
 const images = @import("qwen27_images.zig");
 const Allocator = std.mem.Allocator;

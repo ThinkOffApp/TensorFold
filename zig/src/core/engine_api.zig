@@ -4,6 +4,7 @@ const lanes = @import("lanes");
 const Allocator = std.mem.Allocator;
 pub const profile = @import("profile");
 pub const tfvideo = @import("tfvideo.zig");
+pub const lane_remote = @import("lane_remote.zig"); // #1594 step 2b: prompt prefixes another machine fills
 pub const DraftSources = @import("draft_sources.zig").Sources;
 /// The server's name for one request, unique while the process lives.
 pub const Id = u64;

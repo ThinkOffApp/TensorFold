@@ -8,6 +8,7 @@ const hs = @import("fabric").hybrid_state;
 const help =
     \\tf-qwen27-import MODEL IDS.json export AT OUT: this Mac's state after AT tokens, in hybrid_state's order, to OUT
     \\tf-qwen27-import MODEL IDS.json import FILE exact|close: FILE restored, the rest prefilled, logits against fresh
+    \\tf-qwen27-import MODEL IDS.json link FILE exact|close: as import, FILE served and pulled over the fake MKVH link
     \\tf-qwen27-import MODEL IDS.json greedy N OUT.json: the prompt and this Mac's N-token greedy reply, for `tail`
     \\tf-qwen27-import MODEL IDS.json floor ROWS.bf16 N: this Mac's N steps against the GB10's `tail` rows
     \\tf-qwen27-import MODEL IDS.json time FILE -: stage times, this Mac alone against FILE restored, 32 decode steps each
@@ -120,7 +121,7 @@ fn exportState(a: std.mem.Allocator, io: std.Io, r: *q.decode_round.Runner, ids:
     std.debug.print("RESULT export: Metal state after {d} of {d} tokens, {d} bytes, to {s}\n", .{ at, ids.len, body.len, out });
 }
 
-fn importState(a: std.mem.Allocator, io: std.Io, r: *q.decode_round.Runner, ids: []const u32, path: []const u8, exact: bool) !void {
+fn importState(a: std.mem.Allocator, io: std.Io, r: *q.decode_round.Runner, ids: []const u32, path: []const u8, exact: bool, link: bool) !void {
     const file = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(16 << 30));
     defer a.free(file);
     if (file.len < @sizeOf(hs.Header)) return error.NotAHybridState;
@@ -134,10 +135,10 @@ fn importState(a: std.mem.Allocator, io: std.Io, r: *q.decode_round.Runner, ids:
     try r.reset(0);
     try feed(r, ids, true);
     const want = try steps(a, r, n_steps, null); // the Mac's own greedy reply, every step's logits
-    // a blank state filled with the file's bytes, restored over a slot that held the whole prompt
-    const st = try q.snapshot.blank(a, r, null, header.at);
+    // a blank state filled with the file's bytes (or pulled over the fake link), restored over a slot that held the prompt
+    const st = if (link) try @import("import_link.zig").pulled(a, io, r, ids, header.at, body) else try q.snapshot.blank(a, r, null, header.at);
     defer q.snapshot.drop(a, st);
-    @memcpy(st.buf.contents()[0..body.len], body);
+    if (!link) @memcpy(st.buf.contents()[0..body.len], body);
     try q.snapshot.restoreSlot(a, r, 0, null, st);
     try feed(r, ids[header.at..], true);
     const got = try steps(a, r, n_steps, want.toks); // the same reply fed through the restored state
@@ -410,7 +411,8 @@ pub fn main(init: std.process.Init) !void {
     if (std.mem.eql(u8, args[3], "greedy")) return greedyTo(a, init.io, &h.runner, ids, try std.fmt.parseInt(usize, args[4], 10), args[5]);
     if (std.mem.eql(u8, args[3], "time")) return timeRun(a, init.io, &h.runner, ids, args[4]);
     if (std.mem.eql(u8, args[3], "floor")) return floor(a, init.io, &h.runner, ids, args[4], try std.fmt.parseInt(usize, args[5], 10));
-    if (std.mem.eql(u8, args[3], "import")) return importState(a, init.io, &h.runner, ids, args[4], std.mem.eql(u8, args[5], "exact"));
+    if (std.mem.eql(u8, args[3], "import")) return importState(a, init.io, &h.runner, ids, args[4], std.mem.eql(u8, args[5], "exact"), false);
+    if (std.mem.eql(u8, args[3], "link")) return importState(a, init.io, &h.runner, ids, args[4], std.mem.eql(u8, args[5], "exact"), true);
     std.debug.print("{s}", .{help});
     return error.Usage;
 }

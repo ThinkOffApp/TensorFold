@@ -3,6 +3,8 @@ const std = @import("std");
 const wire = @import("wire.zig");
 const manifest = @import("manifest.zig");
 const frames = @import("frames.zig");
+const mailbox = @import("mailbox.zig");
+const words = @import("words.zig");
 const Allocator = std.mem.Allocator;
 
 /// One request's exported pages; `sources[i]` holds `layers[i]`'s rows.
@@ -187,6 +189,36 @@ pub const Responder = struct {
     fn noFrame(r: *Responder, seq: u32, h: wire.Header) !void {
         var buf: [48]u8 = undefined;
         try r.reply(seq, .@"error", h.handoff, try std.fmt.bufPrint(&buf, "no frame {d} in this handoff", .{h.frame}), 0);
+    }
+};
+
+/// One link's serving thread: each request on the listen end answered, until `stop`; expired exports released.
+pub const Serving = struct {
+    service: mailbox.Service,
+    responder: Responder,
+    stop: std.atomic.Value(bool) = .init(false),
+
+    /// `s` must stay at its address while it serves: its responder publishes through it.
+    pub fn init(s: *Serving, gpa: Allocator, box: *const mailbox.Mailbox, ws: words.Words, table: *Table, model: []const u8) void {
+        s.* = .{ .service = mailbox.Service.init(box, ws), .responder = undefined };
+        s.responder = .{ .gpa = gpa, .table = table, .out = .{ .area = s.service.replyArea(), .ptr = s, .publish_fn = publish }, .model = model };
+    }
+
+    pub fn deinit(s: *Serving) void {
+        s.responder.deinit();
+    }
+
+    fn publish(ptr: *anyopaque, seq: u32, len: usize) anyerror!void {
+        const s: *Serving = @ptrCast(@alignCast(ptr));
+        try s.service.publish(seq, len);
+    }
+
+    pub fn run(s: *Serving) void {
+        while (!s.stop.load(.acquire)) {
+            s.responder.table.expire() catch {};
+            const req = (s.service.next(std.time.ns_per_ms) catch return) orelse continue;
+            s.responder.handle(req.seq, req.payload) catch |err| s.responder.failed(req.seq, err) catch return;
+        }
     }
 };
 
