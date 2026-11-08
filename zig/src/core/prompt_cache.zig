@@ -514,7 +514,7 @@ pub const Store = struct {
         policy.link(s, e);
         s.held += charged;
         s.counts.kept += 1;
-        if (!e.remote) @import("prompt_cache_remote.zig").retireTwins(s, e); // the engine's own copy hides a remote one
+        if (!e.remote) @import("prompt_cache_remote.zig").retireTwins(s, e); // the engine's own copy hides remote twins
         if (shared and !e.remote) learned.learn(s, e, starts);
         if (s.disk) |r| if (!e.remote) rows.write.queued(r, e, starts); // a remote state is never written to disk
         if (s.family.vtable.trim) |f| f(s.family.ptr, s.budget -| s.held); // spare storage only inside what the budget leaves
@@ -561,4 +561,5 @@ test {
     _ = @import("prompt_cache_repeat_test.zig");
     _ = @import("prompt_cache_tail_test.zig");
     _ = @import("prompt_cache_others_test.zig");
+    _ = @import("prompt_cache_remote_test.zig");
 }
