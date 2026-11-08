@@ -85,11 +85,7 @@ pub const Host = struct {
     /// A finished reply's state stands where a prompt pass of prompt and reply would: keep it for the next turn.
     fn keepReply(ptr: *anyopaque, s: *lanes.Stream, slot: u32) void {
         const h = of(ptr);
-        if (s.reuse.remote and !h.host.keep_remote) return; // built on another machine's prefix (#1594 step 2b)
-        const store = if (h.cache) |*c| c else return;
-        store.keep_remote = s.reuse.remote; // kept as remote: a turn resuming it is remote too
-        defer store.keep_remote = false;
-        keepEnd(store, h.gpa, s, h.runner.offsets[slot]);
+        if (h.cache) |*store| keepEnd(store, h.host.keep_remote, h.gpa, s, h.runner.offsets[slot]);
     }
 
     /// A fallback never displaces a kept state or spends the room promised to this pass's later marks.
@@ -109,7 +105,8 @@ pub const Host = struct {
 };
 
 /// The reply's state at `stands` (its end or one short), born with its request's prompt: that request's marks stay.
-fn keepEnd(store: *pc.Store, gpa: Allocator, s: *lanes.Stream, stands: u32) void {
+fn keepEnd(store: *pc.Store, keep_remote: bool, gpa: Allocator, s: *lanes.Stream, stands: u32) void {
+    if (s.reuse.remote and !keep_remote) return; // built on another machine's prefix: kept only with TF_PREFILL_KEEP
     const prompt: u32 = @intCast(s.prompt_len);
     const tokens = s.context.items;
     if (tokens.len == prompt or stands + 1 < tokens.len or stands > tokens.len) return;
@@ -119,6 +116,8 @@ fn keepEnd(store: *pc.Store, gpa: Allocator, s: *lanes.Stream, stands: u32) void
     const keyed = if (s.key.len == prompt) gpa.dupe(u32, tokens) catch return else tokens;
     defer if (keyed.ptr != tokens.ptr) gpa.free(keyed);
     if (keyed.ptr != tokens.ptr) @memcpy(keyed[0..prompt], s.key);
+    store.keep_remote = s.reuse.remote; // kept as remote: a turn resuming it is remote too (#1594 step 2b)
+    defer store.keep_remote = false;
     _ = store.keepBorn(keyed, prompt, stands, s, s.chunks, spans);
 }
 
@@ -264,7 +263,7 @@ test "--prompt-cache-gib 40: a later 192k-token slot takes its room back from ke
     try std.testing.expectEqual(@as(usize, 1), fake.live);
 }
 
-test "a reply's end is born with its request's prompt: the history mark that request kept outlives the reply's keep" {
+test "a reply's end is born with its request's prompt (the history mark it kept outlives it), and is remote on a pulled prefix" {
     const gpa = std.testing.allocator;
     const at: u32 = 5000; // a history mark at 5000 tokens, then a 7-token generation prompt and a 100-token reply
     var fake: FakeStates = .{};
@@ -280,12 +279,15 @@ test "a reply's end is born with its request's prompt: the history mark that req
     var s = try lanes.Stream.init(gpa, .{ .id = "reply", .prompt = prompt, .max_new = 100 });
     defer s.deinit(gpa);
     try s.context.appendSlice(gpa, tokens[at + 7 ..]);
-    keepEnd(&store, gpa, &s, tokens.len); // three states pass the budget: the least recently used goes
+    keepEnd(&store, false, gpa, &s, tokens.len); // three states pass the budget: the least recently used goes
     try std.testing.expect(store.find(&other, &.{}, &.{}) == null);
     const history = store.find(prompt, &.{}, &.{}) orelse return error.HistoryEvicted; // a regenerate resumes it
     try std.testing.expectEqual(at, history.at);
     try std.testing.expectEqual(@as(u32, at + 7), store.entries.items[1].born);
     try std.testing.expectEqual(@as(usize, 2), fake.live);
+    s.reuse.remote = true; // a reply on a pulled prefix with TF_PREFILL_KEEP (#1594 step 2b): kept, marked remote
+    keepEnd(&store, true, gpa, &s, tokens.len - 1);
+    try std.testing.expect(store.entries.items[store.entries.items.len - 1].remote and !store.keep_remote);
 }
 
 /// Memory the slots past the ready ones take on first use: their K/V rows and taps rings.
