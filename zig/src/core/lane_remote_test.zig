@@ -567,3 +567,21 @@ test "remote prefix kept: slot 0's own state as far as a kept remote state wins 
     for (store.entries.items) |e| try t.expectEqual(@as(u32, 0), e.borrowers); // the remote state was let go
     try t.expect(!store.find(&six, &.{}, &.{}).?.remote); // and the mark past it is kept exact
 }
+
+test "handoff: the state a repeat resumes below its cut brings its own provenance, not the cut's" {
+    var none: u8 = 0;
+    var store = pc.Store.init(t.allocator, .{ .ptr = &none, .vtable = &.{ .bytes = Kept.bytes, .save = Kept.save, .restore = Kept.restore, .drop = Kept.drop } }, .{ .min_prompt = 0 }, 1 << 20);
+    defer store.deinit();
+    try t.expect(store.keep(&six, 3, null, &.{}, &.{})); // the engine's own, before the cut
+    store.keep_remote = true;
+    try t.expect(store.keep(&six, 5, null, &.{}, &.{})); // a remote copy at the cut, which the lookup finds first
+    store.keep_remote = false;
+    var peer: Peer = .{ .at = 0 };
+    var e: Exp = .{};
+    const seen = try runWith(&peer, &.{ .prompt = &six, .max_tokens = 1, .handoff = id }, &e, &store);
+    try t.expect(seen.restoring and !seen.remote); // resumed at 3, the engine's own state
+    try t.expectEqual(@as(u32, 3), seen.at);
+    try t.expectEqual(@as(?usize, 5), e.tokens);
+    try t.expect(!store.find(&six, &.{}, &.{}).?.remote); // the pass kept its cut as its own, hiding the remote copy
+    try unborrowed(&store);
+}

@@ -41,6 +41,7 @@ pub fn exporting(h: *const LaneHost, job: *Job, reuse: *lanes.stream.Reuse) bool
 fn below(h: *const LaneHost, job: *Job, reuse: *lanes.stream.Reuse) void {
     reuse.saved = null;
     reuse.at = 0;
+    reuse.remote = false; // the provenance goes with the state: the one borrowed below brings its own
     const store = h.cache orelse return;
     const r = job.request;
     if (job.entry) |at_cut| store.release(at_cut); // first: a disk read may take its room, and the pass keeps it again
@@ -48,6 +49,7 @@ fn below(h: *const LaneHost, job: *Job, reuse: *lanes.stream.Reuse) void {
     const e = job.entry orelse return;
     reuse.saved = e.saved;
     reuse.at = e.at;
+    reuse.remote = e.remote;
 }
 
 /// The words a request's kept state is looked up in: a handoff's before its cut, where a restore would export nothing.
