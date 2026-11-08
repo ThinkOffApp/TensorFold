@@ -1,4 +1,4 @@
-//! serve --prefill-from and --mcdma-link (#1594 step 2b): a GB10 server prefills long prompts over an mcdma-rpcd link.
+//! serve --prefill-from, --mcdma-link and --mcdma-produce (#1594 step 2b): a GB10 prefills for the Mac over mcdma-rpcd.
 const std = @import("std");
 
 /// `out` is the Args' lane_remote.Flags; false for any other flag.
@@ -10,6 +10,9 @@ pub fn apply(out: anytype, name: []const u8, value: []const u8) !bool {
     } else if (std.mem.eql(u8, name, "--mcdma-link")) {
         if (!validLink(value)) return error.ExpectedLinkName;
         out.link = value;
+    } else if (std.mem.eql(u8, name, "--mcdma-produce")) {
+        if (!validLink(value)) return error.ExpectedLinkName;
+        out.produce = value;
     } else return false;
     return true;
 }
@@ -22,10 +25,11 @@ fn validLink(name: []const u8) bool {
 }
 
 test "the remote prefill flags take an http URL and an mcdma-rpcd link name, and refuse others by name" {
-    var f: struct { url: ?[]const u8 = null, link: ?[]const u8 = null } = .{};
+    var f: struct { url: ?[]const u8 = null, link: ?[]const u8 = null, produce: ?[]const u8 = null } = .{};
     try std.testing.expect(try apply(&f, "--prefill-from", "http://192.0.2.20:8000"));
     try std.testing.expect(try apply(&f, "--mcdma-link", "tf2b"));
     try std.testing.expectEqualStrings("tf2b", f.link.?);
+    try std.testing.expect(try apply(&f, "--mcdma-produce", "tf2b"));
     try std.testing.expectError(error.ExpectedHttpUrl, apply(&f, "--prefill-from", "https://gb10:8000"));
     try std.testing.expectError(error.ExpectedHttpUrl, apply(&f, "--prefill-from", "gb10:8000"));
     try std.testing.expectError(error.ExpectedLinkName, apply(&f, "--mcdma-link", "a/b"));

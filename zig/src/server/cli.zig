@@ -128,14 +128,14 @@ pub const flags = [_]Flag{
     .{ .name = "--fsr-route-trace", .native = builtin.os.tag == .macos },
     .{ .name = "--prefill-from", .native = builtin.os.tag == .macos },
     .{ .name = "--mcdma-link", .native = builtin.os.tag == .macos },
+    .{ .name = "--mcdma-produce", .native = cuda_build },
     .{ .name = "--no-update-check", .kind = .store_true, .native = true },
     .{ .name = "--backend", .choices = &.{ "auto", "mlx", "cuda", "rocm" }, .native = true, .native_values = backend_values },
     .{ .name = "--tp", .choices = &.{ "1", "2", "4", "8" }, .native = served("--tp") },
     .{ .name = "--rank", .native = served("--tp") },
     .{ .name = "--master", .native = served("--tp") },
     .{ .name = "--master-port", .native = served("--tp") },
-    // the GPU engine's policy switches as key=value pairs, repeatable
-    .{ .name = "--policy", .kind = .append, .native = served("--policy") },
+    .{ .name = "--policy", .kind = .append, .native = served("--policy") }, // the GPU engine's key=value switches
     .{ .name = "--kv-dtype", .choices = &.{ "bf16", "int8", "int4" } },
     .{ .name = "--prefill-fp8", .kind = .store_true },
     .{ .name = "--no-prefill-fp8", .kind = .store_true },

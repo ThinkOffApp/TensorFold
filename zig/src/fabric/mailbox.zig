@@ -72,8 +72,7 @@ pub const Mailbox = struct {
 
     /// Map a mailbox the daemon created; it must be this user's and owner-only, as the daemons make them.
     fn mapFd(fd: platform.c.fd_t) Error!Mailbox {
-        var st: platform.c.Stat = undefined;
-        if (platform.c.fstat(fd, &st) != 0) return error.NoMailbox;
+        const st = try owned(fd);
         if (st.uid != platform.c.getuid() or st.mode & 0o077 != 0) return error.UnsafeMailbox;
         const size: usize = @intCast(st.size);
         if (size < 2 * layout.segment) return error.BadSizes;
@@ -84,6 +83,21 @@ pub const Mailbox = struct {
         };
         box.mapped = true;
         return box;
+    }
+
+    /// The mailbox file's owner, mode and size: statx on Linux (std.c has no fstat there), fstat elsewhere.
+    fn owned(fd: platform.c.fd_t) Error!struct { uid: u32, mode: u32, size: u64 } {
+        if (builtin.os.tag == .linux) {
+            const linux = std.os.linux;
+            var x: linux.Statx = undefined;
+            const need: linux.STATX = .{ .UID = true, .MODE = true, .SIZE = true };
+            if (linux.errno(linux.statx(fd, "", linux.AT.EMPTY_PATH, need, &x)) != .SUCCESS) return error.NoMailbox;
+            if (!x.mask.UID or !x.mask.MODE or !x.mask.SIZE) return error.NoMailbox;
+            return .{ .uid = x.uid, .mode = x.mode, .size = x.size };
+        }
+        var st: platform.c.Stat = undefined;
+        if (platform.c.fstat(fd, &st) != 0) return error.NoMailbox;
+        return .{ .uid = @intCast(st.uid), .mode = @intCast(st.mode), .size = @intCast(st.size) };
     }
 
     pub fn close(box: *Mailbox) void {

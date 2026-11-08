@@ -66,6 +66,7 @@ pub const Host = struct {
     kv_count: ?*@import("core").kv_pool.Pool = null, // the paged pool the lane host's ledger admits (#1943)
     kv_plan: ?@import("cuda_ledger.zig").Plan = null, // the KV ledger's budget and cost, read by the lane host
     prompts: ?*prompt_pages.Adapter = null, // TF_KV_SHARE: the family's prompts as its pool's pages (no `store` then)
+    produce: ?*@import("cuda_produce.zig").Produce = null, // --mcdma-produce: handoff states for the Mac (#1594 step 2b)
     learn: ?api.Learner = null, // the family's Sliding Weights learner (--slide), called with the context current
     slide: ?*anyopaque = null, // that learner's adapter, freed by slide_free before the family
     slide_free: ?*const fn (Allocator, *anyopaque) void = null,
@@ -398,6 +399,8 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         };
     }
     errdefer if (h.store) |store| kv_pages.closeStore(gpa, store);
+    if (o.remote_prefill.produce) |link| h.produce = try @import("cuda_produce.zig").open(F, gpa, loaded, link, std.fs.path.basename(o.dir), problem) orelse return null;
+    errdefer if (h.produce) |x| x.stop();
     const share_limit = if (!share) 0 else if (counted.slots != null) paged.?.snaps else try @import("core").kv_prompts.sharing(); // what its slots hold
     if (comptime @hasDecl(F, "share_attach")) if (@import("cuda_streams.zig").opensStore(F, share, cache, share_limit)) {
         h.prompts = try prompt_pages.Adapter.open(F, gpa, loaded.target, @intCast(layout.?.page_tokens), share_limit);

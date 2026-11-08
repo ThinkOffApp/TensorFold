@@ -27,6 +27,7 @@ pub const Filled = struct { saved: pc.Saved, at: u32 };
 pub const Flags = struct {
     url: ?[]const u8 = null,
     link: ?[]const u8 = null,
+    produce: ?[]const u8 = null, // --mcdma-produce NAME on a GB10: handoff requests' states exported on that link
 
     pub fn on(f: Flags) bool {
         return f.url != null or f.link != null;
