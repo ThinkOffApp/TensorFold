@@ -101,9 +101,9 @@ pub fn refusal(f: Flags, qwen27: bool, drafter: bool) ?[]const u8 {
     return null;
 }
 
-/// The prefix policy: TF_PREFILL_MIN prompt tokens at least (1024), in TF_PREFILL_CHUNK pieces (512, whole page rows).
+/// The prefix policy: TF_PREFILL_MIN prompt tokens at least (4096), in TF_PREFILL_CHUNK pieces (512, whole page rows).
 pub fn policy() !ps.Policy {
-    var p: ps.Policy = .{ .enabled = true };
+    var p: ps.Policy = .{ .enabled = true, .min_prefix = 4096 }; // a smaller gain stays local: a pull moves the whole state
     if (std.c.getenv("TF_PREFILL_MIN")) |v| p.min_prefix = std.fmt.parseInt(u64, std.mem.span(v), 10) catch return error.BadPrefillMin;
     if (std.c.getenv("TF_PREFILL_CHUNK")) |v| p.chunk = std.fmt.parseInt(u64, std.mem.span(v), 10) catch return error.BadPrefillChunk;
     if (p.chunk == 0 or p.chunk % block != 0) return error.BadPrefillChunk;
