@@ -107,6 +107,10 @@ pub fn policy() !ps.Policy {
     if (std.c.getenv("TF_PREFILL_MIN")) |v| p.min_prefix = std.fmt.parseInt(u64, std.mem.span(v), 10) catch return error.BadPrefillMin;
     if (std.c.getenv("TF_PREFILL_CHUNK")) |v| p.chunk = std.fmt.parseInt(u64, std.mem.span(v), 10) catch return error.BadPrefillChunk;
     if (p.chunk == 0 or p.chunk % block != 0) return error.BadPrefillChunk;
+    for ([_][*:0]const u8{ "TF_PREFILL_AHEAD", "TF_PREFILL_TIMEOUT_S" }) |name| {
+        const v = std.c.getenv(name) orelse continue;
+        _ = std.fmt.parseInt(u64, std.mem.span(v), 10) catch return error.BadPrefillCount; // read where used, checked at start
+    }
     return p;
 }
 
@@ -165,4 +169,16 @@ test "remote prefill's default policy: 4096 prompt tokens at least, in 512-token
     try std.testing.expectEqual(@as(u64, 512), p.chunk);
     try std.testing.expectEqual(@as(?u64, null), p.upto(4095, 0)); // a shorter prompt stays local
     try std.testing.expectEqual(@as(?u64, 4096), p.upto(4097, 0));
+}
+
+test "remote prefill refuses a TF_PREFILL_AHEAD or TF_PREFILL_TIMEOUT_S that is not a whole number" {
+    const env = @import("sys").env;
+    for ([_][*:0]const u8{ "TF_PREFILL_AHEAD", "TF_PREFILL_TIMEOUT_S" }) |name| {
+        if (std.c.getenv(name) != null) return error.SkipZigTest;
+        _ = env.setenv(name, "4x", 1);
+        defer _ = env.unsetenv(name);
+        try std.testing.expectError(error.BadPrefillCount, policy());
+        _ = env.setenv(name, "8", 1);
+        _ = try policy();
+    }
 }

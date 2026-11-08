@@ -442,7 +442,7 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     errdefer if (h.cache) |*store| if (store.disk) |r| r.deinit();
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
     if (o.remote.on()) h.link = remote.Link.start(h.gpa, io, &h.runner, o.remote, o.remote_id) catch |err| {
-        why.* = if (err == error.BadPrefillMin or err == error.BadPrefillChunk) "TF_PREFILL_MIN and TF_PREFILL_CHUNK take token counts, the chunk a multiple of 16" else try std.fmt.allocPrint(a, "--mcdma-link {s}: the link could not open ({s}); is mcdma-rpcd's connect daemon serving it?", .{ o.remote.link.?, @errorName(err) });
+        why.* = if (err == error.BadPrefillMin or err == error.BadPrefillChunk or err == error.BadPrefillCount) "TF_PREFILL_MIN, TF_PREFILL_CHUNK, TF_PREFILL_AHEAD and TF_PREFILL_TIMEOUT_S take whole numbers, the chunk a multiple of 16" else try std.fmt.allocPrint(a, "--mcdma-link {s}: the link could not open ({s}); is mcdma-rpcd's connect daemon serving it?", .{ o.remote.link.?, @errorName(err) });
         return err;
     };
     errdefer if (h.link) |l| l.stop(h.gpa);
