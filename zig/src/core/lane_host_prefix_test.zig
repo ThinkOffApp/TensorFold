@@ -76,6 +76,18 @@ const Hook = struct {
     }
 };
 
+/// A producer's exporter over the fake target: the tokens a handoff exported, its copy dropped.
+const Exports = struct {
+    target: *lanes.fake.Fake,
+    tokens: ?usize = null,
+    fn exported(ptr: *anyopaque, _: LaneHost.Export.Handoff, tokens: []const u32, saved: pc.Saved) void {
+        const x: *Exports = @ptrCast(@alignCast(ptr));
+        x.tokens = tokens.len;
+        x.target.drop(saved);
+    }
+    fn failed(_: *anyopaque, _: LaneHost.Export.Handoff, _: []const u8) void {}
+};
+
 const Setup = struct {
     wait_ms: ?u32 = null, // null: the default bound
     stepped: bool = true, // prompts fill a chunk a step (prefill_step)
@@ -84,6 +96,8 @@ const Setup = struct {
     hook: Hook = .{},
     prefill_chunks: usize = 13, // fake prompt chunks: 1 means one call would fill the whole prompt
     decode_share: ?f64 = null, // --decode-share: on a fake that opts in, it caps fill chunks at 512 rows
+    handoff: ?usize = null, // this request is a handoff, exported at its prompt's last token
+    handoff_len: usize = prompt_len, // the handoff's prompt length
 };
 
 const Run = struct {
@@ -93,6 +107,7 @@ const Run = struct {
     waits: u64 = 0,
     timeouts: u64 = 0,
     queued_after: usize = 0,
+    exported: ?usize = null, // the tokens the handoff exported
 
     fn deinit(r: *Run) void {
         for (&r.boxes) |*b| b.tokens.deinit(gpa);
@@ -122,6 +137,8 @@ fn fanout(su: Setup, out: *Run) !void {
     var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 8, .decode_share = su.decode_share });
     host.cache = &store;
     if (su.wait_ms) |ms| host.prefix.ns = @as(i96, ms) * std.time.ns_per_ms;
+    var exports: Exports = .{ .target = &target };
+    if (su.handoff != null) host.exporter = .{ .ptr = &exports, .snapshots = store.family, .exported = Exports.exported, .failed = Exports.failed };
     const e = host.engine();
     var hook = su.hook;
     hook.engine = e;
@@ -132,6 +149,10 @@ fn fanout(su: Setup, out: *Run) !void {
     const shared = [_]u32{su.shared};
     for (0..su.requests) |i| {
         reqs[i] = .{ .prompt = promptOf(&bufs[i], i), .max_tokens = 6, .shared_prefixes = &shared };
+        if (su.handoff) |k| if (k == i) {
+            reqs[i].prompt = reqs[i].prompt[0..su.handoff_len];
+            reqs[i].handoff = .{ .id = @splat(0x2b) };
+        };
         try e.submit(@intCast(i + 1), &reqs[i], .{ .ctx = &out.boxes[i], .event = Box.event });
     }
     try host.start();
@@ -145,6 +166,7 @@ fn fanout(su: Setup, out: *Run) !void {
     host.unlock();
     out.waits = host.prefix.waits;
     out.timeouts = host.prefix.timeouts;
+    out.exported = exports.tokens;
 }
 
 test "prefix wait: requests on a system prompt another prompt is filling wait for its cut and resume it" {
@@ -196,6 +218,25 @@ test "prefix wait: at the bound a waiter is released, counted, and fills beside 
     try std.testing.expectEqual(Reason.length, r.reasons[1]);
     try std.testing.expectEqual(@as(u64, 1), r.waits);
     try std.testing.expectEqual(@as(u64, 1), r.timeouts);
+}
+
+test "prefix wait: a handoff's fill leads the wait for the shared cut it keeps before its own cut, and the waiters resume there" {
+    var r: Run = .{};
+    defer r.deinit();
+    try fanout(.{ .handoff = 0 }, &r);
+    for (0..5) |i| try std.testing.expectEqual(Reason.length, r.reasons[i]);
+    try std.testing.expectEqualSlices(?u32, &.{ 0, cut, cut, cut, 0 }, r.cached[0..5]);
+    try std.testing.expectEqual(@as(u64, 3), r.waits);
+    try std.testing.expectEqual(@as(?usize, prompt_len - 1), r.exported); // its own cut, off the grid: never waited for
+}
+
+test "prefix wait: a handoff waits for no cut at or past its own, which it could not resume and still export" {
+    var r: Run = .{};
+    defer r.deinit();
+    try fanout(.{ .requests = 2, .handoff = 1, .handoff_len = cut + 1 }, &r); // the leader keeps the handoff's cut
+    try std.testing.expectEqual(@as(u64, 0), r.waits);
+    try std.testing.expectEqual(@as(?u32, 0), r.cached[1]);
+    try std.testing.expectEqual(@as(?usize, cut), r.exported);
 }
 
 test "prefix wait: whole prompt passes never wait, and the kept cut still serves the later requests" {

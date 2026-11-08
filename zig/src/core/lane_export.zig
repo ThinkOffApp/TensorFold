@@ -84,7 +84,14 @@ fn exportAt(ptr: *anyopaque, s: *lanes.Stream, at: u32) void {
     job.exported = true;
     const saved = x.snapshots.vtable.save(x.snapshots.ptr, s, at) catch |err| return x.failed(x.ptr, h, @errorName(err));
     x.exported(x.ptr, h, job.request.prompt[0..at], saved);
-    if (job.host.cache) |store| if (store.usable(at, job.request.chunks)) Job.kept(ptr, s, at); // only a resumable cut
+    if (keeps(job, at)) Job.kept(ptr, s, at);
+}
+
+/// Whether a stream's pass keeps its state at its mark `at`: a handoff's cut only where its store could resume it.
+pub fn keeps(job: *const Job, at: u32) bool {
+    if (job.request.handoff == null or at != job.cut[0]) return true;
+    const store = job.host.cache orelse return false;
+    return store.usable(at, job.request.chunks);
 }
 
 /// A handoff whose pass ended (or never ran) without its state: the decoder hears so rather than waiting it out.
