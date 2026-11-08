@@ -126,6 +126,8 @@ pub const flags = [_]Flag{
     .{ .name = "--ssd-experts", .native = builtin.os.tag == .macos },
     .{ .name = "--ple-on-ssd", .kind = .store_true, .native = builtin.os.tag == .macos },
     .{ .name = "--fsr-route-trace", .native = builtin.os.tag == .macos },
+    .{ .name = "--prefill-from", .native = builtin.os.tag == .macos },
+    .{ .name = "--mcdma-link", .native = builtin.os.tag == .macos },
     .{ .name = "--no-update-check", .kind = .store_true, .native = true },
     .{ .name = "--backend", .choices = &.{ "auto", "mlx", "cuda", "rocm" }, .native = true, .native_values = backend_values },
     .{ .name = "--tp", .choices = &.{ "1", "2", "4", "8" }, .native = served("--tp") },
@@ -191,6 +193,7 @@ pub const Args = struct {
     ssd_experts_gib: ?f64 = null,
     ple_on_ssd: bool = false,
     fsr_trace: ?[]const u8 = null,
+    remote_prefill: api.lane_remote.Flags = .{}, // --prefill-from and --mcdma-link (cli_remote.zig)
     decode_share: ?f64 = null, // the reply's share x: the prompt owes 1 - x and only the flag offers the chunk cap (null: env time share only)
     prompt_cache_over_cap: bool = false, // a --prompt-cache-gib past that is kept, not refused
     learn: bool = false, // keep shared prompt states on disk (--learn-dir: where; it implies --learn)
@@ -408,6 +411,7 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
     if (try recallFlag(a, out, name, v, u)) return;
     if (out.cfg.set(name, v) catch return fail(u, a, "--cfg-gamma must be 0 (off) or 1 (unguided) through 5", .{})) return;
     if (@import("cli_fsr.zig").apply(out, name, v) catch |err| return fail(u, a, "argument {s}: {s}", .{ name, @errorName(err) })) return;
+    if (@import("cli_remote.zig").apply(&out.remote_prefill, name, v) catch |err| return fail(u, a, "argument {s}: {s}", .{ name, @errorName(err) })) return;
     if (is(name, "--voices")) {
         out.voices = v;
         return;
@@ -547,6 +551,7 @@ pub fn request(a: Allocator, dir: []const u8, model_type: []const u8, args: Args
         .ssd_experts_gib = args.ssd_experts_gib,
         .ple_on_ssd = args.ple_on_ssd,
         .fsr_trace = args.fsr_trace,
+        .remote_prefill = args.remote_prefill,
         .learn = if (args.learn) args.learn_dir orelse try api.prompt_imprint.defaultRoot(a) else if (spills(args)) try api.prompt_cache.rows.spillRoot(a) else null,
         .learn_gib = if (spills(args)) @min(args.spill_gib.?, if (args.learn) args.learn_gib else std.math.inf(f64)) else args.learn_gib,
         .learn_min_free_gib = args.learn_min_free_gib,

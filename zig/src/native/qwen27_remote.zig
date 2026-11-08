@@ -8,6 +8,8 @@ const ps = fabric.prefill_source;
 const hs = fabric.hybrid_state;
 const hx = fabric.hybrid_export;
 const Filled = api.lane_remote.Filled;
+const Flags = api.lane_remote.Flags;
+const trigger = @import("remote_trigger.zig");
 
 /// Tokens to an attention layer's page row in the hand-off; the GB10's export uses the same.
 pub const block: u32 = 16;
@@ -60,3 +62,58 @@ pub const Pull = struct {
     fn committed(_: *anyopaque, _: u64, _: ps.Provenance) void {} // landing.whole() is the check, after fill
     fn aborted(_: *anyopaque) void {} // the caller drops the blank state
 };
+
+/// What serve refuses before loading: one flag without the other, another model, or a drafter (no taps come across).
+pub fn refusal(f: Flags, qwen27: bool, drafter: bool) ?[]const u8 {
+    if (!f.on()) return null;
+    if (f.url == null or f.link == null) return "--prefill-from and --mcdma-link go together: the GB10 server's URL and the mcdma-rpcd link it answers on";
+    if (!qwen27) return "--prefill-from serves Qwen3.8-27B only (#1594 step 2b): serve this model without it";
+    if (drafter) return "--prefill-from runs without --drafter for now: a remote prefix carries no drafter taps";
+    return null;
+}
+
+/// The prefix policy: TF_PREFILL_MIN prompt tokens at least (1024), in TF_PREFILL_CHUNK pieces (512, whole page rows).
+pub fn policy() !ps.Policy {
+    var p: ps.Policy = .{ .enabled = true };
+    if (std.c.getenv("TF_PREFILL_MIN")) |v| p.min_prefix = std.fmt.parseInt(u64, std.mem.span(v), 10) catch return error.BadPrefillMin;
+    if (std.c.getenv("TF_PREFILL_CHUNK")) |v| p.chunk = std.fmt.parseInt(u64, std.mem.span(v), 10) catch return error.BadPrefillChunk;
+    if (p.chunk == 0 or p.chunk % block != 0) return error.BadPrefillChunk;
+    return p;
+}
+
+/// A served link: the connect daemon's mailbox, its client, the HTTP trigger and the pull, as long as the server runs.
+pub const Link = struct {
+    box: fabric.mailbox.Mailbox,
+    client: fabric.mailbox.Client,
+    http: trigger.Http,
+    pull: Pull,
+
+    /// `model` names the checkpoint both ends load (the manifest's model must equal it).
+    pub fn start(gpa: std.mem.Allocator, io: std.Io, runner: *const q.decode_round.Runner, f: Flags, model: []const u8) !*Link {
+        const l = try gpa.create(Link);
+        errdefer gpa.destroy(l);
+        const rules = try policy();
+        l.box = try fabric.mailbox.Mailbox.openConnect(f.link.?);
+        errdefer l.box.close();
+        l.client = try fabric.mailbox.Client.init(&l.box, fabric.words.native, 30 * std.time.ns_per_s);
+        const base = std.mem.trimEnd(u8, f.url.?, "/");
+        l.http = .{ .gpa = gpa, .io = io, .url = try std.fmt.allocPrint(gpa, "{s}/v1/completions", .{base}), .model = "" };
+        l.pull = .{ .gpa = gpa, .io = io, .runner = runner, .remote = .{ .gpa = gpa, .policy = rules, .client = &l.client, .trigger = l.http.trigger(), .model = model, .protocol = fabric.wire.recurrent_version } };
+        return l;
+    }
+
+    pub fn stop(l: *Link, gpa: std.mem.Allocator) void {
+        if (l.pull.pulls > 0) std.log.info("remote prefill: {d} prefixes pulled, {d:.1} ms each on average", .{ l.pull.pulls, @as(f64, @floatFromInt(l.pull.ns)) / @as(f64, @floatFromInt(l.pull.pulls)) / 1e6 });
+        gpa.free(l.http.url);
+        l.box.close();
+        gpa.destroy(l);
+    }
+};
+
+test "remote prefill refuses half its flags, other models and a drafter, by name" {
+    try std.testing.expectEqual(@as(?[]const u8, null), refusal(.{}, false, true));
+    try std.testing.expect(refusal(.{ .url = "http://gb10:8000" }, true, false) != null);
+    try std.testing.expect(refusal(.{ .url = "http://gb10:8000", .link = "tf2b" }, false, false) != null);
+    try std.testing.expect(refusal(.{ .url = "http://gb10:8000", .link = "tf2b" }, true, true) != null);
+    try std.testing.expectEqual(@as(?[]const u8, null), refusal(.{ .url = "http://gb10:8000", .link = "tf2b" }, true, false));
+}

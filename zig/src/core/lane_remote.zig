@@ -18,6 +18,16 @@ pub const Source = struct {
 /// The family's state after `at` prompt tokens, computed by another machine: never kept, never the engine's own.
 pub const Filled = struct { saved: pc.Saved, at: u32 };
 
+/// serve --prefill-from URL (the GB10 server) and --mcdma-link NAME (mcdma-rpcd's connect link): both, or neither.
+pub const Flags = struct {
+    url: ?[]const u8 = null,
+    link: ?[]const u8 = null,
+
+    pub fn on(f: Flags) bool {
+        return f.url != null or f.link != null;
+    }
+};
+
 /// Whether a request may take a remote prefix: text a stream decodes, with nothing that needs the engine's own rows.
 fn eligible(r: *const Request) bool {
     return !r.promptOnly() and !r.background and r.images.len == 0 and r.prompt_logprobs == null and !r.untaught and r.embedding == null;
