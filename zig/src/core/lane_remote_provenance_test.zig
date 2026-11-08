@@ -72,14 +72,18 @@ test "remote prefix kept: a kept remote state that slot 0's own state reaches is
     store.keep_remote = true;
     try t.expect(store.keep(&six, 4, null, &.{}, &.{}));
     store.keep_remote = false;
+    const held = store.find(&six, &.{}, &.{}).?;
+    held.borrowers += 1; // another job's borrow of the same state
     var peer: Peer = .{ .at = 4 };
     defer peer.kept.deinit(t.allocator);
     var slot: Slot = .{ .at = 4 };
     const peek: remote.ResumePeek = .{ .ctx = &slot, .at = Slot.peek };
     const level = try runKeep(&peer, &.{ .prompt = &six, .max_tokens = 2, .history_len = 5 }, null, &store, .{ .keep = true, .peek = peek });
     try t.expect(!level.restoring and !level.remote); // slot 0's own exact state goes on
-    try t.expectEqual(@as(u32, 0), level.borrowed); // and the remote state is not held while the pass runs
+    try t.expectEqual(@as(u32, 1), level.borrowed); // the lookup's borrow is not held while the pass runs, the other's is
     try t.expectEqual(@as(u32, 0), peer.fills);
+    try t.expectEqual(@as(u32, 1), held.borrowers); // let go once: a lookup still named after it would take the other's
+    store.release(held);
     try unborrowed(&store);
 }
 
