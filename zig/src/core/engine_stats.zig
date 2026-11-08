@@ -21,4 +21,6 @@ pub const Stats = struct {
     telemetry_json: []const u8 = "",
     /// Prompt tokens another machine prefilled (#1594 step 2b): the reply is outside the exactness contract.
     remote_prefix: u32 = 0,
+    /// Of those, the tokens pulled over the link for this reply (none when a kept remote state was restored here).
+    pulled_prefix: u32 = 0,
 };
