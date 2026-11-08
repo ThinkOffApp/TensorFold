@@ -22,6 +22,8 @@ pub const Produce = struct {
     gpa: std.mem.Allocator,
     target: *reuse.Target,
     box: fabric.mailbox.Mailbox,
+    reg: ?fabric.registration.Registration = null, // MODE poll: the listen daemon sends staged replies only to a service
+    link: []const u8,
     table: producer.Table,
     serving: producer.Serving,
     thread: std.Thread = undefined,
@@ -39,6 +41,7 @@ pub const Produce = struct {
         var it = p.held.valueIterator();
         while (it.next()) |h| release(p, h.*);
         p.held.deinit(p.gpa);
+        if (p.reg) |*r| r.close();
         p.serving.deinit();
         p.table.deinit();
         p.box.close();
@@ -48,7 +51,9 @@ pub const Produce = struct {
     fn run(p: *Produce) void {
         var done: std.ArrayList([]const u8) = .empty;
         defer done.deinit(p.gpa);
+        var since: u64 = 0;
         while (!p.serving.stop.load(.acquire)) {
+            if (!p.attached(&since)) continue;
             p.table.expire() catch {};
             if (p.serving.service.next(std.time.ns_per_ms) catch return) |req|
                 p.serving.responder.handle(req.seq, req.payload) catch |err| p.serving.responder.failed(req.seq, err) catch return;
@@ -56,6 +61,25 @@ pub const Produce = struct {
             for (done.items) |name| reap(p, name);
             done.clearRetainingCapacity();
         }
+    }
+
+    /// Registered with the listen daemon; a dropped registration (the link went down) is retried each second.
+    fn attached(p: *Produce, since: *u64) bool {
+        if (p.reg) |*r| {
+            if (r.alive()) return true;
+            r.close();
+            p.reg = null;
+            std.log.warn("mcdma handoff: the listen daemon dropped the service on link {s}; attaching again", .{p.link});
+        }
+        const now = fabric.words.nowNs();
+        if (now - since.* < std.time.ns_per_s) {
+            fabric.words.pause(std.time.ns_per_ms);
+            return false;
+        }
+        since.* = now;
+        p.reg = fabric.registration.Registration.attach(p.link) catch return false;
+        std.log.info("mcdma handoff: attached to the listen daemon on link {s}", .{p.link});
+        return true;
     }
 
     fn reap(p: *Produce, name: []const u8) void {
@@ -150,12 +174,18 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, loaded: anytype, link: []c
     }
     const p = try gpa.create(Produce);
     errdefer gpa.destroy(p);
-    p.* = .{ .gpa = gpa, .target = t, .box = undefined, .table = .{ .gpa = gpa, .ttl_ns = 120 * std.time.ns_per_s, .clock = fabric.words.nowNs }, .serving = undefined };
+    p.* = .{ .gpa = gpa, .target = t, .box = undefined, .link = link, .table = .{ .gpa = gpa, .ttl_ns = 120 * std.time.ns_per_s, .clock = fabric.words.nowNs }, .serving = undefined };
     p.box = fabric.mailbox.Mailbox.openListen(link) catch |err| {
         problem.* = "--mcdma-produce: no mcdma-rpcd listen daemon serves that link (start `mcdma-rpcd listen` first)";
         return err;
     };
     errdefer p.box.close();
+    p.reg = fabric.registration.Registration.attach(link) catch |err| {
+        problem.* = "--mcdma-produce: the listen daemon refused the service (another holds the link, or it is not running)";
+        return err;
+    };
+    errdefer if (p.reg) |*r| r.close();
+    std.log.info("mcdma handoff: attached to the listen daemon on link {s}", .{link});
     p.serving.init(gpa, &p.box, fabric.words.native, &p.table, model);
     p.thread = try std.Thread.spawn(.{}, Produce.run, .{p});
     std.log.info("mcdma handoff: exporting Qwen3.8-27B states as MKVH protocol 2 on link {s}", .{link});
