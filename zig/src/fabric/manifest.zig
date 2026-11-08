@@ -244,9 +244,12 @@ fn parseLayer(arena: Allocator, v: std.json.Value) Error!Layer {
         l.total_heads = try int(o, "total_heads");
         l.head_size = try int(o, "head_size");
     }
-    // a peer names these sizes: refuse a layer whose row, or whole page array, a u64 cannot hold in bytes
-    var n: u64 = l.dtype.size();
-    for (shape) |x| n = std.math.mul(u64, n, x) catch return error.BadManifest;
+    // a peer's sizes: the row's bytes checked alone first (zero rows cannot mask it), then rows times row
+    var row: u64 = l.dtype.size();
+    for (shape, dims) |x, d| {
+        if (d != .block) row = std.math.mul(u64, row, x) catch return error.BadManifest;
+    }
+    _ = std.math.mul(u64, row, l.rows()) catch return error.BadManifest;
     return l;
 }
 
@@ -371,6 +374,12 @@ test "a page layer whose row or array byte size overflows is refused, and no fra
     try std.testing.expectError(error.BadManifest, parse(arena.allocator(), head ++ row ++ "], \"frames\": 1}"));
     const blocks = "{\"index\": 0, \"kind\": \"attention\", \"shape\": [9223372036854775807, 4], \"dims\": [\"block\", \"head_dim\"], \"dtype\": \"bfloat16\", \"heads\": 1, \"total_heads\": 1, \"head_size\": 4}";
     try std.testing.expectError(error.BadManifest, parse(arena.allocator(), head ++ blocks ++ "], \"frames\": 1}"));
+    const zero_rows = "{\"index\": 0, \"kind\": \"attention\", \"shape\": [0, 9223372036854775807, 2], \"dims\": [\"block\", \"head\", \"head_dim\"], \"dtype\": \"float32\", \"heads\": 1, \"total_heads\": 1, \"head_size\": 1}";
+    try std.testing.expectError(error.BadManifest, parse(arena.allocator(), head ++ zero_rows ++ "], \"frames\": 1}"));
+    const empty = "{\"index\": 0, \"kind\": \"attention\", \"shape\": [0, 4, 16], \"dims\": [\"block\", \"head\", \"head_dim\"], \"dtype\": \"bfloat16\", \"heads\": 4, \"total_heads\": 4, \"head_size\": 16}";
+    const kept = try parse(arena.allocator(), head ++ empty ++ "], \"frames\": 0}"); // an empty layer stays as protocol 1 had it
+    try std.testing.expectEqual(@as(u64, 0), kept.layers[0].rows());
+    try std.testing.expectEqual(@as(u64, 4 * 16 * 2), kept.layers[0].rowBytes());
     const l: Layer = .{ .index = 0, .kind = .attention, .shape = &.{ 4, 1024 }, .dims = &.{ .block, .head_dim }, .dtype = .bfloat16 };
     try std.testing.expectEqual(@as(?u64, null), l.frameBytes(0, std.math.maxInt(u64)));
     try std.testing.expectEqual(@as(?u64, 4096), l.frameBytes(0, 2));
