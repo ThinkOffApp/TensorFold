@@ -15,8 +15,14 @@ pub const Export = struct {
     sources: []const frames.Source,
     frames: []frames.Frame = &.{},
 
+    /// Protocol 2 when a layer is recurrent, so a protocol 1 decoder refuses it; else protocol 1, byte for byte.
+    pub fn protocol(e: *const Export) u16 {
+        for (e.layers) |l| if (l.kind == .recurrent) return wire.recurrent_version;
+        return wire.version;
+    }
+
     pub fn toManifest(e: *const Export, model: []const u8, tp_rank: u64, tp_size: u64) manifest.Manifest {
-        return .{ .handoff = e.handoff, .model = model, .prompt_tokens = e.tokens.len, .first_token = e.first_token, .token_sha256 = wire.tokenSha256(e.tokens), .block_size = e.tokens_per_row, .tp_rank = tp_rank, .tp_size = tp_size, .layers = e.layers, .frames = e.frames.len };
+        return .{ .protocol = e.protocol(), .handoff = e.handoff, .model = model, .prompt_tokens = e.tokens.len, .first_token = e.first_token, .token_sha256 = wire.tokenSha256(e.tokens), .block_size = e.tokens_per_row, .tp_rank = tp_rank, .tp_size = tp_size, .layers = e.layers, .frames = e.frames.len };
     }
 };
 
@@ -97,8 +103,12 @@ pub const Responder = struct {
     }
 
     fn reply(r: *Responder, seq: u32, kind: wire.Kind, handoff: [16]u8, payload: []const u8, frames_n: u32) !void {
+        return r.replyAs(seq, wire.version, kind, handoff, payload, frames_n);
+    }
+
+    fn replyAs(r: *Responder, seq: u32, v: u16, kind: wire.Kind, handoff: [16]u8, payload: []const u8, frames_n: u32) !void {
         if (wire.header_bytes + payload.len > r.out.area.len) return error.ReplyTooLarge;
-        const h = wire.pack(.{ .kind = kind, .handoff = handoff, .frames = frames_n, .nbytes = payload.len });
+        const h = wire.pack(.{ .version = v, .kind = kind, .handoff = handoff, .frames = frames_n, .nbytes = payload.len });
         @memcpy(r.out.area[0..wire.header_bytes], &h);
         @memcpy(r.out.area[wire.header_bytes..][0..payload.len], payload);
         try r.out.publish(seq, wire.header_bytes + payload.len);
@@ -106,7 +116,7 @@ pub const Responder = struct {
 
     /// Answer one request; an error here becomes the producer-failed ERROR that `failed` sends.
     pub fn handle(r: *Responder, seq: u32, msg: []const u8) !void {
-        const h = switch (wire.unpack(msg)) {
+        const h = switch (wire.unpackUpTo(msg, wire.recurrent_version)) {
             .ok => |h| h,
             .bad => |b| {
                 var buf: [64]u8 = undefined;
@@ -145,13 +155,20 @@ pub const Responder = struct {
         if (e.frames.len == 0) {
             const rows = try r.gpa.alloc(frames.LayerRows, e.layers.len);
             defer r.gpa.free(rows);
-            for (e.layers, rows) |l, *x| x.* = .{ .rows = l.rows(), .row_bytes = l.rowBytes() };
+            var sizes: std.ArrayList(u64) = .empty;
+            defer sizes.deinit(r.gpa);
+            for (e.layers) |l| for (l.parts) |p| try sizes.append(r.gpa, p.bytes());
+            var at: usize = 0;
+            for (e.layers, rows) |l, *x| {
+                x.* = .{ .rows = l.rows(), .row_bytes = l.rowBytes(), .sizes = sizes.items[at..][0..l.parts.len] };
+                at += l.parts.len;
+            }
             e.frames = try frames.plan(r.gpa, rows, r.out.area.len - wire.header_bytes);
         }
         var text: std.Io.Writer.Allocating = .init(r.gpa);
         defer text.deinit();
         try manifest.write(e.toManifest(r.model, r.tp_rank, r.tp_size), &text.writer);
-        try r.reply(seq, .manifest, h.handoff, text.written(), @intCast(e.frames.len));
+        try r.replyAs(seq, e.protocol(), .manifest, h.handoff, text.written(), @intCast(e.frames.len));
     }
 
     fn pull(r: *Responder, seq: u32, h: wire.Header, exp: ?*Export) !void {
@@ -162,7 +179,7 @@ pub const Responder = struct {
         const nbytes = try e.sources[f.position].gather(f.row_start, f.rows, area);
         const checked = r.checksums.get(h.handoff) orelse true;
         const crc = if (checked) wire.crc32(area[0..@intCast(nbytes)]) else 0;
-        const head = wire.pack(.{ .kind = .data, .handoff = h.handoff, .frame = h.frame, .frames = @intCast(e.frames.len), .layer = e.layers[f.position].index, .flags = if (checked) wire.checked else 0, .row_start = f.row_start, .rows = f.rows, .nbytes = nbytes, .crc = crc });
+        const head = wire.pack(.{ .version = e.protocol(), .kind = .data, .handoff = h.handoff, .frame = h.frame, .frames = @intCast(e.frames.len), .layer = e.layers[f.position].index, .flags = if (checked) wire.checked else 0, .row_start = f.row_start, .rows = f.rows, .nbytes = nbytes, .crc = crc });
         @memcpy(r.out.area[0..wire.header_bytes], &head);
         try r.out.publish(seq, wire.header_bytes + @as(usize, @intCast(nbytes)));
     }

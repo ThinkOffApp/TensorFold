@@ -77,6 +77,7 @@ pub const Remote = struct {
     client: *mailbox.Client,
     trigger: Trigger,
     model: []const u8,
+    protocol: u16 = 1, // 2 to take a producer's recurrent state (MKVH protocol 2); 1 refuses such an export
     busy: bool = false,
     next_id: u64 = 1,
     reason: decoder.Reason = .{},
@@ -105,7 +106,7 @@ pub const Remote = struct {
         var arena: std.heap.ArenaAllocator = .init(r.gpa);
         defer arena.deinit();
         const pass: decoder.Sink = .{ .ptr = sink.ptr, .put_fn = sink.put_fn };
-        const got = try decoder.pull(arena.allocator(), r.client, id, .{ .model = r.model, .tokens = tokens }, pass, &r.reason);
+        const got = try decoder.pull(arena.allocator(), r.client, id, .{ .model = r.model, .tokens = tokens, .protocol = r.protocol }, pass, &r.reason);
         if (got.manifest.first_token != 0) return error.PartialPrefix;
         sink.commit_fn(sink.ptr, o.upto, .remote);
     }

@@ -141,6 +141,105 @@ fn handoff(direct: bool) !void {
     try std.testing.expectEqual(@as(?producer.Entry, null), table.get(id));
 }
 
+/// Protocol 2: a recurrent layer's two parts (a recurrence and a convolution tail) beside an attention layer.
+const Recurrent = struct {
+    rec: [4 * 8 * 8 * 4]u8 = undefined,
+    conv: [3 * 40 * 2]u8 = undefined,
+    attn: [4 * 4 * 16 * 2]u8 = undefined,
+    attn_rows: [4]u64 = .{ 0, 1, 2, 3 },
+    part_bytes: [2][]const u8 = undefined,
+    parts: [2]manifest.Part = .{
+        .{ .name = "recurrence", .shape = &.{ 4, 8, 8 }, .dims = &.{ .head, .value, .key }, .dtype = .float32 },
+        .{ .name = "conv", .shape = &.{ 3, 40 }, .dims = &.{ .tap, .channel }, .dtype = .bfloat16 },
+    },
+    layers: [2]manifest.Layer = undefined,
+    sources: [2]frames.Source = undefined,
+    got: [3][]u8 = undefined,
+
+    fn fill(r: *Recurrent) void {
+        for (&r.rec, 0..) |*b, i| b.* = @truncate(i *% 31 +% 7);
+        for (&r.conv, 0..) |*b, i| b.* = @truncate(i *% 17 +% 3);
+        for (&r.attn, 0..) |*b, i| b.* = @truncate(i *% 13 +% 1);
+        r.part_bytes = .{ &r.rec, &r.conv };
+        r.layers = .{
+            .{ .index = 0, .kind = .recurrent, .shape = &.{}, .dims = &.{}, .dtype = .float32, .parts = &r.parts },
+            .{ .index = 3, .kind = .attention, .shape = &.{ 4, 4, 1, 16 }, .dims = &.{ .block, .head, .token, .head_dim }, .dtype = .bfloat16, .heads = 4, .total_heads = 4, .head_size = 16 },
+        };
+        r.sources = .{
+            .{ .bytes = &.{}, .shape = &.{}, .block_dim = 0, .elem = 1, .rows = &.{}, .parts = &r.part_bytes },
+            .{ .bytes = &r.attn, .shape = &.{ 4, 4, 1, 16 }, .block_dim = 0, .elem = 2, .rows = &r.attn_rows },
+        };
+    }
+
+    fn put(ptr: *anyopaque, layer: *const manifest.Layer, row_start: u64, rows: u64, bytes: []const u8) anyerror!void {
+        const r: *Recurrent = @ptrCast(@alignCast(ptr));
+        if (layer.kind == .recurrent) {
+            r.got[@intCast(row_start)] = try gpa.dupe(u8, bytes);
+            return;
+        }
+        if (row_start != 0 or rows != 4) return error.UnexpectedRows;
+        r.got[2] = try gpa.dupe(u8, bytes);
+    }
+};
+
+/// A protocol 2 export over the fake link, pulled by a decoder reading up to `protocol`.
+fn recurrentHandoff(protocol: u16) !void {
+    var link = try fabric.link_fake.Link.init(gpa, half, half, true, .immediate);
+    defer link.deinit();
+    link.up();
+    const mac = link.box(0);
+    const peer = link.box(1);
+    var r: Recurrent = .{};
+    r.fill();
+    var table: producer.Table = .{ .gpa = gpa, .ttl_ns = 60 * std.time.ns_per_s, .clock = clock };
+    defer table.deinit();
+    var p: Producer = .{ .service = mailbox.Service.init(&peer, fabric.words.native), .responder = undefined };
+    p.responder = .{ .gpa = gpa, .table = &table, .out = .{ .area = p.service.replyArea(), .ptr = &p, .publish_fn = Producer.publish }, .model = "org/model" };
+    defer p.responder.deinit();
+    const tokens = [_]u32{ 11, 12, 13, 14 };
+    const id: [16]u8 = @splat(0x22);
+    var exp: producer.Export = .{ .handoff = id, .tokens = &tokens, .first_token = 0, .tokens_per_row = 1, .layers = &r.layers, .sources = &r.sources };
+    defer gpa.free(exp.frames);
+    try std.testing.expectEqual(@as(u16, 2), exp.protocol());
+    try table.add(id, "req-r", .{ .ready = &exp });
+    var stop: std.atomic.Value(bool) = .init(false);
+    const daemons = try std.Thread.spawn(.{}, fabric.link_fake.Link.run, .{ &link, &stop });
+    const service = try std.Thread.spawn(.{}, Producer.run, .{&p});
+    defer {
+        stop.store(true, .release);
+        p.stop.store(true, .release);
+        daemons.join();
+        service.join();
+    }
+    var client = try mailbox.Client.init(&mac, fabric.words.native, 5 * std.time.ns_per_s);
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    var reason: decoder.Reason = .{};
+    r.got = .{ &.{}, &.{}, &.{} };
+    defer for (r.got) |g| if (g.len > 0) gpa.free(g);
+    const expect: decoder.Expect = .{ .model = "org/model", .tokens = &tokens, .protocol = protocol };
+    const sink: decoder.Sink = .{ .ptr = &r, .put_fn = Recurrent.put };
+    if (protocol < fabric.wire.recurrent_version) {
+        try std.testing.expectError(error.Protocol, decoder.pull(arena.allocator(), &client, id, expect, sink, &reason));
+        return;
+    }
+    const got = try decoder.pull(arena.allocator(), &client, id, expect, sink, &reason);
+    try std.testing.expectEqual(@as(u64, 3), got.frames); // two parts, then the attention rows in one frame
+    try std.testing.expectEqual(@as(u16, 2), got.manifest.protocol);
+    try std.testing.expectEqualSlices(u8, &r.rec, r.got[0]);
+    try std.testing.expectEqualSlices(u8, &r.conv, r.got[1]);
+    try std.testing.expectEqualSlices(u8, &r.attn, r.got[2]);
+    try std.testing.expectEqual(@as(?producer.Entry, null), table.get(id));
+}
+
+test "protocol 2: a recurrent layer's parts land whole, beside an attention layer's rows" {
+    try recurrentHandoff(fabric.wire.recurrent_version);
+}
+
+test "protocol 2: a protocol 1 decoder refuses the export by its header" {
+    try recurrentHandoff(fabric.wire.version);
+}
+
 test "a handoff waits for its export, then every frame lands byte for byte (direct replies)" {
     try handoff(true);
 }
