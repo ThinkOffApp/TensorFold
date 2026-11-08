@@ -103,7 +103,7 @@ pub fn body(msg: []const u8, h: Header) []const u8 {
 
 /// zlib's CRC-32, as the producer computes over each DATA payload.
 pub fn crc32(bytes: []const u8) u32 {
-    return std.hash.Crc32.hash(bytes);
+    return @import("crc32.zig").hash(bytes);
 }
 
 /// SHA-256 of the prompt's token IDs as little-endian uint32 values, in lowercase hex.
