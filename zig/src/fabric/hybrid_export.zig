@@ -145,6 +145,12 @@ pub const Landing = struct {
         d.landed += bytes.len;
     }
 
+    /// `put` as a decoder Sink's or a StateSink's put_fn, `ptr` being the landing.
+    pub fn putAny(ptr: *anyopaque, layer: *const manifest.Layer, row_start: u64, rows: u64, bytes: []const u8) anyerror!void {
+        const d: *Landing = @ptrCast(@alignCast(ptr));
+        return d.put(layer, row_start, rows, bytes);
+    }
+
     pub fn whole(d: *const Landing) bool {
         return d.landed == d.plan.g.bytes(d.plan.at);
     }

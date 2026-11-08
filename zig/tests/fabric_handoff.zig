@@ -240,6 +240,59 @@ test "protocol 2: a protocol 1 decoder refuses the export by its header" {
     try recurrentHandoff(fabric.wire.version);
 }
 
+test "protocol 2: a hybrid state crosses the link a part or a page row a frame, and lands byte for byte" {
+    const hx = fabric.hybrid_export;
+    const plan: hx.Plan = .{ // six linear and two attention layers; 2048 tokens in page rows of 16
+        .g = .{ .linear = 6, .attention = 2, .rec_bytes = 8 * 16 * 16 * 4, .conv_bytes = 3 * 96 * 2, .kv_heads = 4, .row_bytes = 256 * 2 },
+        .s = .{ .rec = .{ 8, 16, 16 }, .conv = .{ 3, 96 }, .head_dim = 256, .interval = 4 },
+        .at = 2048,
+        .block = 16,
+    };
+    // a page row is 64 KiB, so a 4 MiB reply half takes 63 of an attention layer's 128: 3 frames a layer
+    var link = try fabric.link_fake.Link.init(gpa, half, half, true, .immediate);
+    defer link.deinit();
+    link.up();
+    const mac = link.box(0);
+    const peer = link.box(1);
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const image = try a.alloc(u8, @intCast(plan.g.bytes(plan.at)));
+    for (image, 0..) |*b, i| b.* = @truncate(i *% 2654435761 >> 11);
+    const built = try hx.build(a, plan, image);
+    var table: producer.Table = .{ .gpa = gpa, .ttl_ns = 60 * std.time.ns_per_s, .clock = clock };
+    defer table.deinit();
+    var p: Producer = .{ .service = mailbox.Service.init(&peer, fabric.words.native), .responder = undefined };
+    p.responder = .{ .gpa = gpa, .table = &table, .out = .{ .area = p.service.replyArea(), .ptr = &p, .publish_fn = Producer.publish }, .model = "org/hybrid" };
+    defer p.responder.deinit();
+    var tokens: [2048]u32 = undefined;
+    for (&tokens, 0..) |*t, i| t.* = @intCast(1000 + i);
+    const id: [16]u8 = @splat(0x2b);
+    var exp: producer.Export = .{ .handoff = id, .tokens = &tokens, .first_token = 0, .tokens_per_row = plan.block, .layers = built.layers, .sources = built.sources };
+    defer gpa.free(exp.frames);
+    try table.add(id, "req-h", .{ .ready = &exp });
+    var stop: std.atomic.Value(bool) = .init(false);
+    const daemons = try std.Thread.spawn(.{}, fabric.link_fake.Link.run, .{ &link, &stop });
+    const service = try std.Thread.spawn(.{}, Producer.run, .{&p});
+    defer {
+        stop.store(true, .release);
+        p.stop.store(true, .release);
+        daemons.join();
+        service.join();
+    }
+    var client = try mailbox.Client.init(&mac, fabric.words.native, 5 * std.time.ns_per_s);
+    var reason: decoder.Reason = .{};
+    const landed = try a.alloc(u8, image.len);
+    @memset(landed, 0);
+    var landing: hx.Landing = .{ .plan = plan, .image = landed };
+    const expect: decoder.Expect = .{ .model = "org/hybrid", .tokens = &tokens, .protocol = fabric.wire.recurrent_version };
+    const got = try decoder.pull(a, &client, id, expect, .{ .ptr = &landing, .put_fn = hx.Landing.putAny }, &reason);
+    try std.testing.expectEqual(@as(u64, 6 * 2 + 2 * 3), got.frames);
+    try std.testing.expect(landing.whole());
+    try std.testing.expectEqualSlices(u8, image, landed);
+    try std.testing.expectEqual(@as(?producer.Entry, null), table.get(id));
+}
+
 test "a handoff waits for its export, then every frame lands byte for byte (direct replies)" {
     try handoff(true);
 }
