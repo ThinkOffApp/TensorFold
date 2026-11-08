@@ -100,6 +100,7 @@ const Setup = struct {
     handoff_len: usize = prompt_len, // the handoff's prompt length
     twin: ?usize = null, // this request repeats request 0's prompt
     twin_chunks: []const u32 = &.{}, // the twin's own chunk starts
+    remote_at: u32 = 0, // TF_PREFILL_KEEP: the system prompt kept this far as a remote state, as a pulled turn leaves it
 };
 
 const Run = struct {
@@ -124,6 +125,19 @@ fn promptOf(buf: *[prompt_len]u32, i: usize) []const u32 {
     return buf;
 }
 
+/// The system prompt's state at `at`, kept marked remote: the fake fills a stream that far and the store keeps it.
+fn keepRemote(target: *lanes.fake.Fake, store: *pc.Store, at: u32) !void {
+    var buf: [prompt_len]u32 = undefined;
+    const p = promptOf(&buf, 0);
+    var s = try lanes.Stream.init(gpa, .{ .id = "pulled", .prompt = p[0..at], .max_new = 1 });
+    defer s.deinit(gpa);
+    try target.backend().prefill(&s);
+    defer target.backend().release(&s);
+    store.keep_remote = true;
+    defer store.keep_remote = false;
+    try std.testing.expect(store.keep(p, at, &s, &.{}, &.{}));
+}
+
 /// Every request queued before the host starts, so they arrive together, then each answered in full.
 fn fanout(su: Setup, out: *Run) !void {
     var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
@@ -141,6 +155,8 @@ fn fanout(su: Setup, out: *Run) !void {
     if (su.wait_ms) |ms| host.prefix.ns = @as(i96, ms) * std.time.ns_per_ms;
     var exports: Exports = .{ .target = &target };
     if (su.handoff != null) host.exporter = .{ .ptr = &exports, .snapshots = store.family, .exported = Exports.exported, .failed = Exports.failed };
+    if (su.remote_at > 0) try keepRemote(&target, &store, su.remote_at);
+    host.keep_remote = su.remote_at > 0;
     const e = host.engine();
     var hook = su.hook;
     hook.engine = e;
@@ -194,6 +210,16 @@ test "prefix wait: requests on a system prompt another prompt is filling wait fo
     // off (TENSORFOLD_PREFIX_WAIT_MS=0): every prompt filling side by side computes the system prompt itself
     try std.testing.expectEqualSlices(?u32, &.{ 0, 0, 0, 0, 0 }, off.cached[0..5]);
     try std.testing.expectEqual(@as(u64, 0), off.waits);
+}
+
+test "prefix wait: with TF_PREFILL_KEEP a fill resumed from a kept remote state is waited for, and its waiters resume its cut" {
+    var r: Run = .{};
+    defer r.deinit();
+    try fanout(.{ .remote_at = 512 }, &r);
+    for (0..5) |i| try std.testing.expectEqual(Reason.length, r.reasons[i]);
+    // the first resumes the remote state and keeps the cut, remote too; three wait for it rather than fill beside it
+    try std.testing.expectEqualSlices(?u32, &.{ 512, cut, cut, cut, 0 }, r.cached[0..5]);
+    try std.testing.expectEqual(@as(u64, 3), r.waits);
 }
 
 test "prefix wait: a cancelled leader releases its waiter, which computes the prefix itself" {

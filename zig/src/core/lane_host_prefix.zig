@@ -47,7 +47,7 @@ pub fn waits(h: *LaneHost, job: *Job) bool {
     var best: Waiting = .{};
     for (h.filling.items) |l| { // admitted fills never wait, so the oldest always runs
         if (!l.started or l.prefilled != null or l.request.background or !keyed(l.request)) continue;
-        if (l.stream.reuse.remote) continue; // a remote prefix's stream keeps nothing (#1594 step 2b)
+        if (l.stream.reuse.pulled) continue; // a fresh pull keeps no mark, or only past its end (#1594 step 2b)
         for (l.marks) |at| {
             if (at <= l.reached or at < least or at <= best.at) continue;
             if (!exports.keeps(l, at)) continue; // a handoff's cut is kept only where its store resumes it
