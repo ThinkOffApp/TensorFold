@@ -107,10 +107,14 @@ pub fn policy() !ps.Policy {
     if (std.c.getenv("TF_PREFILL_MIN")) |v| p.min_prefix = std.fmt.parseInt(u64, std.mem.span(v), 10) catch return error.BadPrefillMin;
     if (std.c.getenv("TF_PREFILL_CHUNK")) |v| p.chunk = std.fmt.parseInt(u64, std.mem.span(v), 10) catch return error.BadPrefillChunk;
     if (p.chunk == 0 or p.chunk % block != 0) return error.BadPrefillChunk;
-    for ([_][*:0]const u8{ "TF_PREFILL_AHEAD", "TF_PREFILL_TIMEOUT_S" }) |name| {
-        const v = std.c.getenv(name) orelse continue;
+    const counts = [_]struct { name: [*:0]const u8, most: u64 }{
+        .{ .name = "TF_PREFILL_AHEAD", .most = std.math.maxInt(u64) },
+        .{ .name = "TF_PREFILL_TIMEOUT_S", .most = std.time.s_per_day }, // a day at most, far inside u64 nanoseconds
+    };
+    for (counts) |c| {
+        const v = std.c.getenv(c.name) orelse continue;
         const n = std.fmt.parseInt(u64, std.mem.span(v), 10) catch return error.BadPrefillCount; // read where used
-        if (n == 0) return error.BadPrefillCount; // no fill ahead, or no time for one: no pull would ever land
+        if (n == 0 or n > c.most) return error.BadPrefillCount; // 0 is no fill ahead or no time for one: no pull lands
     }
     return p;
 }
@@ -170,6 +174,19 @@ test "remote prefill's default policy: 4096 prompt tokens at least, in 512-token
     try std.testing.expectEqual(@as(u64, 512), p.chunk);
     try std.testing.expectEqual(@as(?u64, null), p.upto(4095, 0)); // a shorter prompt stays local
     try std.testing.expectEqual(@as(?u64, 4096), p.upto(4097, 0));
+}
+
+test "remote prefill takes a TF_PREFILL_TIMEOUT_S of a day at most, and any TF_PREFILL_AHEAD" {
+    const env = @import("sys").env;
+    if (std.c.getenv("TF_PREFILL_TIMEOUT_S") != null or std.c.getenv("TF_PREFILL_AHEAD") != null) return error.SkipZigTest;
+    _ = env.setenv("TF_PREFILL_TIMEOUT_S", "86401", 1);
+    defer _ = env.unsetenv("TF_PREFILL_TIMEOUT_S");
+    try std.testing.expectError(error.BadPrefillCount, policy());
+    _ = env.setenv("TF_PREFILL_TIMEOUT_S", "86400", 1);
+    _ = try policy();
+    _ = env.setenv("TF_PREFILL_AHEAD", "86401", 1); // any number of fills ahead
+    defer _ = env.unsetenv("TF_PREFILL_AHEAD");
+    _ = try policy();
 }
 
 test "remote prefill pulls by default only 4096 tokens or more past the prefix the Mac resumes" {
