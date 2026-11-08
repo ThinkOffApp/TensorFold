@@ -119,9 +119,11 @@ const Slow = struct {
 const Gate = struct {
     var open: std.atomic.Value(bool) = .init(false);
     var entered: std.atomic.Value(u32) = .init(0);
+    var at: std.atomic.Value(u32) = .init(0); // the state the latest read is of: its own file comes last in the plan
 
     fn reader(f: *prefetch.Prefetch, rd: *prefetch.Read) anyerror!void {
         _ = entered.fetchAdd(1, .acq_rel);
+        at.store(rd.plan.pieces[rd.plan.pieces.len - 1].at, .release);
         while (!open.load(.acquire)) std.Io.sleep(t.io, .fromMilliseconds(1), .awake) catch {};
         return prefetch.readFiles(f, rd);
     }
@@ -129,8 +131,8 @@ const Gate = struct {
 
 const Mode = enum { off, on, cancelled };
 
-/// What a returning turn saw: its reply, where it resumed, how it ended, and the reads ahead.
-const Seen = struct { tokens: [8]u32 = undefined, n: usize = 0, cached: ?u32 = null, reason: Reason = .failed, counts: prefetch.Counts = .{}, reads: u64 = 0 };
+/// What a returning turn saw: its reply, where it resumed, how it ended, and the reads ahead (`ahead`: the last one's).
+const Seen = struct { tokens: [8]u32 = undefined, n: usize = 0, cached: ?u32 = null, reason: Reason = .failed, counts: prefetch.Counts = .{}, reads: u64 = 0, ahead: u32 = 0 };
 
 fn prompt(n: usize) [700]u32 {
     var p: [700]u32 = undefined;
@@ -280,8 +282,12 @@ test "prefetch: a returning request cancelled while its read is under way ends o
     try t.expectEqual(@as(u64, 0), s.counts.used);
 }
 
-/// A producer over the fake backend and a rows store under `root`: handoff `p`, alone or queued behind another stream.
-fn producer(root: []const u8, p: *const [700]u32, behind: bool, exp: *Exp, seen: *Seen) !void {
+/// What a repeated handoff finds in RAM, read back before it is queued: its cut, the state below it, or neither.
+const Warm = enum { cut, below, cold };
+
+/// A producer over the fake backend and a rows store under `root`: handoff `p` alone, or queued with `warm` in RAM.
+fn producer(root: []const u8, p: *const [700]u32, warm: ?Warm, exp: *Exp, seen: *Seen) !void {
+    const behind = warm != null;
     var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
     defer cfg.deinit(gpa);
     var target: lanes.fake.Fake = .{ .gpa = gpa };
@@ -299,11 +305,13 @@ fn producer(root: []const u8, p: *const [700]u32, behind: bool, exp: *Exp, seen:
     if (f) |x| x.reader = Gate.reader;
     Gate.open.store(!behind, .release);
     Gate.entered.store(0, .release);
-    if (behind) { // the cut read back into RAM, as a recent pass leaves it; the state below it stays on disk only
-        const cut = lifetime.borrow(&store, p, 700, &.{}, &.{}) orelse return error.NoCutOnDisk;
-        try t.expectEqual(@as(u32, 699), cut.at);
-        store.release(cut);
-    }
+    Gate.at.store(0, .release);
+    if (warm) |w| if (w != .cold) { // a recent pass leaves its cut, a branch the state below; the other stays on disk
+        const key: []const u32 = if (w == .cut) p else p[0..699];
+        const e = lifetime.borrow(&store, key, 700, &.{}, &.{}) orelse return error.NotOnDisk;
+        try t.expectEqual(@as(u32, if (w == .cut) 699 else 600), e.at);
+        store.release(e);
+    };
     exp.fake = &target;
     var host = LaneHost.init(gpa, t.io, &core, .{ .lanes = 2 });
     host.cache = &store;
@@ -314,6 +322,7 @@ fn producer(root: []const u8, p: *const [700]u32, behind: bool, exp: *Exp, seen:
         if (behind) try queued(&host, p, seen) else try alone(&host, p);
     }
     seen.reads = rows.counts.reads;
+    seen.ahead = Gate.at.load(.acquire);
     if (f) |x| seen.counts = x.counts;
 }
 
@@ -368,22 +377,47 @@ fn queued(h: *LaneHost, p: *const [700]u32, seen: *Seen) !void {
     try t.expectEqual(Reason.stop, other.wait());
 }
 
-test "prefetch: a repeated handoff whose cut is kept in RAM reads ahead the state below the cut it resumes from" {
+/// A fresh root seeded by handoff `p` alone (600 and its cut, 699, on disk), then `p` again queued with `warm` in RAM.
+fn repeat(warm: Warm, p: *const [700]u32) !Seen {
     var buf: [128]u8 = undefined;
-    const root = try std.fmt.bufPrint(&buf, "/tmp/tf-host-fetch-handoff-{d}", .{platform.c.getpid()});
+    const root = try std.fmt.bufPrint(&buf, "/tmp/tf-host-fetch-handoff-{s}-{d}", .{ @tagName(warm), platform.c.getpid() });
     defer rmTree(root);
-    const p = prompt(3);
     var first: Exp = .{};
     var s: Seen = .{};
-    try producer(root, &p, false, &first, &s);
+    try producer(root, p, null, &first, &s);
     try t.expectEqual(@as(?usize, 699), first.tokens);
     var again: Exp = .{};
     s = .{};
-    try producer(root, &p, true, &again, &s);
+    try producer(root, p, warm, &again, &s);
     try t.expectEqual(Reason.length, s.reason);
     try t.expectEqual(@as(?usize, 699), again.tokens); // exported at its cut again
     try t.expectEqual(@as(?u32, 600), s.cached); // resumed below the cut, at its history's state
-    try t.expectEqual(@as(u64, 1), s.counts.made); // read ahead while the other stream decoded, not the cut in RAM
+    return s;
+}
+
+test "prefetch: a repeated handoff whose cut is kept in RAM reads ahead the state below the cut it resumes from" {
+    const p = prompt(3);
+    const s = try repeat(.cut, &p);
+    try t.expectEqual(@as(u32, 600), s.ahead); // read ahead while the other stream decoded, not the cut in RAM
+    try t.expectEqual(@as(u64, 1), s.counts.made);
     try t.expectEqual(@as(u64, 1), s.counts.used); // and the borrow below the cut took it, not a read at admission
     try t.expectEqual(@as(u64, 2), s.reads); // the cut's read into RAM, then the state below it
+}
+
+test "prefetch: a repeated handoff whose cut is on disk, the state below it in RAM, reads ahead the cut its lookup takes" {
+    const p = prompt(3);
+    const s = try repeat(.below, &p);
+    try t.expectEqual(@as(u32, 699), s.ahead); // the cut, which the admission lookup reads before below() lets it go
+    try t.expectEqual(@as(u64, 1), s.counts.made);
+    try t.expectEqual(@as(u64, 1), s.counts.used); // taken there: no read on the engine thread
+    try t.expectEqual(@as(u64, 2), s.reads); // the state below read into RAM, then the cut
+}
+
+test "prefetch: a repeated handoff with both states on disk reads its cut ahead and the shorter one at admission" {
+    const p = prompt(3);
+    const s = try repeat(.cold, &p);
+    try t.expectEqual(@as(u32, 699), s.ahead); // the larger read, off the engine thread
+    try t.expectEqual(@as(u64, 1), s.counts.made);
+    try t.expectEqual(@as(u64, 1), s.counts.used);
+    try t.expectEqual(@as(u64, 2), s.reads); // the cut, then the state below, which below() borrows at admission
 }
