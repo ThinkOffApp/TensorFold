@@ -36,16 +36,16 @@ test "a handoff is read from kv_transfer_params, and a malformed one is refused 
     try std.testing.expectEqual(@as(?Handoff, null), try parse(.{ .object = body }, &why));
     const params = try json.newObject(a);
     const handoff = try json.newObject(a);
-    try body.put("kv_transfer_params", .{ .object = params });
-    try params.put("mcdma_handoff", .{ .object = handoff });
-    try handoff.put("id", .{ .string = "00112233445566778899aabbccddeeff" });
-    try handoff.put("export_from", .{ .int = "0" });
+    try body.put(a, "kv_transfer_params", .{ .object = params });
+    try params.put(a, "mcdma_handoff", .{ .object = handoff });
+    try handoff.put(a, "id", .{ .string = "00112233445566778899aabbccddeeff" });
+    try handoff.put(a, "export_from", .{ .int = "0" });
     const got = (try parse(.{ .object = body }, &why)).?;
     try std.testing.expectEqual(@as(u8, 0xee), got.id[14]);
-    try handoff.put("id", .{ .string = "0011" });
+    try handoff.put(a, "id", .{ .string = "0011" });
     try std.testing.expectError(error.BadHandoff, parse(.{ .object = body }, &why));
     try std.testing.expectEqualStrings("kv_transfer_params.mcdma_handoff.id: expected 32 hex digits", why);
-    try handoff.put("id", .{ .string = "00112233445566778899aabbccddeeff" });
-    try handoff.put("export_from", .{ .int = "512" });
+    try handoff.put(a, "id", .{ .string = "00112233445566778899aabbccddeeff" });
+    try handoff.put(a, "export_from", .{ .int = "512" });
     try std.testing.expectError(error.BadHandoff, parse(.{ .object = body }, &why));
 }
