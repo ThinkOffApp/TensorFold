@@ -66,6 +66,7 @@ pub const LaneHost = struct {
     remote: ?remote.Source = null, // #1594 step 2b: prompt prefixes another machine fills (opt-in)
     exporter: ?@import("lane_export.zig").Exporter = null, // #1594 step 2b: a handoff request's prompt state, for another machine
     resume_peek: ?remote.ResumePeek = null, // the backend's own resume point, which a remote prefix must beat
+    keep_remote: bool = false, // TF_PREFILL_KEEP: states built on a remote prefix are kept, marked remote (#1594 step 2b)
     recall: ?*lanes.recall_store.Store = null, // Recall's record: drafts from earlier requests (lane_host_recall.zig)
     decoded_rows: bool = false, // the backend prefills Request.decode_spans with decoded rows' arithmetic, cache or not
     health: ?api.HealthSource = null,

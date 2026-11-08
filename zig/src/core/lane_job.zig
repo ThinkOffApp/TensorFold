@@ -64,7 +64,10 @@ pub const Job = struct {
         const job: *Job = @ptrCast(@alignCast(ptr));
         job.reached = @max(job.reached, at); // a request waiting for this cut goes on, whether the store keeps it or not
         job.reported(); // before a keep can evict the entry the pass restored
-        if (job.host.cache) |store| _ = store.keepBornFrame(job.cacheKey(), job.request.bornLen(), at, s, job.request.chunks, job.host.spans(job.request), job.request.images, job.frame);
+        const store = job.host.cache orelse return;
+        store.keep_remote = s.reuse.remote; // a state built on another machine's prefix is kept as remote
+        defer store.keep_remote = false;
+        _ = store.keepBornFrame(job.cacheKey(), job.request.bornLen(), at, s, job.request.chunks, job.host.spans(job.request), job.request.images, job.frame);
     }
 
     /// Report a restored prefix or its failed copy; an untouched prefix remains kept.

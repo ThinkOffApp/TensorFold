@@ -113,6 +113,10 @@ fn runAs(peer: *Peer, request: *const api.Request, exp: ?*Exp) !Seen {
 }
 
 fn runWith(peer: *Peer, request: *const api.Request, exp: ?*Exp, cache: ?*pc.Store) !Seen {
+    return runKeep(peer, request, exp, cache, false);
+}
+
+fn runKeep(peer: *Peer, request: *const api.Request, exp: ?*Exp, cache: ?*pc.Store, keep: bool) !Seen {
     var cfg = try lanes.Config.init(t.allocator, .{}, 1, 0);
     defer cfg.deinit(t.allocator);
     var seen: Seen = .{};
@@ -124,6 +128,7 @@ fn runWith(peer: *Peer, request: *const api.Request, exp: ?*Exp, cache: ?*pc.Sto
     var host = api.LaneHost.init(t.allocator, t.io, &core, .{ .lanes = 1 });
     host.remote = .{ .ptr = peer, .wants = Peer.wants, .fill = Peer.fill, .drop = Peer.drop, .running = &peer.running };
     if (cache) |store| host.cache = store;
+    host.keep_remote = keep;
     if (exp) |e| {
         e.fake = &fake;
         host.exporter = e.exporter();
@@ -411,4 +416,40 @@ test "handoff: the same handoff on a restarted producer reads the grid row befor
         try t.expectEqual(@as(u64, 2), disk.counts.reads);
         try unborrowed(&store);
     }
+}
+
+test "remote prefix kept (TF_PREFILL_KEEP): its pass keeps remote states, and the next turn resumes one with no fill" {
+    var none: u8 = 0;
+    var store = pc.Store.init(t.allocator, .{ .ptr = &none, .vtable = &.{ .bytes = Kept.bytes, .save = Kept.save, .restore = Kept.restore, .drop = Kept.drop } }, .{ .min_prompt = 0 }, 1 << 20);
+    defer store.deinit();
+    var peer: Peer = .{ .at = 4 };
+    defer peer.kept.deinit(t.allocator);
+    // a chat's history ends at 5: the store marks it, past the 4 pulled tokens
+    const first = try runKeep(&peer, &.{ .prompt = &six, .max_tokens = 2, .history_len = 5 }, null, &store, true);
+    try t.expect(first.restoring and first.remote and first.hooked);
+    try t.expectEqual(@as(u32, 4), first.at);
+    try t.expectEqual(@as(u32, 1), peer.fills);
+    try t.expectEqual(@as(u64, 1), store.counts.kept);
+    try t.expect(store.entries.items[0].remote and store.entries.items[0].at == 5); // kept past the prefix, marked remote
+    const next = try runKeep(&peer, &.{ .prompt = &six, .max_tokens = 2, .history_len = 5 }, null, &store, true);
+    try t.expect(next.restoring and next.remote); // a kept remote state: restored here, still remote
+    try t.expectEqual(@as(u32, 5), next.at);
+    try t.expectEqual(@as(u32, 1), peer.fills); // the cache's state beat a new fill
+}
+
+test "kept remote states: an exact keep hides the remote copy, and a remote keep rides an exact one" {
+    var none: u8 = 0;
+    var store = pc.Store.init(t.allocator, .{ .ptr = &none, .vtable = &.{ .bytes = Kept.bytes, .save = Kept.save, .restore = Kept.restore, .drop = Kept.drop } }, .{ .min_prompt = 0 }, 1 << 20);
+    defer store.deinit();
+    store.keep_remote = true;
+    try t.expect(store.keep(&six, 4, null, &.{}, &.{}));
+    store.keep_remote = false;
+    try t.expect(store.find(&six, &.{}, &.{}).?.remote);
+    try t.expect(store.keep(&six, 4, null, &.{}, &.{}));
+    try t.expect(!store.find(&six, &.{}, &.{}).?.remote); // the engine's own copy is the one a lookup finds
+    try t.expectEqual(@as(u64, 2), store.counts.kept);
+    store.keep_remote = true;
+    try t.expect(store.keep(&six, 4, null, &.{}, &.{})); // the exact copy serves a remote keep: nothing new
+    store.keep_remote = false;
+    try t.expectEqual(@as(u64, 2), store.counts.kept);
 }

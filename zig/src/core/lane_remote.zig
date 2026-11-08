@@ -146,7 +146,16 @@ pub fn use(h: *LaneHost, job: *Job, reuse: *lanes.stream.Reuse) void {
     if (reuse.saved != null and reuse.at >= f.at) return drop(job);
     if (job.entry) |e| if (h.cache) |store| store.release(e);
     job.entry = null;
-    reuse.* = .{ .saved = f.saved, .at = f.at, .remote = true }; // no marks and no hook: nothing after it is kept
+    // TF_PREFILL_KEEP: the cache's marks past the prefix keep remote states; else no marks and no hook, nothing kept
+    const marks = if (h.keep_remote) past(reuse.marks, f.at) else &.{};
+    reuse.* = .{ .saved = f.saved, .at = f.at, .remote = true, .pulled = true, .marks = marks, .hook = if (h.keep_remote) .{ .ptr = job, .at = Job.kept } else null };
+}
+
+/// The marks after `at`, ascending as the store plans them.
+fn past(marks: []const u32, at: u32) []const u32 {
+    var i: usize = 0;
+    while (i < marks.len and marks[i] <= at) i += 1;
+    return marks[i..];
 }
 
 /// The prefix is restored (or never will be): its storage goes, and a fill still running is left to its thread.
@@ -162,9 +171,9 @@ pub fn drop(job: *Job) void {
     if (job.host.remote) |source| source.drop(source.ptr, f.saved);
 }
 
-/// Prompt tokens the engine's own cache supplied: a remote prefix is not one.
+/// Prompt tokens the engine's own cache supplied: a prefix pulled just now is not one, a kept remote state is.
 pub fn cachedOwn(job: *const Job) u32 {
-    return if (job.stream.reuse.remote) 0 else job.stream.cached;
+    return if (job.stream.reuse.pulled) 0 else job.stream.cached;
 }
 
 /// The checkpoint's name both ends give a hand-off: its config and weight index, hashed; equal files, equal names.

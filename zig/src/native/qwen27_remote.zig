@@ -110,6 +110,14 @@ pub fn policy() !ps.Policy {
     return p;
 }
 
+/// TF_PREFILL_KEEP=1: states built on a pulled prefix are kept, marked remote, so a chat's next turn resumes here.
+pub fn keeps() !bool {
+    const v = std.mem.span(std.c.getenv("TF_PREFILL_KEEP") orelse return false);
+    if (std.mem.eql(u8, v, "1")) return true;
+    if (std.mem.eql(u8, v, "0")) return false;
+    return error.BadPrefillKeep;
+}
+
 /// A served link: the connect daemon's mailbox, its client, the HTTP trigger and the pull, as long as the server runs.
 pub const Link = struct {
     box: fabric.mailbox.Mailbox,

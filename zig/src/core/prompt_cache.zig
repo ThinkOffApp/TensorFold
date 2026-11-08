@@ -94,6 +94,7 @@ pub const Entry = struct {
     borrowers: u32 = 0, // outstanding lookups: released by resumed or release, never evicted while borrowed
     ext: std.ArrayList(*Entry) = .empty, // entries extending its tokens, born later (policy.link): `extended` reads them
     own: []u32 = &.{}, // the kept prompt's one copy, which `tokens` and at first `last` slice (empty: they own theirs)
+    remote: bool = false, // built on another machine's prefix (#1594 step 2b): a stream resuming it is remote too
 };
 pub const Counts = struct { hits: u64 = 0, misses: u64 = 0, kept: u64 = 0, evicted: u64 = 0, refused: u64 = 0, failed: u64 = 0 };
 pub const RestoreDetails = @import("prompt_cache_restore.zig").Details;
@@ -105,6 +106,7 @@ pub const Lookup = struct { entry: ?*Entry = null, marks: []const u32 = &.{} };
 pub const Store = struct {
     image_frame: u32 = 0,
     image_query: ?[]const @import("lanes").stream.Image = null, // scoped to one serial lookup or keep
+    keep_remote: bool = false, // scoped to one keep: the state was built on another machine's prefix (#1594 step 2b)
     restore_log: ?RestoreLog = null,
     gpa: Allocator,
     family: Snapshots,
@@ -162,7 +164,7 @@ pub const Store = struct {
         const e = s.entries.orderedRemove(i);
         policy.unlink(s, e);
         s.held -= e.bytes;
-        if (s.disk) |r| if (!e.expired) rows.write.evicted(r, e); // --spill-gib: stage an owned copy before the entry goes
+        if (s.disk) |r| if (!e.expired and !e.remote) rows.write.evicted(r, e); // --spill-gib: own states only
         s.free(e);
     }
 
@@ -461,10 +463,10 @@ pub const Store = struct {
         if (at == 0 or n > prompt.len or s.hold) return false;
         s.clock += 1;
         const shared = std.mem.indexOfScalar(u64, s.shared_keys.items, sharedKey(prompt[0..n])) != null;
-        for (s.entries.items) |e| if (!e.expired and e.at == at and std.mem.eql(u32, e.tokens, prompt[0..n]) and modes.equal(e.decode_spans, spans, at) and images.matches(s, e)) {
+        for (s.entries.items) |e| if (!e.expired and e.at == at and (!e.remote or s.keep_remote) and std.mem.eql(u32, e.tokens, prompt[0..n]) and modes.equal(e.decode_spans, spans, at) and images.matches(s, e)) {
             e.used = s.clock; // the same state again: no copy
             e.shared = e.shared or shared;
-            if (shared) learned.learn(s, e, starts);
+            if (shared and !e.remote) learned.learn(s, e, starts);
             return true;
         };
         const image_ids = images.prefix(s.gpa, s.image_query orelse &.{}, @intCast(n)) catch |err| return s.fail(at, err);
@@ -502,7 +504,7 @@ pub const Store = struct {
             return s.fail(at, err);
         };
         const charged = if (s.family.vtable.charged) |f| f(s.family.ptr, saved) else bytes;
-        e.* = .{ .tokens = last[0..n], .images = image_ids, .image_frame = s.image_frame, .decode_spans = decoded, .at = at, .saved = saved, .bytes = charged, .born = born, .used = s.clock, .last = last, .shared = shared, .own = last };
+        e.* = .{ .tokens = last[0..n], .images = image_ids, .image_frame = s.image_frame, .decode_spans = decoded, .at = at, .saved = saved, .bytes = charged, .born = born, .used = s.clock, .last = last, .shared = shared, .own = last, .remote = s.keep_remote };
         owns_decoded = false;
         owns_images = false;
         index.add(s, e) catch {
@@ -512,8 +514,9 @@ pub const Store = struct {
         policy.link(s, e);
         s.held += charged;
         s.counts.kept += 1;
-        if (shared) learned.learn(s, e, starts);
-        if (s.disk) |r| rows.write.queued(r, e, starts);
+        if (!e.remote) @import("prompt_cache_remote.zig").retireTwins(s, e); // the engine's own copy hides a remote one
+        if (shared and !e.remote) learned.learn(s, e, starts);
+        if (s.disk) |r| if (!e.remote) rows.write.queued(r, e, starts); // a remote state is never written to disk
         if (s.family.vtable.trim) |f| f(s.family.ptr, s.budget -| s.held); // spare storage only inside what the budget leaves
         return true;
     }

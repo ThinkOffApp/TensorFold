@@ -25,11 +25,11 @@ pub fn open(h: *LaneHost, job: *Job) bool {
             job.key[0] = 0x8000_0000 | @as(u32, @truncate(std.hash.Wyhash.hash(f, std.mem.asBytes(&job.key[0])) & 0x7fff_ffff));
         }
     };
-    if (h.cache) |store| if (!r.promptOnly() and r.prompt_logprobs == null and !r.untaught and !@import("lane_remote.zig").wins(h, job)) if (store.lookupUserFrame(h.gpa, job.cacheKey(), r.bornLen(), r.history_len, r.rewind_len, r.user_end, r.shared_prefixes, r.chunks, h.spans(r), r.images, job.frame)) |l| {
+    if (h.cache) |store| if (!r.promptOnly() and r.prompt_logprobs == null and !r.untaught and (h.keep_remote or !@import("lane_remote.zig").wins(h, job))) if (store.lookupUserFrame(h.gpa, job.cacheKey(), r.bornLen(), r.history_len, r.rewind_len, r.user_end, r.shared_prefixes, r.chunks, h.spans(r), r.images, job.frame)) |l| {
         job.entry = l.entry;
         job.kept0 = store.counts.kept;
         job.marks = l.marks;
-        reuse = .{ .saved = if (l.entry) |e| e.saved else null, .at = if (l.entry) |e| e.at else 0, .marks = l.marks, .hook = .{ .ptr = job, .at = Job.kept } };
+        reuse = .{ .saved = if (l.entry) |e| e.saved else null, .at = if (l.entry) |e| e.at else 0, .marks = l.marks, .hook = .{ .ptr = job, .at = Job.kept }, .remote = if (l.entry) |e| e.remote else false };
     } else |_| {};
     @import("lane_remote.zig").use(h, job, &reuse);
     const handoff = @import("lane_export.zig").exporting(h, job, &reuse);

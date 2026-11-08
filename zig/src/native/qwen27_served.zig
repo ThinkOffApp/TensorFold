@@ -84,9 +84,12 @@ pub const Host = struct {
 
     /// A finished reply's state stands where a prompt pass of prompt and reply would: keep it for the next turn.
     fn keepReply(ptr: *anyopaque, s: *lanes.Stream, slot: u32) void {
-        if (s.reuse.remote) return; // built on another machine's prefix: never kept as the engine's own (#1594 step 2b)
         const h = of(ptr);
-        if (h.cache) |*store| keepEnd(store, h.gpa, s, h.runner.offsets[slot]);
+        if (s.reuse.remote and !h.host.keep_remote) return; // built on another machine's prefix (#1594 step 2b)
+        const store = if (h.cache) |*c| c else return;
+        store.keep_remote = s.reuse.remote; // kept as remote: a turn resuming it is remote too
+        defer store.keep_remote = false;
+        keepEnd(store, h.gpa, s, h.runner.offsets[slot]);
     }
 
     /// A fallback never displaces a kept state or spends the room promised to this pass's later marks.
@@ -442,6 +445,11 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     };
     errdefer if (h.link) |l| l.stop(h.gpa);
     if (h.link) |l| h.host.remote = l.pull.source();
+    if (h.link != null) h.host.keep_remote = remote.keeps() catch |err| {
+        why.* = "TF_PREFILL_KEEP takes 1 (keep states built on a pulled prefix, marked remote) or 0";
+        return err;
+    };
+    if (h.host.keep_remote) std.log.info("remote prefill: states built on a pulled prefix are kept, marked remote (TF_PREFILL_KEEP=1)", .{});
     if (h.link != null) h.host.resume_peek = .{ .ctx = h.back, .at = slot_state.resumeAt };
     if (h.trace) |*t| t.enabled = true; // serving rounds count from here: measure() timed whole, unsplit buffers
     try h.host.start();
