@@ -60,11 +60,9 @@ pub const Host = struct {
     pub fn engine(h: *Host) api.Engine {
         return h.host.engine();
     }
-
     fn of(ptr: *anyopaque) *Host {
         return @ptrCast(@alignCast(ptr));
     }
-
     fn lone(ptr: *anyopaque, s: *lanes.Stream, hooks: api.LoneHooks) anyerror!bool {
         return of(ptr).back.lone(s, hooks);
     }
@@ -263,7 +261,7 @@ test "--prompt-cache-gib 40: a later 192k-token slot takes its room back from ke
     try std.testing.expectEqual(@as(usize, 1), fake.live);
 }
 
-test "a reply's end is born with its request's prompt (the history mark it kept outlives it), and is remote on a pulled prefix" {
+test "a reply's end is born with its request's prompt (the history mark it kept outlives it), and on a pulled prefix is kept only with TF_PREFILL_KEEP, marked remote" {
     const gpa = std.testing.allocator;
     const at: u32 = 5000; // a history mark at 5000 tokens, then a 7-token generation prompt and a 100-token reply
     var fake: FakeStates = .{};
@@ -285,8 +283,10 @@ test "a reply's end is born with its request's prompt (the history mark it kept 
     try std.testing.expectEqual(at, history.at);
     try std.testing.expectEqual(@as(u32, at + 7), store.entries.items[1].born);
     try std.testing.expectEqual(@as(usize, 2), fake.live);
-    s.reuse.remote = true; // a reply on a pulled prefix with TF_PREFILL_KEEP (#1594 step 2b): kept, marked remote
-    keepEnd(&store, true, gpa, &s, tokens.len - 1);
+    s.reuse.remote = true; // a reply on a pulled prefix (#1594 step 2b): with TF_PREFILL_KEEP off, never kept
+    keepEnd(&store, false, gpa, &s, tokens.len - 1);
+    try std.testing.expectEqual(@as(u64, 3), store.counts.kept);
+    keepEnd(&store, true, gpa, &s, tokens.len - 1); // with it on, kept and marked remote
     try std.testing.expect(store.entries.items[store.entries.items.len - 1].remote and !store.keep_remote);
 }
 
