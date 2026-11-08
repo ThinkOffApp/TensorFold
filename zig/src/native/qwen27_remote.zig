@@ -157,3 +157,12 @@ test "remote prefill refuses half its flags, other models and a drafter, by name
     try std.testing.expect(refusal(.{ .url = "http://gb10:8000", .link = "tf2b" }, true, true) != null);
     try std.testing.expectEqual(@as(?[]const u8, null), refusal(.{ .url = "http://gb10:8000", .link = "tf2b" }, true, false));
 }
+
+test "remote prefill's default policy: 4096 prompt tokens at least, in 512-token chunks" {
+    if (std.c.getenv("TF_PREFILL_MIN") != null or std.c.getenv("TF_PREFILL_CHUNK") != null) return error.SkipZigTest;
+    const p = try policy();
+    try std.testing.expectEqual(@as(u64, 4096), p.min_prefix);
+    try std.testing.expectEqual(@as(u64, 512), p.chunk);
+    try std.testing.expectEqual(@as(?u64, null), p.upto(4095, 0)); // a shorter prompt stays local
+    try std.testing.expectEqual(@as(?u64, 4096), p.upto(4097, 0));
+}
