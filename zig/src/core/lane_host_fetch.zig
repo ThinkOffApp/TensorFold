@@ -1,6 +1,7 @@
 //! A queued request's disk state read ahead while other streams run: it waits for the read, then restores from memory.
 const std = @import("std");
 const api = @import("engine_api.zig");
+const exports = @import("lane_export.zig");
 const LaneHost = @import("lane_host.zig").LaneHost;
 const Job = LaneHost.Job;
 const prefetch = @import("rows_prefetch.zig");
@@ -24,6 +25,7 @@ pub fn queue(h: *LaneHost) void {
         if (!f.on()) return; // TENSORFOLD_RESTORE_PREFETCH=0: nothing is looked up or read here
         write.reap(r);
         const q = job.request;
+        const key = exports.resumable(q); // a handoff's state below its cut, which lane_export.below borrows
         if (job.fetch.writing) |name| {
             if (r.worker) |w| if (w.names(name)) {
                 if (write.nowNs() - job.fetch.since < f.limits.wait_ns) continue;
@@ -32,13 +34,13 @@ pub fn queue(h: *LaneHost) void {
                 continue;
             };
             job.fetch.writing = null;
-        } else if (prefetch.writing(store, q.cacheKey(), q.chunks, h.spans(q))) |name| {
+        } else if (prefetch.writing(store, key, q.chunks, h.spans(q))) |name| {
             job.fetch.writing = name;
             job.fetch.since = write.nowNs();
             continue;
         }
         job.fetch.looked = true;
-        job.fetch.name = f.start(r, prefetch.choose(store, q.cacheKey(), q.chunks, h.spans(q)) orelse continue);
+        job.fetch.name = f.start(r, prefetch.choose(store, key, q.chunks, h.spans(q)) orelse continue);
     }
 }
 

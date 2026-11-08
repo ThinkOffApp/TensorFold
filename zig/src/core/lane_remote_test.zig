@@ -72,7 +72,7 @@ const Seen = struct {
 };
 
 /// A producer's exporter over the fake backend's copies: what it was handed, or why not.
-const Exp = struct {
+pub const Exp = struct {
     fake: *lanes.fake.Fake = undefined,
     fail: bool = false,
     calls: u32 = 0,
@@ -105,7 +105,7 @@ const Exp = struct {
         e.calls += 1;
         e.why = why;
     }
-    fn exporter(e: *Exp) exporting.Exporter {
+    pub fn exporter(e: *Exp) exporting.Exporter {
         return .{ .ptr = e, .snapshots = .{ .ptr = e, .vtable = &.{ .bytes = bytes, .save = save, .restore = restore, .drop = drop } }, .exported = exported, .failed = failed };
     }
 };

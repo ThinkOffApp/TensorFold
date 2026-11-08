@@ -6,6 +6,8 @@ const api = @import("engine_api.zig");
 const pc = @import("prompt_cache.zig");
 const prefetch = @import("rows_prefetch.zig");
 const fixture = @import("rows_async_fixture.zig");
+const lifetime = @import("prompt_cache_lifetime.zig");
+const Exp = @import("lane_remote_test.zig").Exp;
 const rmTree = @import("prompt_imprint_test.zig").rmTree;
 const LaneHost = api.LaneHost;
 const Reason = api.Reason;
@@ -276,4 +278,112 @@ test "prefetch: a returning request cancelled while its read is under way ends o
     try t.expectEqual(@as(u64, 1), s.counts.freed);
     try t.expectEqual(@as(u64, 1), s.counts.cancelled);
     try t.expectEqual(@as(u64, 0), s.counts.used);
+}
+
+/// A producer over the fake backend and a rows store under `root`: handoff `p`, alone or queued behind another stream.
+fn producer(root: []const u8, p: *const [700]u32, behind: bool, exp: *Exp, seen: *Seen) !void {
+    var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
+    defer cfg.deinit(gpa);
+    var target: lanes.fake.Fake = .{ .gpa = gpa };
+    defer target.deinit();
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(gpa, &cfg, target.backend(), clock.clock());
+    defer core.deinit();
+    const family: pc.Snapshots = .{ .ptr = &target, .vtable = &Snaps.vtable };
+    const rows = try pc.rows.Rows.open(gpa, family, .{ .root = root, .identity = 5, .cap = 1 << 30, .floor = 0, .daily = 1 << 30 });
+    defer rows.deinit();
+    var store = pc.Store.init(gpa, family, .{ .min_gap = 4, .min_prompt = 0 }, 1 << 20);
+    defer store.deinit();
+    store.disk = rows;
+    const f: ?*prefetch.Prefetch = if (behind) try prefetch.make(rows, t.io, .{ .reads = 1 }) else null;
+    if (f) |x| x.reader = Gate.reader;
+    Gate.open.store(!behind, .release);
+    Gate.entered.store(0, .release);
+    if (behind) { // the cut read back into RAM, as a recent pass leaves it; the state below it stays on disk only
+        const cut = lifetime.borrow(&store, p, 700, &.{}, &.{}) orelse return error.NoCutOnDisk;
+        try t.expectEqual(@as(u32, 699), cut.at);
+        store.release(cut);
+    }
+    exp.fake = &target;
+    var host = LaneHost.init(gpa, t.io, &core, .{ .lanes = 2 });
+    host.cache = &store;
+    host.exporter = exp.exporter();
+    try host.start();
+    {
+        defer host.stop();
+        if (behind) try queued(&host, p, seen) else try alone(&host, p);
+    }
+    seen.reads = rows.counts.reads;
+    if (f) |x| seen.counts = x.counts;
+}
+
+/// The handoff request: its prompt's last token stays pending, its history's state kept on the way to the cut.
+fn handoffOf(p: *const [700]u32) api.Request {
+    return .{ .prompt = p, .max_tokens = 1, .history_len = 600, .handoff = .{ .id = @splat(0x3b) } };
+}
+
+/// The first handoff: its pass keeps 600 and its cut, 699, both written to disk while the host idles.
+fn alone(h: *LaneHost, p: *const [700]u32) !void {
+    var b: Box = .{};
+    defer b.tokens.deinit(gpa);
+    const req = handoffOf(p);
+    try h.engine().submit(1, &req, .{ .ctx = &b, .event = Box.event });
+    try t.expectEqual(Reason.length, b.wait());
+    var waited: usize = 0;
+    while (waited < 500) : (waited += 1) {
+        var below: api.ImprintAsk = .{ .op = .where, .prompt = p[0..699] };
+        var cut: api.ImprintAsk = .{ .op = .where, .prompt = p };
+        try t.expect(h.engine().imprintAsk(&below) and h.engine().imprintAsk(&cut));
+        try t.expect(below.wait(t.io, 5000) and cut.wait(t.io, 5000));
+        if (below.out.disk == 600 and cut.out.disk == 699) return;
+        std.Io.sleep(t.io, .fromMilliseconds(10), .awake) catch {};
+    }
+    return error.NotWritten;
+}
+
+/// Another conversation decodes; the same handoff again is queued behind it, and waits for a read if one starts.
+fn queued(h: *LaneHost, p: *const [700]u32, seen: *Seen) !void {
+    const p2 = prompt(2);
+    var slow: Slow = .{};
+    var other: Box = .{};
+    defer other.tokens.deinit(gpa);
+    const req2: api.Request = .{ .prompt = &p2, .max_tokens = 4000, .stop = .{ .ctx = &slow, .check = Slow.check } };
+    try h.engine().submit(2, &req2, .{ .ctx = &other, .event = Box.event });
+    defer _ = other.wait();
+    defer slow.done.store(true, .release);
+    while (other.read().n == 0) std.Io.sleep(t.io, .fromMilliseconds(1), .awake) catch {};
+    var b: Box = .{};
+    defer b.tokens.deinit(gpa);
+    const req = handoffOf(p);
+    try h.engine().submit(3, &req, .{ .ctx = &b, .event = Box.event });
+    defer _ = b.wait();
+    defer Gate.open.store(true, .release);
+    const until = std.Io.Clock.awake.now(t.io).toNanoseconds() + 5 * std.time.ns_per_s;
+    while (Gate.entered.load(.acquire) == 0 and b.read().done == null and std.Io.Clock.awake.now(t.io).toNanoseconds() < until)
+        std.Io.sleep(t.io, .fromMilliseconds(1), .awake) catch {};
+    Gate.open.store(true, .release);
+    seen.reason = b.wait();
+    seen.cached = b.read().cached;
+    slow.done.store(true, .release);
+    try t.expectEqual(Reason.stop, other.wait());
+}
+
+test "prefetch: a repeated handoff whose cut is kept in RAM reads ahead the state below the cut it resumes from" {
+    var buf: [128]u8 = undefined;
+    const root = try std.fmt.bufPrint(&buf, "/tmp/tf-host-fetch-handoff-{d}", .{platform.c.getpid()});
+    defer rmTree(root);
+    const p = prompt(3);
+    var first: Exp = .{};
+    var s: Seen = .{};
+    try producer(root, &p, false, &first, &s);
+    try t.expectEqual(@as(?usize, 699), first.tokens);
+    var again: Exp = .{};
+    s = .{};
+    try producer(root, &p, true, &again, &s);
+    try t.expectEqual(Reason.length, s.reason);
+    try t.expectEqual(@as(?usize, 699), again.tokens); // exported at its cut again
+    try t.expectEqual(@as(?u32, 600), s.cached); // resumed below the cut, at its history's state
+    try t.expectEqual(@as(u64, 1), s.counts.made); // read ahead while the other stream decoded, not the cut in RAM
+    try t.expectEqual(@as(u64, 1), s.counts.used); // and the borrow below the cut took it, not a read at admission
+    try t.expectEqual(@as(u64, 2), s.reads); // the cut's read into RAM, then the state below it
 }
