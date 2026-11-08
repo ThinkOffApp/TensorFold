@@ -1,4 +1,4 @@
-//! MCDMA KV handoff protocols 1 and 2 (docs/kv-handoff.md): the 128-byte little-endian header before every message.
+//! KV handoff headers, protocol 1 (MCDMA's docs/kv-handoff.md) and 2 (#1594 step 2b): 128 little-endian bytes.
 const std = @import("std");
 
 pub const magic = "MKVH";

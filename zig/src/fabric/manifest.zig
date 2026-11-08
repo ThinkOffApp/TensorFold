@@ -1,4 +1,4 @@
-//! A handoff's manifest (kv-handoff.md): what each exported layer's page rows, or recurrent state, hold.
+//! A handoff's manifest: each layer's page rows (protocol 1, MCDMA's kv-handoff.md) or recurrent parts (protocol 2).
 const std = @import("std");
 const wire = @import("wire.zig");
 const Allocator = std.mem.Allocator;

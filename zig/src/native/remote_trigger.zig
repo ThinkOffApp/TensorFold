@@ -38,7 +38,7 @@ pub const Http = struct {
     }
 };
 
-/// TF_PREFILL_TIMEOUT_S, else 60 s and a second per 400 tokens: a GB10 prefilling at 1,000 tok/s at 64k, slower beyond.
+/// TF_PREFILL_TIMEOUT_S, else 60 s and a second per 400 tokens sent.
 fn seconds(tokens: usize) u64 {
     if (std.c.getenv("TF_PREFILL_TIMEOUT_S")) |v| return std.fmt.parseInt(u64, std.mem.span(v), 10) catch 60 + tokens / 400;
     return 60 + tokens / 400;

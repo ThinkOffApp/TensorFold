@@ -75,7 +75,7 @@ pub const Pull = struct {
         const p: *Pull = @ptrCast(@alignCast(ptr));
         if (p.closing.load(.acquire) or p.off.load(.acquire)) return false;
         const n = p.remote.policy.upto(len, cached) orelse return false;
-        return n - cached >= p.remote.policy.min_prefix; // a few hundred tokens past a cached or resumable prefix: local
+        return n - cached >= p.remote.policy.min_prefix; // a gain under TF_PREFILL_MIN past what resumes here stays local
     }
 
     fn fill(ptr: *anyopaque, prompt: []const u32, cached: u64) anyerror!?Filled {

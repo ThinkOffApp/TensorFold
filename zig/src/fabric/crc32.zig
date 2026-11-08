@@ -5,7 +5,7 @@ const builtin = @import("builtin");
 /// The target promises the instructions (an M-series Mac, a GB10 built for its own CPU): no check at run time.
 const promised = builtin.cpu.arch == .aarch64 and std.Target.aarch64.featureSetHas(builtin.cpu.features, .crc);
 
-/// Whether this CPU runs them: promised, or the kernel's HWCAP_CRC32 on aarch64 Linux; else the table code (0.5 GB/s).
+/// Whether this CPU runs them: promised, or the kernel's HWCAP_CRC32 on aarch64 Linux; else the table code.
 pub fn hardware() bool {
     if (promised) return true;
     if (comptime builtin.cpu.arch != .aarch64 or builtin.os.tag != .linux or !builtin.link_libc) return false;
