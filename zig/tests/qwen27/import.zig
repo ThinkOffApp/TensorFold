@@ -135,7 +135,7 @@ fn importState(a: std.mem.Allocator, io: std.Io, r: *q.decode_round.Runner, ids:
     try r.reset(0);
     try feed(r, ids, true);
     const want = try steps(a, r, n_steps, null); // the Mac's own greedy reply, every step's logits
-    // a blank state filled with the file's bytes (or pulled over the fake link), restored over a slot that held the prompt
+    // a blank state filled with the file's bytes (or pulled over the fake link), restored over the prompt's slot
     const st = if (link) try @import("import_link.zig").pulled(a, io, r, ids, header.at, body) else try q.snapshot.blank(a, r, null, header.at);
     defer q.snapshot.drop(a, st);
     if (!link) @memcpy(st.buf.contents()[0..body.len], body);
