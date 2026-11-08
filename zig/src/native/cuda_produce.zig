@@ -54,6 +54,8 @@ pub const Produce = struct {
         var since: u64 = 0;
         while (!p.serving.stop.load(.acquire)) {
             if (!p.attached(&since)) continue;
+            // a new connection's HELLO zeroes the request word and its client counts from 1 again
+            if (fabric.words.load(p.box.wordAt(fabric.layout.request_word)) == 0) p.serving.service.last = 0;
             p.table.expire() catch {};
             if (p.serving.service.next(std.time.ns_per_ms) catch return) |req|
                 p.serving.responder.handle(req.seq, req.payload) catch |err| p.serving.responder.failed(req.seq, err) catch return;
