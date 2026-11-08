@@ -152,7 +152,7 @@ pub fn use(h: *LaneHost, job: *Job, reuse: *lanes.stream.Reuse) void {
     reuse.* = .{ .saved = f.saved, .at = f.at, .remote = true, .pulled = true, .marks = marks, .hook = if (h.keep_remote) .{ .ptr = job, .at = Job.kept } else null };
 }
 
-/// A kept remote state that slot 0's own exact state reaches is let go: the pass resumes in slot 0 instead.
+/// A kept remote state slot 0's exact state reaches is let go; if a stream takes slot 0 first, the pass starts at 0.
 fn ownFirst(h: *LaneHost, job: *Job, reuse: *lanes.stream.Reuse) void {
     const p = h.resume_peek orelse return;
     if (p.at(p.ctx, job.request.prompt, h.spans(job.request)) < reuse.at) return;
