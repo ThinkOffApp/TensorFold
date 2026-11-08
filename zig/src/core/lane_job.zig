@@ -70,7 +70,7 @@ pub const Job = struct {
     /// Every keep of a job's stream: `s`'s state at `at`, kept as remote when it stands on a remote prefix.
     pub fn keep(job: *Job, s: *lanes.Stream, at: u32) void {
         const store = job.host.cache orelse return;
-        store.keep_remote = s.reuse.remote; // a state built on another machine's prefix is kept as remote
+        store.keep_remote = s.reuse.remote and !s.reuse_failed; // on another machine's prefix (a refused copy prefilled here)
         defer store.keep_remote = false;
         _ = store.keepBornFrame(job.cacheKey(), job.request.bornLen(), at, s, job.request.chunks, job.host.spans(job.request), job.request.images, job.frame);
     }

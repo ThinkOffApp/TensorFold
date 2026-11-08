@@ -104,7 +104,7 @@ pub const Host = struct {
 
 /// The reply's state at `stands` (its end or one short), born with its request's prompt: that request's marks stay.
 fn keepEnd(store: *pc.Store, keep_remote: bool, gpa: Allocator, s: *lanes.Stream, stands: u32) void {
-    if (s.reuse.remote and !keep_remote) return; // built on another machine's prefix: kept only with TF_PREFILL_KEEP
+    if (s.reuse.remote and !s.reuse_failed and !keep_remote) return; // on another machine's prefix: only with TF_PREFILL_KEEP
     const prompt: u32 = @intCast(s.prompt_len);
     const tokens = s.context.items;
     if (tokens.len == prompt or stands + 1 < tokens.len or stands > tokens.len) return;
@@ -114,7 +114,7 @@ fn keepEnd(store: *pc.Store, keep_remote: bool, gpa: Allocator, s: *lanes.Stream
     const keyed = if (s.key.len == prompt) gpa.dupe(u32, tokens) catch return else tokens;
     defer if (keyed.ptr != tokens.ptr) gpa.free(keyed);
     if (keyed.ptr != tokens.ptr) @memcpy(keyed[0..prompt], s.key);
-    store.keep_remote = s.reuse.remote; // kept as remote: a turn resuming it is remote too (#1594 step 2b)
+    store.keep_remote = s.reuse.remote and !s.reuse_failed; // a turn resuming it is remote too (#1594 step 2b)
     defer store.keep_remote = false;
     _ = store.keepBorn(keyed, prompt, stands, s, s.chunks, spans);
 }

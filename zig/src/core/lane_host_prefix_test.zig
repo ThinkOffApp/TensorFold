@@ -71,8 +71,13 @@ const Hook = struct {
     at: usize = 0,
     id: Id = 0, // 0: none
     sent: bool = false,
+    refuse_at: u32 = 0, // the restore of a state kept this far fails at the first chunk, as qwen27_slots.opening can
     fn call(ctx: *anyopaque, s: *lanes.Stream, chunk: usize) void {
         const c: *Hook = @ptrCast(@alignCast(ctx));
+        if (c.refuse_at > 0 and chunk == 0 and s.reuse.saved != null and s.reuse.at == c.refuse_at) {
+            s.reuse_failed = true; // the pass prefills from 0 with reuse.remote still set, as on the Mac
+            s.reuse.saved = null;
+        }
         if (c.slow_ms > 0) std.Io.sleep(std.testing.io, .fromMilliseconds(c.slow_ms), .awake) catch {};
         if (c.sent or c.id == 0 or chunk != c.at or s.prompt()[system_len] != 300) return;
         c.sent = true;
@@ -327,4 +332,14 @@ test "prefix wait: with an active share and the cap on, a waiter is released wit
     }
     try std.testing.expectEqual(@as(u64, 1), on.waits); // the leader's cut released the waiter
     try std.testing.expectEqual(@as(u64, 0), on.timeouts); // within the 25 ms bound, not at it
+}
+
+test "prefix wait: a kept remote leader whose copy is refused prefills from 0, so its cut is exact and so are its waiters" {
+    var r: Run = .{};
+    defer r.deinit();
+    try fanout(.{ .remote_at = 512, .hook = .{ .refuse_at = 512 } }, &r);
+    for (0..5) |i| try std.testing.expectEqual(Reason.length, r.reasons[i]);
+    try std.testing.expectEqualSlices(?u32, &.{ 0, cut, cut, cut, 0 }, r.cached[0..5]); // the leader ran from token 0
+    try std.testing.expectEqualSlices(?u32, &.{ 0, 0, 0, 0, 0 }, r.remote[0..5]); // so the cut it kept is the Mac's own
+    try std.testing.expectEqual(@as(u64, 3), r.waits);
 }
