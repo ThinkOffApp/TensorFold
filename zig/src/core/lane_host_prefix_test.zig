@@ -98,6 +98,8 @@ const Setup = struct {
     decode_share: ?f64 = null, // --decode-share: on a fake that opts in, it caps fill chunks at 512 rows
     handoff: ?usize = null, // this request is a handoff, exported at its prompt's last token
     handoff_len: usize = prompt_len, // the handoff's prompt length
+    twin: ?usize = null, // this request repeats request 0's prompt
+    twin_chunks: []const u32 = &.{}, // the twin's own chunk starts
 };
 
 const Run = struct {
@@ -152,6 +154,10 @@ fn fanout(su: Setup, out: *Run) !void {
         if (su.handoff) |k| if (k == i) {
             reqs[i].prompt = reqs[i].prompt[0..su.handoff_len];
             reqs[i].handoff = .{ .id = @splat(0x2b) };
+        };
+        if (su.twin) |k| if (k == i) {
+            reqs[i].prompt = reqs[0].prompt;
+            reqs[i].chunks = su.twin_chunks;
         };
         try e.submit(@intCast(i + 1), &reqs[i], .{ .ctx = &out.boxes[i], .event = Box.event });
     }
@@ -227,7 +233,17 @@ test "prefix wait: a handoff's fill leads the wait for the shared cut it keeps b
     for (0..5) |i| try std.testing.expectEqual(Reason.length, r.reasons[i]);
     try std.testing.expectEqualSlices(?u32, &.{ 0, cut, cut, cut, 0 }, r.cached[0..5]);
     try std.testing.expectEqual(@as(u64, 3), r.waits);
-    try std.testing.expectEqual(@as(?usize, prompt_len - 1), r.exported); // its own cut, off the grid: never waited for
+    try std.testing.expectEqual(@as(?usize, prompt_len - 1), r.exported); // and it still exports at its own cut
+}
+
+test "prefix wait: a request whose own chunks start at a handoff's off-grid cut does not wait for it, as the handoff never keeps it" {
+    var r: Run = .{};
+    defer r.deinit();
+    const starts = [_]u32{prompt_len - 1}; // the handoff's cut: a start for its twin, off the leader's 16-row grid
+    try fanout(.{ .requests = 2, .handoff = 0, .twin = 1, .twin_chunks = &starts }, &r);
+    for (0..2) |i| try std.testing.expectEqual(Reason.length, r.reasons[i]);
+    try std.testing.expectEqual(@as(u64, 0), r.waits);
+    try std.testing.expectEqual(@as(?usize, prompt_len - 1), r.exported);
 }
 
 test "prefix wait: a handoff waits for no cut at or past its own, which it could not resume and still export" {
