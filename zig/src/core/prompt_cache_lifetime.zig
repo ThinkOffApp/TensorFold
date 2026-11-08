@@ -29,7 +29,7 @@ pub fn release(s: *pc.Store, e: *pc.Entry) void {
 /// The longest state `prompt` resumes, in RAM or on disk as a lookup's, borrowed: resumed or release reports it.
 pub fn borrow(s: *pc.Store, prompt: []const u32, born: u32, starts: []const u32, spans: []const modes.Span) ?*pc.Entry {
     const ram = s.find(prompt, starts, spans);
-    const e = pc.rows.read.recall(s, prompt, born, starts, spans, s.recall(prompt, born, starts, spans, ram)) orelse return null;
+    const e = pc.rows.read.recall(s, prompt, born, starts, spans, @import("prompt_cache_recall.zig").recall(s, prompt, born, starts, spans, ram)) orelse return null;
     e.borrowers += 1;
     return e;
 }
