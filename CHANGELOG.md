@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Ling on CPU: a checked reader for the Ling-3.0-tiny GGUF (bailingmoe3) with exact Q4_K, Q6_K and Q5_0 decode and row projections; each projection equals the scalar reference bit for bit at 1 to 8 threads, under `zig build test-ling-cpu-host` (13 tests).
+
 - CUDA: the Windows Qwen3.5 diagnostic build compiles again, with named refusals where a POSIX stage or pipe is needed; 5/5 Windows GNU cross-build steps pass (#4112, refs #4105). Thanks to @AIFlowML.
 
 - Tests: the serve-config fixtures no longer depend on a group-friendly umask, while the permission refusals stay; 39/39 host tests pass under umask 002 and 022 on Linux and macOS (#4115, fixes #4113). Thanks to @AIFlowML.
