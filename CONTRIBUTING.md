@@ -107,6 +107,14 @@ The default graph omits HIP. Enabling it does not select another backend or chan
 The HIP backend uses the same shared core and serving contracts. Device qualification remains specific to its
 checkpoint, compiler, runtime and architecture; a host build does not establish those receipts.
 
+CUDA on a macOS target is an explicit opt-in too: `-Dnvcc` or `-Dfatbins` builds the CUDA graph (`tensorfold`, `tf-cuda-test`)
+in place of the Metal one, for an NVIDIA card reached through a user-space driver; without them a macOS build is unchanged.
+The runtime loads the driver as `libcuda.so.1` from an absolute folder in `DYLD_LIBRARY_PATH`.
+
+```sh
+zig build -Dfatbins=DIR -Dcontract-controls=DIR/contract_controls.fatbin   # zig-out/bin/tf-cuda-test
+```
+
 Linux release builds use the CUDA backend and qualified GPU kernel assets.
 Release archives include the native executable, runtime assets and license notices.
 [Packaging](packaging/README.md) lists the flat fatbin set and optional captured CUDA files required by `dist`.

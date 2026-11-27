@@ -25,8 +25,8 @@ pub fn cuda(b: *std.Build) Cuda {
     const native_help = "prompt16/qmmf FP4 and fp8_experts tiles decode natively (PTX ISA 9.2: nvcc 13.2+, sm_120a+)";
     const strip_help = "No debug info in the CUDA executables: no build machine paths leave with them";
     return .{
-        .nvcc = b.option([]const u8, "nvcc", "nvcc (or a wrapper) that builds the CUDA kernel fatbins"),
-        .fatbins = b.option([]const u8, "fatbins", "absolute directory of prebuilt <name>.fatbin files to embed"),
+        .nvcc = b.option([]const u8, "nvcc", "nvcc (or a wrapper) that builds the CUDA kernel fatbins (on macOS: CUDA, not Metal)"),
+        .fatbins = b.option([]const u8, "fatbins", "absolute directory of prebuilt <name>.fatbin files to embed (on macOS: CUDA, not Metal)"),
         .sms = b.option([]const u8, "sm", sm_help) orelse "121",
         .strip = b.option(bool, "strip", strip_help) orelse false,
         .test_dump = b.option(bool, "cuda-test-dump", "Compile test-only CUDA byte records") orelse false,
