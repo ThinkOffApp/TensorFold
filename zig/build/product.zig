@@ -85,7 +85,7 @@ fn refusal(b: *std.Build, name: []const u8, gpu: ?Gpu, o: Options) ?[]const u8 {
                 if (b.user_input_options.contains(option)) return b.fmt("-D{s}: -Dgpu={s} builds CUDA, where the HIP options do not apply", .{ option, name });
             }
             if ((o.nvcc == null) == (o.prebuilt == null)) return b.fmt("-Dgpu={s} needs exactly one of -Dnvcc and -Dfatbins", .{name});
-            if (os != .linux and os != .windows) return b.fmt("-Dgpu={s}: CUDA servers build for Linux and Windows targets", .{name});
+            if (os != .linux and os != .windows and os != .macos) return b.fmt("-Dgpu={s}: CUDA servers build for Linux, Windows and macOS targets", .{name});
         },
         .hip => {
             for ([_][]const u8{ "nvcc", "fatbins" }) |option| {
