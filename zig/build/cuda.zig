@@ -81,15 +81,14 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
         for (kernels, images) |k, image| if (image) |file| if (std.mem.startsWith(u8, k.name, "glm_") or std.mem.eql(u8, k.name, "qmmf") or std.mem.eql(u8, k.name, "qwen35")) check.addFileArg(file);
         b.step("check-pdl-loads", "No global read before a dependent launch's wait in the GLM images, qwen35 glue and qmmf (needs -Dnvcc)").dependOn(&check.step);
     }
-    // MiniMax H3's kernel image: its library and the contract's runner take it
-    const h3_image = if (nvcc) |tool| fatbin(b, tool, version orelse blk: {
-        const run = b.addSystemCommand(&.{ tool, "--version" });
-        run.has_side_effects = true;
-        break :blk run.captureStdOut(.{});
-    }, .{ .name = "h3", .flags = &.{"-O3"} }, sms) else null;
+    // MiniMax H3's kernel image: its library and the contract's runner take it, prebuilt from -Dfatbins like the rest
+    const h3_image = if (prebuilt) |dir| prebuiltImage(b, dir, "h3") else if (nvcc) |tool| fatbin(b, tool, version.?, .{ .name = "h3", .flags = &.{"-O3"} }, sms) else null;
     @import("h3_host.zig").library(b, target, optimize, h3_image);
     // MiniMax-H3-Image's decoder and prompt kernel images, built to the served flags, for the contract
-    const h3_image_fatbins: [2]?std.Build.LazyPath = if (nvcc) |tool| .{
+    const h3_image_fatbins: [2]?std.Build.LazyPath = if (prebuilt) |dir| .{
+        prebuiltImage(b, dir, "h3_image_decoder"),
+        prebuiltImage(b, dir, "h3_image_prompt"),
+    } else if (nvcc) |tool| .{
         fatbin(b, tool, version.?, .{ .name = "h3_image_decoder", .flags = &.{ "-O3", "--fmad=false" }, .min_sm = 80 }, sms),
         fatbin(b, tool, version.?, .{ .name = "h3_image_prompt", .flags = &.{"-O3"}, .min_sm = 80 }, sms),
     } else .{ null, null };
@@ -188,6 +187,11 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     b.step("drama3-generate", "Drama generation and replay controls on CUDA").dependOn(&b.addInstallArtifact(d3_exe, .{}).step);
     @import("zonos3.zig").install(b, target, optimize, cuda, mods.core, mods.lanes);
 }
+/// `<name>.fatbin` in the -Dfatbins directory.
+fn prebuiltImage(b: *std.Build, dir: []const u8, name: []const u8) std.Build.LazyPath {
+    return b.graph.cwdRelativePath(b.pathJoin(&.{ dir, b.fmt("{s}.fatbin", .{name}) }));
+}
+
 /// The Kolibri-1 CUDA family over the runtime, the core and the lane core.
 const kolibri1Module = @import("kolibri.zig").module;
 

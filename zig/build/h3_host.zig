@@ -80,7 +80,7 @@ fn module(b: *std.Build, target: std.Build.ResolvedTarget, cuda: *std.Build.Modu
 pub fn library(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, h3_image: ?std.Build.LazyPath) void {
     const step = b.step("tf-h3", "libtf_h3.so: MiniMax H3 / FastH3's transformer blocks on CUDA in bf16");
     const image = h3_image orelse {
-        step.dependOn(&b.addFail("tf-h3 needs -Dnvcc").step);
+        step.dependOn(&b.addFail("tf-h3 needs -Dnvcc or -Dfatbins").step);
         return;
     };
     const cuda = @import("cuda.zig").runtime(b, target, optimize, &.{});
