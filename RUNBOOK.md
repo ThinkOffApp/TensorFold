@@ -268,6 +268,7 @@ zig build -Dgpu=gfx1201 -Dhipcc=/opt/rocm/core/bin/hipcc          # zig-out/nati
 - The server refuses a GPU of another architecture at startup and names the `-Dgpu` that fits it (HIP already refuses one at device open).
 - CUDA needs `-Dnvcc`, or `-Dfatbins` with prebuilt images; each prebuilt image must hold exactly the one SASS profile its kernel needs on that GPU. `-Dstrip=false` keeps debug info.
 - A CUDA `-Dgpu` builds for Linux, Windows and macOS targets; on macOS the server loads `libcuda.so.1` from `DYLD_LIBRARY_PATH`, for a card reached through a user-space driver.
+- qmmf uses thread-block cluster tiles only where the driver reports cluster launch (`CU_DEVICE_ATTRIBUTE_CLUSTER_LAUNCH`); a driver that reports none, or cannot answer, gets the split-K reduce path. NVIDIA's driver reports it on sm_90 and later.
 - The build offers no other step: tests, tools and `grammar` need the development build (no `-Dgpu`). Structured output needs `libtfgrammar` in the server's `../lib` (release archive `lib/`, or `zig build grammar -Dxgrammar=DIR`, which installs `native/lib`; copy it to `native-hip/lib` for HIP).
 
 Measured on 2026-11-02 (aarch64 for CUDA, x86_64 for HIP), every model family in every server:
