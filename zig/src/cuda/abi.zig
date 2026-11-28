@@ -41,6 +41,7 @@ pub const DeviceAttribute = enum(c_int) {
     max_shared_memory_per_block_optin = 97,
     virtual_memory_management_supported = 102,
     gpu_direct_rdma_with_cuda_vmm_supported = 110,
+    cluster_launch = 120,
 };
 
 pub const FunctionAttribute = enum(c_int) {

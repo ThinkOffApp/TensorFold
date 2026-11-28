@@ -195,7 +195,7 @@ pub const Lane = struct {
     prompt: ?[2][2]Function = null, // Out, then plain / fused; loadPrompt() fills it on sm_12x
     prompt_k32: ?[2]Function = null, // Out; unsplit BF16 prompt calls, loadPrompt() fills it on sm_12x
     prompt_sms: usize = 0, // the device's SMs: the tile runs when its blocks fill more than half of them
-    clusters: bool, // sm_90 on: slices meet in a cluster's shared memory
+    clusters: bool, // sm_90 on, when the driver launches clusters: slices meet in a cluster's shared memory
     pdl: bool = false, // decode launches dependent (qmmf_kernel waits after its weight loads); weights fixed after load
 
     pub fn load(d: *const Driver, capability_major: u32) !Lane {
@@ -208,7 +208,7 @@ pub const Lane = struct {
             .f32_fns = undefined,
             .reduce = undefined,
             .half = undefined,
-            .clusters = capability_major >= 9,
+            .clusters = capability_major >= 9 and d.clusterLaunch(),
         };
         inline for (modes, 0..) |mode, mi| {
             l.fns[mi] = try loadTiles(mod, mode, false);

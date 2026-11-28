@@ -144,6 +144,17 @@ pub const Driver = struct {
         return @intCast(10 * major + minor);
     }
 
+    /// Whether the current device's driver launches thread-block clusters (CU_DEVICE_ATTRIBUTE_CLUSTER_LAUNCH).
+    /// NVIDIA's driver answers 1 on sm_90 and later. A driver that cannot answer, such as a translation layer on a
+    /// host without cluster launch, counts as no, so callers take their non-cluster path instead of a refused launch.
+    pub fn clusterLaunch(self: *const Driver) bool {
+        var dev: abi.Device = 0;
+        if (self.api.cuCtxGetDevice(&dev) != abi.success) return false;
+        var v: c_int = 0;
+        if (self.api.cuDeviceGetAttribute(&v, .cluster_launch, dev) != abi.success) return false;
+        return v != 0;
+    }
+
     /// Device `ordinal`'s name ("NVIDIA GB10"), read without making a context.
     pub fn deviceName(self: *const Driver, ordinal: c_int, buf: []u8) Error![]const u8 {
         if (buf.len < 2) return error.Invalid;
